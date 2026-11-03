@@ -1,0 +1,11 @@
+{
+  "expo": {
+    "name": "Team Memory",
+    "slug": "team-memory",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {"supportsTablet": true},
+    "android": {"package": "com.example.teammemory"}
+  }
+}

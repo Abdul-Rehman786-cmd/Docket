@@ -1,0 +1,74 @@
+# Team Memory — Clean Foundation
+
+A clean project scaffold for **FastAPI + Supabase + React Native (Expo)**. No messaging agent, listener, bot, external connector, or inherited script is present.
+
+## Structure
+- `architecture.md`: design and boundaries.
+- `AGENTS.md`: mandatory AI development and security rules.
+- `backend/`: FastAPI MVC-inspired layers and tests.
+- `supabase/migrations/`: ALL versioned SQL schema migrations.
+- `mobile/`: Expo TypeScript starter screen (backend health-check only).
+
+## 1. Backend setup (Windows PowerShell)
+```powershell
+cd backend
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+# Edit backend/.env with private ADMIN_API_TOKEN and optional Supabase credentials.
+uvicorn app.main:app --reload
+```
+Open `http://127.0.0.1:8000/docs` and test `GET /health`. For protected read endpoints, supply the `X-Admin-Token` header. **This admin token is for local/server-side testing only, never for mobile.**
+
+Run tests:
+```powershell
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+## 2. Supabase
+Review `supabase/migrations/20261104000100_initial_schema.sql`. From the **repository root**:
+```powershell
+npx supabase login
+npx supabase link --project-ref YOUR_PROJECT_REF
+npx supabase db push
+```
+`supabase db push` changes the linked remote database: get approval and confirm the target project first. Put `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` only in `backend/.env`; never in mobile.
+
+## 3. Mobile (Expo)
+Use Node.js 20.19.4 or newer and npm. The mobile dependencies follow the [official Expo SDK 54 TypeScript template](https://github.com/expo/expo/blob/sdk-54/templates/expo-template-blank-typescript/package.json): Expo 54, React Native 0.81.5, React 19.1.0, and `expo-status-bar` 3.0.9. See the [SDK 54 release notes](https://expo.dev/changelog/sdk-54) for platform and tool requirements. Use an Expo Go build compatible with SDK 54 or a matching development build.
+
+From the repository root:
+```powershell
+cd mobile
+npm ci
+Copy-Item .env.example .env
+# Edit mobile/.env with a PUBLIC API URL only
+npx expo install --check
+npx expo-doctor
+npx tsc --noEmit
+npx expo start
+```
+`npm ci` installs the exact versions in `package-lock.json` and replaces any existing `node_modules`. Registry access is required for packages missing from the local npm cache. Keep the lockfile with `package.json` so installs remain reproducible. If Metro still has stale cached files after reinstalling, start with `npx expo start --clear`.
+
+For dependency updates, use `npx expo install <package>` or `npx expo install --fix`, then repeat the checks above. Review `npm audit` separately; do not force audit upgrades across Expo SDK versions. Expo's CLI and Metro must come from the same supported dependency set: mixing an older Expo CLI with newer Metro can cause `ERR_PACKAGE_PATH_NOT_EXPORTED` for `metro/src/lib/TerminalReporter`. See [Expo's upgrade guide](https://docs.expo.dev/workflow/upgrading-expo-sdk-walkthrough/).
+
+A physical phone cannot reach the PC backend using `localhost`; use the PC's local network IP and allow the appropriate firewall access. The provided screen only calls the public health endpoint; private data access requires a real user-auth flow first.
+
+## 4. Codex / MCP
+Codex uses `AGENTS.md` automatically when operating inside this project. Documentation MCPs can help confirm current FastAPI, Supabase and Expo APIs, but connecting a documentation MCP does not grant access to running services. You can start Codex from this folder using `codex`.
+
+Suggested first Codex prompt:
+> Read AGENTS.md and architecture.md. Review the current project without introducing any external messaging integrations. Verify the MVC separation, security rules, environment files, migration placement, and tests. Report specific issues before changing any files.
+
+## 5. Before every push
+```powershell
+git status --short
+git check-ignore backend/.env mobile/.env
+git diff --cached --name-only
+```
+The two `.env` files should be reported as ignored when they exist. Inspect staged contents and never force-push. If any credential was previously committed, revoke/rotate it; `.gitignore` alone cannot remove history.
+
+## Current limits
+Backend and UI are scaffolds. Supabase credentials are not included, database migrations have not been applied, mobile private data authentication is not implemented, and external integrations are intentionally absent.

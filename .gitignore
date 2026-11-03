@@ -1,0 +1,26 @@
+# Real environment files are NEVER committed. Examples are intentionally allowed.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+# Local credentials and private keys
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
+# Python, Node, IDE
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+.expo/
+dist/
+build/
+coverage/
+.DS_Store
+.vscode/
