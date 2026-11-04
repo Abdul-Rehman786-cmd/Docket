@@ -10,7 +10,7 @@ router = APIRouter(prefix="/messages", tags=["messages"], dependencies=[Depends(
 
 @router.post("", response_model=MessageReceipt)
 def ingest_message(message: IncomingMessage, request: Request) -> MessageReceipt:
-    """Acknowledge delivery and retain a redacted preview; no durable storage or extraction."""
+    """Acknowledge delivery, persist to Supabase when configured, and retain a redacted preview."""
     return receive_message(message, get_settings(), request.app.state.message_receipts)
 
 

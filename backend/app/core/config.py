@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     log_discord_messages: bool = False
 
     @property
+    def supabase_configured(self) -> bool:
+        return bool(self.supabase_url.strip() and self.supabase_service_role_key.strip())
+
+    @property
     def listener_agent_id(self) -> str:
         return self.switch_requester_agent_id or self.switch_agent_id
 

@@ -1,4 +1,8 @@
-from app.repositories.record_repository import list_records
+from app.repositories.record_repository import check_database_connection, list_records
+
+
+def get_database_status() -> dict[str, str]:
+    return check_database_connection()
 
 
 def get_commitments() -> list[dict]:
@@ -7,3 +11,7 @@ def get_commitments() -> list[dict]:
 
 def get_decisions() -> list[dict]:
     return list_records("decisions")
+
+
+def get_stored_messages() -> list[dict]:
+    return list_records("messages")

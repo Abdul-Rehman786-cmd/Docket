@@ -7,6 +7,10 @@ from pydantic import BaseModel, ConfigDict
 ApprovalStatus = Literal["pending", "approved", "rejected"]
 
 
+class DatabaseStatus(BaseModel):
+    status: Literal["connected"]
+
+
 class Commitment(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: UUID
@@ -22,4 +26,17 @@ class Decision(BaseModel):
     id: UUID
     summary: str
     approval_status: ApprovalStatus
+    created_at: datetime
+
+
+class StoredMessage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: UUID
+    tenant_id: UUID
+    room_id: UUID
+    switch_message_id: str
+    author_name: str | None = None
+    body: str
+    occurred_at: datetime
+    extraction_status: str
     created_at: datetime

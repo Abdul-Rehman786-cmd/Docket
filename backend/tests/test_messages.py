@@ -1,9 +1,12 @@
 import logging
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.config import get_settings
 from app.main import app
+from app.repositories import record_repository
 
 client = TestClient(app)
 HEADERS = {"X-Ingest-Token": "test-ingest-token"}
@@ -78,8 +81,6 @@ def test_validation_never_echoes_invalid_message_input(updates):
 
 
 def test_missing_receiver_configuration_fails_closed(monkeypatch):
-    from app.core.config import get_settings
-
     monkeypatch.setenv("SWITCH_ROOM_IDS", "")
     get_settings.cache_clear()
     response = client.post("/messages", headers=HEADERS, json=payload())
@@ -87,16 +88,12 @@ def test_missing_receiver_configuration_fails_closed(monkeypatch):
 
 
 def test_missing_ingest_token_cannot_authenticate(monkeypatch):
-    from app.core.config import get_settings
-
     monkeypatch.setenv("SWITCH_INGEST_TOKEN", "")
     get_settings.cache_clear()
     assert client.post("/messages", headers=HEADERS, json=payload()).status_code == 401
 
 
 def test_debug_mode_prints_message_in_api_terminal(monkeypatch, caplog):
-    from app.core.config import get_settings
-
     monkeypatch.setenv("LOG_DISCORD_MESSAGES", "true")
     get_settings.cache_clear()
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
@@ -108,8 +105,6 @@ def test_debug_mode_prints_message_in_api_terminal(monkeypatch, caplog):
 
 
 def test_unauthorized_message_is_never_printed_even_in_debug_mode(monkeypatch, caplog):
-    from app.core.config import get_settings
-
     monkeypatch.setenv("LOG_DISCORD_MESSAGES", "true")
     get_settings.cache_clear()
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
@@ -119,8 +114,6 @@ def test_unauthorized_message_is_never_printed_even_in_debug_mode(monkeypatch, c
 
 
 def test_debug_message_redacts_credentials(monkeypatch, caplog):
-    from app.core.config import get_settings
-
     monkeypatch.setenv("LOG_DISCORD_MESSAGES", "true")
     monkeypatch.setenv("FIXTURE_API_KEY", "fixture-configured-credential")
     get_settings.cache_clear()
@@ -133,3 +126,76 @@ def test_debug_message_redacts_credentials(monkeypatch, caplog):
     assert "fixture-configured-credential" not in caplog.text
     assert "test-ingest-token" not in caplog.text
     assert "[REDACTED]" in caplog.text
+
+
+def test_supabase_persistence_creates_tenant_room_and_redacted_message(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://fixture.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "fixture-service-role-key")
+    get_settings.cache_clear()
+
+    rooms_db = []
+    messages_db = []
+    tenants_db = []
+
+    def fake_get(url, *, params=None, headers=None, timeout=10):
+        assert url == "https://fixture.supabase.co/rest/v1/rooms"
+        return httpx.Response(200, json=list(rooms_db), request=httpx.Request("GET", url))
+
+    def fake_post(url, *, params=None, headers=None, json=None, timeout=10):
+        if url.endswith("/rest/v1/tenants"):
+            tenants_db.append(json)
+            return httpx.Response(201, content=b"", request=httpx.Request("POST", url))
+        if url.endswith("/rest/v1/rooms"):
+            room_row = {
+                "id": "00000000-0000-0000-0000-000000000010",
+                "tenant_id": json["tenant_id"],
+                "enabled": True,
+            }
+            rooms_db.append(room_row)
+            return httpx.Response(201, json=[room_row], request=httpx.Request("POST", url))
+        if url.endswith("/rest/v1/messages"):
+            assert "fixture-service-role-key" not in json["body"]
+            assert "[REDACTED]" in json["body"]
+            if messages_db:
+                return httpx.Response(200, json=[], request=httpx.Request("POST", url))
+            messages_db.append(json)
+            return httpx.Response(
+                201,
+                json=[{"id": "00000000-0000-0000-0000-000000000099"}],
+                request=httpx.Request("POST", url),
+            )
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(record_repository.httpx, "get", fake_get)
+    monkeypatch.setattr(record_repository.httpx, "post", fake_post)
+
+    first = client.post(
+        "/messages",
+        headers=HEADERS,
+        json=payload(body="Save this without fixture-service-role-key"),
+    )
+    assert first.status_code == 200
+    assert first.json()["duplicate"] is False
+    assert len(tenants_db) == 1
+    assert len(rooms_db) == 1
+    assert len(messages_db) == 1
+    assert messages_db[0]["room_id"] == "00000000-0000-0000-0000-000000000010"
+    assert messages_db[0]["switch_message_id"] == "test-message"
+    assert messages_db[0]["body"] == "Save this without [REDACTED]"
+
+
+def test_supabase_failure_returns_503_without_recording_receipt(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://fixture.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "fixture-service-role-key")
+    get_settings.cache_clear()
+
+    def failing_get(*args, **kwargs):
+        raise httpx.ConnectError("https://fixture.supabase.co fixture-service-role-key")
+
+    monkeypatch.setattr(record_repository.httpx, "get", failing_get)
+
+    response = client.post("/messages", headers=HEADERS, json=payload())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Database request failed"}
+    assert "fixture-service-role-key" not in response.text
+    assert app.state.message_receipts.status().received_count == 0

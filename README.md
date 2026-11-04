@@ -35,7 +35,7 @@ Open `http://127.0.0.1:8000/` for the browser message viewer, or `http://127.0.0
 Invoke-RestMethod -Uri http://127.0.0.1:8000/health
 ```
 
-The existing `/api/v1/commitments` and `/api/v1/decisions` read endpoints require the `X-Admin-Token` header. Before using them, set `ADMIN_API_TOKEN` in the ignored `backend/.env` to a unique private value and configure the Supabase variables. Without authentication, they return `401`; with valid authentication but no database configuration, they return `503`. **This admin token is for local/server-side testing only, never for mobile.** Leave Supabase settings blank for the initial health-check setup.
+The `/api/v1/supabase/status`, `/api/v1/messages`, `/api/v1/commitments`, and `/api/v1/decisions` endpoints require the `X-Admin-Token` header. Before using them, set `ADMIN_API_TOKEN` in the ignored `backend/.env` to a unique private value and configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Without authentication, they return `401`; with valid authentication but no database configuration, they return `503`. When `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are configured in `backend/.env`, `POST /messages` also automatically persists the tenant, room (`tenants` and `rooms`), and redacted incoming message (`messages`) to Supabase. **This admin token is for local/server-side testing only, never for mobile.** Leave Supabase settings blank for the initial health-check setup.
 
 The diagram's `/ask`, `/docs/sync`, `/docs/apply-update`, and `/memories` routes are planned features and are not implemented in this foundation.
 
