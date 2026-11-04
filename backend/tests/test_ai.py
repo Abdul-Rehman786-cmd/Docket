@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from uuid import uuid4
 from urllib.parse import parse_qs, urlsplit
@@ -15,6 +16,7 @@ from app.services import ai_service
 from app.services.switch_api import SwitchAPI, SwitchError, require_internal_room
 from app.models.ai import AskRequest
 from app.services.ai_service import AIService
+from app.repositories import record_repository
 from app.repositories.message_receipts import MessageReceiptRepository
 
 HEADERS = {"X-Ingest-Token": "test-ingest-token"}
@@ -84,6 +86,7 @@ def test_question_answer_redaction_idempotency_and_scope(ai_config, monkeypatch)
             if feed.json()[0]["status"] == "answered":
                 break
         assert feed.json()[0]["answer"] == "Codex answer [REDACTED] [REDACTED]"
+        assert feed.json()[0]["db_action"] == "none"
         assert sent == ["Question [REDACTED] [REDACTED]"]
         assert feed.headers["cache-control"] == "no-store"
         assert client.post("/ai/requests", headers=HEADERS, json=body).status_code == 202
@@ -118,6 +121,116 @@ def test_source_message_must_be_retained_and_authorized(ai_config, monkeypatch):
         assert client.post("/ai/requests", headers=HEADERS, json={**body, "request_id": str(uuid4())}).status_code == 404
         assert client.get("/ai/requests", headers=HEADERS).json() == []
         assert len(sent) == 1
+
+
+@pytest.mark.parametrize("action", ["store_only", "query_only", "none", "store_and_query"])
+def test_llm_four_way_database_decisions(ai_config, monkeypatch, caplog, action):
+    monkeypatch.setenv("SUPABASE_URL", "https://fixture.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "fixture-service-role-key")
+    get_settings.cache_clear()
+
+    db_writes = []
+    db_reads = []
+    llm_calls = []
+
+    def fake_get(url, *, params=None, headers=None, timeout=10):
+        table = url.rsplit("/", 1)[-1]
+        if table == "rooms":
+            return httpx.Response(200, json=[{
+                "id": "00000000-0000-0000-0000-000000000010",
+                "tenant_id": "00000000-0000-0000-0000-000000000001",
+                "enabled": True,
+            }], request=httpx.Request("GET", url))
+        db_reads.append(table)
+        return httpx.Response(200, json=[{"content": f"Stored {table} row"}], request=httpx.Request("GET", url))
+
+    def fake_post(url, *, params=None, headers=None, json=None, timeout=10):
+        table = url.rsplit("/", 1)[-1]
+        db_writes.append((table, json))
+        if table == "messages":
+            return httpx.Response(201, json=[{"id": "00000000-0000-0000-0000-000000000099"}], request=httpx.Request("POST", url))
+        return httpx.Response(201, content=b"", request=httpx.Request("POST", url))
+
+    async def fake_ask_switch(settings, prompt):
+        llm_calls.append(prompt)
+        if len(llm_calls) == 1:
+            return json.dumps({
+                "action": action,
+                "search_query": "launch",
+                "commitments": [{"description": "Send launch report", "owner_name": "Ali", "due_at": "2026-11-06T17:00:00Z"}],
+                "decisions": [{"topic": "Launch", "summary": "Ship on Friday"}],
+                "memories": [{"memory_type": "fact", "content": "Launch is Friday"}],
+                "answer": f"Direct answer for {action}",
+            })
+        return f"Database-grounded answer for {action}"
+
+    monkeypatch.setattr(record_repository.httpx, "get", fake_get)
+    monkeypatch.setattr(record_repository.httpx, "post", fake_post)
+    monkeypatch.setattr(ai_service, "ask_switch", fake_ask_switch)
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        with TestClient(app) as client:
+            req_id = str(uuid4())
+            resp = client.post("/ai/requests", headers=HEADERS, json={"request_id": req_id, "question": "Team update on launch"})
+            assert resp.status_code == 202
+            for _ in range(30):
+                row = client.get("/ai/requests", headers=HEADERS).json()[0]
+                if row["status"] in ("answered", "failed"):
+                    break
+
+    assert row["status"] == "answered"
+    assert row["db_action"] == action
+    assert f"AI decision ref=direct-question request_id={req_id} action={action}" in caplog.text
+    assert f"AI response complete ref=direct-question request_id={req_id} action={action}" in caplog.text
+    assert "fixture-service-role-key" not in caplog.text
+
+    if action == "none":
+        assert db_writes == []
+        assert db_reads == []
+        assert row["answer"] == "Direct answer for none"
+        assert row["stored_counts"] is None
+    elif action == "store_only":
+        assert [t for t, _ in db_writes] == ["messages", "commitments", "decisions", "memories"]
+        assert db_reads == []
+        assert row["answer"] == "Direct answer for store_only"
+        assert row["stored_counts"] == {"messages": 1, "commitments": 1, "decisions": 1, "memories": 3}
+    elif action == "query_only":
+        assert db_writes == []
+        assert set(db_reads) == {"memories", "commitments", "decisions", "messages"}
+        assert row["answer"] == "Database-grounded answer for query_only"
+        assert row["stored_counts"] is None
+    elif action == "store_and_query":
+        assert [t for t, _ in db_writes] == ["messages", "commitments", "decisions", "memories"]
+        assert set(db_reads) == {"memories", "commitments", "decisions", "messages"}
+        assert row["answer"] == "Database-grounded answer for store_and_query"
+        assert row["stored_counts"] == {"messages": 1, "commitments": 1, "decisions": 1, "memories": 3}
+
+
+def test_incoming_message_automatically_logs_ai_decision(ai_config, monkeypatch, caplog):
+    async def fake_ask_switch(settings, prompt):
+        return json.dumps({
+            "action": "none",
+            "answer": "No database update needed for casual greeting",
+        })
+
+    monkeypatch.setattr(ai_service, "ask_switch", fake_ask_switch)
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        with TestClient(app) as client:
+            receipt = client.post("/messages", headers=HEADERS, json={
+                "tenant_id": "00000000-0000-0000-0000-000000000001",
+                "room_id": "test-room",
+                "message_id": "auto-msg-1",
+                "sender": "fixture-user",
+                "body": "Hey everyone!",
+            }).json()
+            for _ in range(30):
+                rows = client.get("/ai/requests", headers=HEADERS).json()
+                if rows and rows[0]["status"] == "answered":
+                    break
+    assert f"AI evaluating message ref={receipt['message_ref']}" in caplog.text
+    assert f"AI decision ref={receipt['message_ref']}" in caplog.text
+    assert "action=none" in caplog.text
+    assert f"AI response complete ref={receipt['message_ref']}" in caplog.text
 
 
 def test_remote_error_contents_are_never_exposed(ai_config, monkeypatch):

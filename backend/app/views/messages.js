@@ -167,7 +167,7 @@ function renderAnswers(answers) {
     article.className = "ai-result";
     const question = document.createElement("p");
     question.className = "ai-question";
-    question.textContent = answer.question;
+    question.textContent = answer.db_action ? `[Decision: ${answer.db_action}] ${answer.question}` : answer.question;
     const body = document.createElement("p");
     body.className = "message-text";
     const statuses = { queued: "Queued for Codex…", waiting: "Waiting for Codex…" };

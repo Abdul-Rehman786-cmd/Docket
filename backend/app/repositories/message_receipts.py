@@ -49,6 +49,15 @@ class MessageReceiptRepository:
                 if tenant == tenant_id and room in allowed_rooms
             ]
 
+    def get_preview_with_room(
+        self, tenant_id: UUID, allowed_rooms: frozenset[str], message_ref: str
+    ) -> tuple[str, MessagePreview] | None:
+        with self._lock:
+            for tenant, room, preview in reversed(self._previews):
+                if tenant == tenant_id and room in allowed_rooms and preview.message_ref == message_ref:
+                    return room, preview.model_copy()
+            return None
+
     def status(self) -> DeliveryStatistics:
         with self._lock:
             return DeliveryStatistics(

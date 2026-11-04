@@ -16,7 +16,13 @@ def test_health():
 def test_private_data_requires_auth(monkeypatch):
     monkeypatch.setenv("ADMIN_API_TOKEN", "testing-only-token")
     get_settings.cache_clear()
-    for path in ("/api/v1/commitments", "/api/v1/decisions", "/api/v1/messages", "/api/v1/supabase/status"):
+    for path in (
+        "/api/v1/commitments",
+        "/api/v1/decisions",
+        "/api/v1/memories",
+        "/api/v1/messages",
+        "/api/v1/supabase/status",
+    ):
         assert client.get(path).status_code == 401
         assert client.get(path, headers={"X-Admin-Token": "wrong"}).status_code == 401
     get_settings.cache_clear()
@@ -27,7 +33,13 @@ def test_auth_does_not_skip_database_config(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "")
     get_settings.cache_clear()
-    for path in ("/api/v1/commitments", "/api/v1/decisions", "/api/v1/messages", "/api/v1/supabase/status"):
+    for path in (
+        "/api/v1/commitments",
+        "/api/v1/decisions",
+        "/api/v1/memories",
+        "/api/v1/messages",
+        "/api/v1/supabase/status",
+    ):
         response = client.get(path, headers=ADMIN_HEADERS)
         assert response.status_code == 503
         assert response.json() == {"detail": "Database is not configured"}
@@ -57,7 +69,7 @@ def test_supabase_status_and_stored_messages_with_configured_credentials(monkeyp
                         "author_name": "Teammate",
                         "body": "Stored message text",
                         "occurred_at": "2026-11-04T12:00:00Z",
-                        "extraction_status": "pending",
+                        "extraction_status": "completed",
                         "created_at": "2026-11-04T12:00:01Z",
                     }
                 ],

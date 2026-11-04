@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 ApprovalStatus = Literal["pending", "approved", "rejected"]
+MemoryType = Literal["fact", "decision", "commitment"]
 
 
 class DatabaseStatus(BaseModel):
@@ -24,8 +25,21 @@ class Commitment(BaseModel):
 class Decision(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: UUID
+    topic: str | None = None
     summary: str
     approval_status: ApprovalStatus
+    created_at: datetime
+
+
+class MemoryRecord(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: UUID
+    tenant_id: UUID
+    room_id: UUID
+    message_id: UUID
+    memory_type: MemoryType
+    content: str
+    active: bool
     created_at: datetime
 
 

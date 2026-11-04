@@ -1,16 +1,38 @@
 from functools import lru_cache
+import os
 from pathlib import Path
 from uuid import UUID
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = BACKEND_DIR.parent
 
 
 class Settings(BaseSettings):
     admin_api_token: str = Field(default="", repr=False)
-    supabase_url: str = Field(default="", repr=False)
-    supabase_service_role_key: str = Field(default="", repr=False)
+    supabase_url: str = Field(
+        default="",
+        repr=False,
+        validation_alias=AliasChoices(
+            "SUPABASE_URL",
+            "EXPO_PUBLIC_SUPABASE_URL",
+            "NEXT_PUBLIC_SUPABASE_URL",
+            "SUPABASE_PROJECT_URL",
+        ),
+    )
+    supabase_service_role_key: str = Field(
+        default="",
+        repr=False,
+        validation_alias=AliasChoices(
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "SUPABASE_SERVICE_KEY",
+            "SUPABASE_SECRET_KEY",
+            "SUPABASE_KEY",
+            "SUPABASE_ANON_KEY",
+            "SERVICE_ROLE_KEY",
+        ),
+    )
     switch_bridge_url: str = Field(default="", repr=False)
     switch_agent_id: str = Field(default="", repr=False)
     switch_agent_api_key: SecretStr = SecretStr("")
@@ -41,7 +63,9 @@ class Settings(BaseSettings):
         return self.switch_requester_api_key if self.switch_requester_agent_id else self.switch_agent_api_key
 
     model_config = SettingsConfigDict(
-        env_file=BACKEND_DIR / ".env", extra="ignore", hide_input_in_errors=True
+        env_file=(ROOT_DIR / ".env", BACKEND_DIR / ".env"),
+        extra="ignore",
+        hide_input_in_errors=True,
     )
 
     @property
@@ -62,6 +86,28 @@ class Settings(BaseSettings):
         return None if value == "" else value
 
 
+def _env_mtime(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
 @lru_cache
-def get_settings() -> Settings:
+def _cached_settings(_env_stamp: tuple[int | None, int | None, bool]) -> Settings:
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return Settings(_env_file=None)
     return Settings()
+
+
+def get_settings() -> Settings:
+    in_pytest = "PYTEST_CURRENT_TEST" in os.environ
+    stamp = (
+        None if in_pytest else _env_mtime(ROOT_DIR / ".env"),
+        None if in_pytest else _env_mtime(BACKEND_DIR / ".env"),
+        in_pytest,
+    )
+    return _cached_settings(stamp)
+
+
+get_settings.cache_clear = _cached_settings.cache_clear  # type: ignore[attr-defined]

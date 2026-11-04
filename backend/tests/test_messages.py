@@ -1,6 +1,5 @@
 import logging
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -128,74 +127,17 @@ def test_debug_message_redacts_credentials(monkeypatch, caplog):
     assert "[REDACTED]" in caplog.text
 
 
-def test_supabase_persistence_creates_tenant_room_and_redacted_message(monkeypatch):
+def test_post_messages_does_not_unconditionally_write_to_supabase(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://fixture.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "fixture-service-role-key")
     get_settings.cache_clear()
 
-    rooms_db = []
-    messages_db = []
-    tenants_db = []
+    def unexpected_db_call(*args, **kwargs):
+        raise AssertionError("POST /messages must not write directly to Supabase before LLM decision")
 
-    def fake_get(url, *, params=None, headers=None, timeout=10):
-        assert url == "https://fixture.supabase.co/rest/v1/rooms"
-        return httpx.Response(200, json=list(rooms_db), request=httpx.Request("GET", url))
-
-    def fake_post(url, *, params=None, headers=None, json=None, timeout=10):
-        if url.endswith("/rest/v1/tenants"):
-            tenants_db.append(json)
-            return httpx.Response(201, content=b"", request=httpx.Request("POST", url))
-        if url.endswith("/rest/v1/rooms"):
-            room_row = {
-                "id": "00000000-0000-0000-0000-000000000010",
-                "tenant_id": json["tenant_id"],
-                "enabled": True,
-            }
-            rooms_db.append(room_row)
-            return httpx.Response(201, json=[room_row], request=httpx.Request("POST", url))
-        if url.endswith("/rest/v1/messages"):
-            assert "fixture-service-role-key" not in json["body"]
-            assert "[REDACTED]" in json["body"]
-            if messages_db:
-                return httpx.Response(200, json=[], request=httpx.Request("POST", url))
-            messages_db.append(json)
-            return httpx.Response(
-                201,
-                json=[{"id": "00000000-0000-0000-0000-000000000099"}],
-                request=httpx.Request("POST", url),
-            )
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    monkeypatch.setattr(record_repository.httpx, "get", fake_get)
-    monkeypatch.setattr(record_repository.httpx, "post", fake_post)
-
-    first = client.post(
-        "/messages",
-        headers=HEADERS,
-        json=payload(body="Save this without fixture-service-role-key"),
-    )
-    assert first.status_code == 200
-    assert first.json()["duplicate"] is False
-    assert len(tenants_db) == 1
-    assert len(rooms_db) == 1
-    assert len(messages_db) == 1
-    assert messages_db[0]["room_id"] == "00000000-0000-0000-0000-000000000010"
-    assert messages_db[0]["switch_message_id"] == "test-message"
-    assert messages_db[0]["body"] == "Save this without [REDACTED]"
-
-
-def test_supabase_failure_returns_503_without_recording_receipt(monkeypatch):
-    monkeypatch.setenv("SUPABASE_URL", "https://fixture.supabase.co")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "fixture-service-role-key")
-    get_settings.cache_clear()
-
-    def failing_get(*args, **kwargs):
-        raise httpx.ConnectError("https://fixture.supabase.co fixture-service-role-key")
-
-    monkeypatch.setattr(record_repository.httpx, "get", failing_get)
+    monkeypatch.setattr(record_repository.httpx, "get", unexpected_db_call)
+    monkeypatch.setattr(record_repository.httpx, "post", unexpected_db_call)
 
     response = client.post("/messages", headers=HEADERS, json=payload())
-    assert response.status_code == 503
-    assert response.json() == {"detail": "Database request failed"}
-    assert "fixture-service-role-key" not in response.text
-    assert app.state.message_receipts.status().received_count == 0
+    assert response.status_code == 200
+    assert response.json()["status"] == "received"

@@ -13,5 +13,9 @@ def get_decisions() -> list[dict]:
     return list_records("decisions")
 
 
+def get_memories() -> list[dict]:
+    return list_records("memories")
+
+
 def get_stored_messages() -> list[dict]:
     return list_records("messages")

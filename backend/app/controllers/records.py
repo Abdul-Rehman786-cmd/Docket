@@ -1,10 +1,17 @@
 from fastapi import APIRouter, Depends
 from app.core.security import require_admin_token
-from app.models.records import Commitment, DatabaseStatus, Decision, StoredMessage
+from app.models.records import (
+    Commitment,
+    DatabaseStatus,
+    Decision,
+    MemoryRecord,
+    StoredMessage,
+)
 from app.services.record_service import (
     get_commitments,
     get_database_status,
     get_decisions,
+    get_memories,
     get_stored_messages,
 )
 
@@ -24,6 +31,11 @@ def list_commitments() -> list[dict]:
 @router.get("/decisions", response_model=list[Decision])
 def list_decisions() -> list[dict]:
     return get_decisions()
+
+
+@router.get("/memories", response_model=list[MemoryRecord])
+def list_memories() -> list[dict]:
+    return get_memories()
 
 
 @router.get("/messages", response_model=list[StoredMessage])

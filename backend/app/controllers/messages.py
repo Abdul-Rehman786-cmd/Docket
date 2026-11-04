@@ -9,9 +9,14 @@ router = APIRouter(prefix="/messages", tags=["messages"], dependencies=[Depends(
 
 
 @router.post("", response_model=MessageReceipt)
-def ingest_message(message: IncomingMessage, request: Request) -> MessageReceipt:
-    """Acknowledge delivery, persist to Supabase when configured, and retain a redacted preview."""
-    return receive_message(message, get_settings(), request.app.state.message_receipts)
+async def ingest_message(message: IncomingMessage, request: Request) -> MessageReceipt:
+    """Acknowledge delivery, retain a redacted preview, and trigger AI 4-way database evaluation."""
+    settings = get_settings()
+    receipt = receive_message(message, settings, request.app.state.message_receipts)
+    await request.app.state.ai_service.evaluate_incoming_message(
+        message, receipt, settings, request.app.state.message_receipts
+    )
+    return receipt
 
 
 @router.get("/status", response_model=MessageStatus)
