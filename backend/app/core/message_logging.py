@@ -26,7 +26,7 @@ OPAQUE_TOKEN = re.compile(
 )
 
 
-def message_text_for_log(body: str, settings: Settings) -> str:
+def message_text_for_log(body: str | None, settings: Settings) -> str:
     try:
         configured = {
             settings.admin_api_token, settings.supabase_service_role_key,
@@ -38,8 +38,9 @@ def message_text_for_log(body: str, settings: Settings) -> str:
         # Include credentials not otherwise used by the receiver, such as LLM keys.
         for source in (os.environ, dotenv_values(BACKEND_DIR / ".env")):
             configured.update(value for name, value in source.items() if SECRET_NAME.search(name) and value)
-        text = body
-        for value in sorted(configured - {""}, key=len, reverse=True):
+        text = str(body or "")
+        clean_secrets = {v for v in configured if isinstance(v, str) and v.strip()}
+        for value in sorted(clean_secrets, key=len, reverse=True):
             text = text.replace(value, REDACTED)
         text = PRIVATE_KEY.sub(REDACTED, text)
         text = URL.sub(REDACTED, text)

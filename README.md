@@ -220,4 +220,4 @@ git diff --cached --name-only
 The two `.env` files should be reported as ignored when they exist. Inspect staged contents and never force-push. If any credential was previously committed, revoke/rotate it; `.gitignore` alone cannot remove history.
 
 ## Current limits
-Switch messages, including responses from existing Switch AI agents, are acknowledged and temporarily shown as redacted previews in the browser. Durable message storage, extraction, RAG, reminders, and backend-generated replies are not implemented. An external Switch agent must be running to generate responses. Database migrations have not been applied by this setup, and mobile private data authentication remains future work. Development credentials belong only in ignored local environment files.
+Switch messages are acknowledged, evaluated by the LLM 4-way decision, and either stored to Supabase (commitments, decisions, memories) or answered back into Discord and the browser viewer. Conflict checks, APScheduler reminders, and mobile private data authentication remain future work. Development credentials belong only in ignored local environment files.

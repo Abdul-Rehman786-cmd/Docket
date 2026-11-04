@@ -207,7 +207,10 @@ def test_llm_four_way_database_decisions(ai_config, monkeypatch, caplog, action)
 
 
 def test_incoming_message_automatically_logs_ai_decision(ai_config, monkeypatch, caplog):
+    prompts_received = []
+
     async def fake_ask_switch(settings, prompt):
+        prompts_received.append(prompt)
         return json.dumps({
             "action": "none",
             "answer": "No database update needed for casual greeting",
@@ -227,6 +230,9 @@ def test_incoming_message_automatically_logs_ai_decision(ai_config, monkeypatch,
                 rows = client.get("/ai/requests", headers=HEADERS).json()
                 if rows and rows[0]["status"] == "answered":
                     break
+    assert len(prompts_received) == 1
+    assert "Hey everyone!" in prompts_received[0]
+    assert "[message text suppressed" not in prompts_received[0]
     assert f"AI evaluating message ref={receipt['message_ref']}" in caplog.text
     assert f"AI decision ref={receipt['message_ref']}" in caplog.text
     assert "action=none" in caplog.text
@@ -445,6 +451,7 @@ def test_incoming_message_replies_to_switch_discord_room(ai_config, monkeypatch,
         return {"status": "ok"}
 
     monkeypatch.setattr(ai_service, "ask_switch", fake_ask_switch)
+    monkeypatch.setattr(ai_service, "query_team_memory", lambda settings, search_query: {})
     monkeypatch.setattr(SwitchAPI, "post_room_message", fake_post_room_message)
 
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
@@ -469,3 +476,34 @@ def test_incoming_message_replies_to_switch_discord_room(ai_config, monkeypatch,
     assert "Friday" in posted_messages[0]["body"]
     assert "AI reply posted to Switch room=test-room" in caplog.text
 
+
+
+def test_viewer_source_request_never_posts_to_discord(ai_config, monkeypatch):
+    posted = []
+
+    async def fake_ask_switch(settings, prompt):
+        return json.dumps({"action": "query_only", "search_query": "x", "answer": "Viewer-only answer"})
+
+    async def fake_post_room_message(self, room_id, body, thread_id=None):
+        posted.append(room_id)
+
+    monkeypatch.setattr(ai_service, "ask_switch", fake_ask_switch)
+    monkeypatch.setattr(ai_service, "query_team_memory", lambda settings, search_query: {})
+    monkeypatch.setattr(SwitchAPI, "post_room_message", fake_post_room_message)
+
+    async def run():
+        settings = get_settings()
+        receipts = MessageReceiptRepository()
+        receipts.record(
+            "a" * 24, tenant_id=settings.switch_tenant_id, room_id="test-room",
+            redacted_sender_name="Ali", redacted_text="What did we decide?",
+        )
+        service = AIService()
+        await service.submit(AskRequest(request_id=uuid4(), source_message_ref="a" * 24), settings, receipts)
+        await asyncio.gather(*service.tasks)
+        return service.repository.recent(ai_service.response_scope(settings))
+
+    rows = asyncio.run(run())
+    assert rows[0].status == "answered"
+    assert rows[0].db_action == "query_only"
+    assert posted == []

@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import json
 import logging
 import re
+from collections import deque
 from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import HTTPException
@@ -84,7 +86,8 @@ def build_decision_prompt(question: str) -> str:
         '- Use "query_only" when the input asks a question that requires reading stored commitments, decisions, memories, or messages from the database.\n'
         '- Use "none" when the input neither needs to be stored nor requires reading from the database.\n'
         '- Use "store_and_query" when the input both states new team information to store AND asks a question or needs existing database records for the response.\n\n'
-        "Input (JSON string):\n" + json.dumps(question)
+        # JSON-quote the message so chat text stays data, not instructions.
+        "Current message to evaluate (JSON string):\n" + json.dumps((question or "").strip())
     )
 
 
@@ -205,6 +208,13 @@ class AIService:
         self.repository = AIRequestRepository()
         self.tasks: set[asyncio.Task] = set()
         self.lock = asyncio.Lock()
+        # Fingerprints of replies we posted. Switch sender IDs are participant IDs that may
+        # differ from agent IDs, so also recognise our own posts by room + content.
+        self.posted_replies: deque[str] = deque(maxlen=100)
+
+    @staticmethod
+    def _reply_fingerprint(room_id: str, body: str) -> str:
+        return hashlib.sha256(json.dumps([room_id, (body or "").strip()]).encode()).hexdigest()
 
     async def evaluate_incoming_message(
         self,
@@ -215,6 +225,9 @@ class AIService:
     ) -> None:
         """Automatically trigger and log the LLM's 4-way decision for each incoming user message."""
         if receipt.duplicate or message.sender in settings.switch_ai_senders:
+            return
+        if self._reply_fingerprint(message.room_id, message.body) in self.posted_replies:
+            logger.info("AI skipped own reply echo ref=%s", receipt.message_ref)
             return
         if not is_ai_configured(settings):
             return
@@ -237,6 +250,9 @@ class AIService:
             "occurred_at": receipt.received_at,
             "thread_id": message.thread_id,
             "addressed": message.addressed,
+            "body": message.body,
+            # Only Discord-originated messages may produce a Discord reply.
+            "origin": "discord",
         }
         await self.submit(
             AskRequest(
@@ -259,37 +275,44 @@ class AIService:
         scope = response_scope(settings)
         validate_ai_settings(settings)
         question = request.question
-        if source_meta is None and request.source_message_ref:
-            found = None
-            if hasattr(receipts, "get_preview_with_room"):
-                found = receipts.get_preview_with_room(
-                    settings.switch_tenant_id,
-                    settings.allowed_switch_rooms,
-                    request.source_message_ref,
-                )
-            if found is not None:
-                room_id, source = found
+        if request.source_message_ref:
+            if source_meta and source_meta.get("body") is not None:
+                question = source_meta["body"]
             else:
-                source = next(
-                    (
-                        message
-                        for message in get_recent_messages(settings, receipts)
-                        if message.message_ref == request.source_message_ref
-                    ),
-                    None,
-                )
-                room_id = sorted(settings.allowed_switch_rooms)[0]
-            if source is None:
-                raise HTTPException(404, "Source message is no longer available in your authorized feed")
-            if source.sender_kind == "ai":
-                raise HTTPException(422, "Select a user message to ask Codex")
-            question = source.text
-            source_meta = {
-                "room_id": room_id,
-                "switch_message_id": request.source_message_ref,
-                "author_name": source.sender_name,
-                "occurred_at": source.received_at,
-            }
+                found = None
+                if hasattr(receipts, "get_preview_with_room"):
+                    found = receipts.get_preview_with_room(
+                        settings.switch_tenant_id,
+                        settings.allowed_switch_rooms,
+                        request.source_message_ref,
+                    )
+                if found is not None:
+                    room_id, source = found
+                else:
+                    source = next(
+                        (
+                            message
+                            for message in get_recent_messages(settings, receipts)
+                            if message.message_ref == request.source_message_ref
+                        ),
+                        None,
+                    )
+                    room_id = sorted(settings.allowed_switch_rooms)[0]
+                if source is None:
+                    raise HTTPException(404, "Source message is no longer available in your authorized feed")
+                if source.sender_kind == "ai":
+                    raise HTTPException(422, "Select a user message to ask Codex")
+                question = source.text
+                if source_meta is None:
+                    source_meta = {
+                        "room_id": room_id,
+                        "switch_message_id": request.source_message_ref,
+                        "author_name": source.sender_name,
+                        "occurred_at": source.received_at,
+                        "body": question,
+                    }
+        if question is None:
+            question = ""
         # Redact before retaining OR sending to the existing AI. Raw input never enters a prompt.
         safe_question = json.loads(message_text_for_log(question, settings))
         existing = self.repository.get(scope, request.request_id)
@@ -407,15 +430,18 @@ class AIService:
                     stored_counts=stored_counts,
                 )
                 # Reply pipeline: Discord -> Switch -> FastAPI -> Switch -> Discord
-                if (
+                should_reply = (
                     settings.switch_reply_to_discord
                     and source_meta
+                    and source_meta.get("origin") == "discord"
                     and source_meta.get("room_id")
+                    and bool(final_answer and final_answer.strip())
                     and (
                         decision.action in ("query_only", "store_and_query")
-                        or source_meta.get("addressed")
+                        or (source_meta.get("addressed") and decision.action != "store_only")
                     )
-                ):
+                )
+                if should_reply:
                     try:
                         requester_api = SwitchAPI(
                             settings.switch_bridge_url,
@@ -424,6 +450,8 @@ class AIService:
                         )
                         reply_room_id = source_meta["room_id"]
                         reply_thread_id = source_meta.get("thread_id")
+                        # Record before posting: the echo can arrive before the HTTP call returns.
+                        self.posted_replies.append(self._reply_fingerprint(reply_room_id, final_answer))
                         await requester_api.post_room_message(
                             room_id=reply_room_id,
                             body=final_answer,

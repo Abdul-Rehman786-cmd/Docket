@@ -7,17 +7,17 @@ Prepared November 4, 2026 for the Flip the Switch hackathon. This file records w
 The diagram and implementation plan below describe the target system. The current backend is a local FastAPI scaffold that starts without database, LLM, or messaging credentials:
 
 - `backend/app/main.py` creates the app and registers routes; `/health` returns `{"status":"ok"}`. FastAPI provides `/docs` and `/openapi.json`. `controllers/viewer.py` serves the public browser-viewer shell at `/` and its local CSS/JavaScript from `views/`; no private data or credentials are embedded in these files.
-- `controllers/records.py` exposes the admin-only `/api/v1/supabase/status`, `/api/v1/messages`, `/api/v1/commitments`, `/api/v1/decisions`, and `/api/v1/memories` endpoints. `models/`, `services/`, and `repositories/` separate validation, business rules, and database access. These endpoints use `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from `backend/.env` and scope record reads to `SWITCH_TENANT_ID` when configured. Database writes and queries are driven by the LLM's 4-way decision in the AI flow (`POST /ai/requests`) rather than unconditionally storing every incoming message on `POST /messages`.
+- `controllers/records.py` exposes the admin-only `/api/v1/supabase/status`, `/api/v1/messages`, `/api/v1/commitments`, `/api/v1/decisions`, and `/api/v1/memories` endpoints. `models/`, `services/`, and `repositories/` separate validation, business rules, and database access. These endpoints use `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from `backend/.env` and scope record reads to `SWITCH_TENANT_ID` when configured. Database writes and queries are driven by the LLM's 4-way decision, which runs automatically for each new Discord message on `POST /messages` and for explicit viewer requests on `POST /ai/requests`.
 - `core/` owns configuration and authentication. Development credentials belong only in the ignored `backend/.env` (or root `.env`); `get_settings()` automatically reloads when `.env` files are saved so credential updates take effect without restarting `uvicorn`. The health endpoint needs no credentials and confirms API liveness only.
 - `controllers/messages.py` exposes `POST /messages`, `GET /messages/status`, and `GET /messages/recent`, all protected by a dedicated `X-Ingest-Token`. Latest-message status returns `sender_name` and `message` instead of counters; both are `null` before a message arrives. `models/messages.py` validates input, `services/message_service.py` enforces the configured tenant and room mapping for ingestion, status, and preview reads, and `repositories/message_receipts.py` holds bounded receipt metadata and redacted previews. Switch's `payload.sender_name` is forwarded separately from its opaque participant ID and redacted before retention. Missing or blank names use `Unknown sender`. Validation errors never reflect message contents. Logs contain receipt metadata by default; opt-in local debugging with `LOG_DISCORD_MESSAGES=true` adds redacted sender names and message previews in the API terminal. `core/message_logging.py` masks configured credentials, common credential formats, and URLs; escapes terminal controls; and limits previews to 2,000 characters. Raw text is suppressed if redaction fails.
 - The browser viewer asks for the local ingest token in a masked field, keeps it only in tab memory, and polls the authenticated preview endpoint every two seconds. It displays sender names with message text rather than a count or receipt reference. Both fields render using `textContent`, never HTML; **Lock** clears the token, cancels pending requests, and removes displayed data. The page uses a restrictive Content Security Policy and message responses use `Cache-Control: no-store`. This is a local development viewer, not production user authentication.
 - `python -m app.switch_listener` runs the separate WebSocket listener in `services/switch_listener.py`. It uses the existing agent credentials, declares configured rooms at connection open, receives all message events for those rooms, and forwards their sender IDs, sender display names, and contents to FastAPI. Run only one listener for that agent; declaring rooms takes over those claims from another client of the same agent. `--check` verifies API authentication, the WebSocket, and room membership without claiming rooms; `--status` shows the latest sender name and redacted message. It never registers agents or posts chat messages.
 - `SWITCH_TENANT_ID` and `SWITCH_ROOM_IDS` bind the initial demo to one tenant and an explicit room allow-list. Unknown rooms are ignored. This is server-to-server ingestion authorization, not mobile user authentication.
 - Heartbeat handling runs independently of API forwarding. The listener checkpoints its acknowledged cursor, connection ID, and generation under ignored `backend/.local/`, and resumes after transient disconnects. Permanent refusals, takeovers, and retention gaps stop with a safe diagnostic.
-- Receipt metadata and duplicate detection are process-local, bounded to the latest 1,000 message identities, and reset on API restart. The latest 100 redacted previews are also held in memory and reset on restart. Run one worker. Receipt acknowledgement does not mean durable storage or extraction; raw message contents are discarded after acknowledgement.
+- Receipt metadata and duplicate detection are process-local, bounded to the latest 1,000 message identities, and reset on API restart. The latest 100 redacted previews are also held in memory and reset on restart. Run one worker. Receipt acknowledgement does not mean durable storage or extraction. The raw message body is held in process memory only until its queued AI evaluation runs (it is redacted before Codex sees it or it is retained), then discarded.
 - Backend tests cover health, record access, message authentication/authorization, preview isolation and retention, safe validation/logging, duplicate receipts, resume state, rejected deliveries, and WebSocket heartbeats while the API is slow. A local headless-browser check also verified unlock, automatic message updates, safe rendering of untrusted markup, lock cleanup, and invalid-token rejection with fictional messages.
 
-The diagram's extraction, RAG, conflict checks, scheduler, LLM gateway, and `/ask`, `/docs/sync`, `/docs/apply-update`, and `/memories` endpoints remain future work. Additional external integrations and remote database migrations require a separate request. See `README.md` for Windows setup and run commands.
+The diagram's conflict checks, scheduler chases, and `/docs/sync` and `/docs/apply-update` endpoints remain future work. Silent extraction, the LLM 4-way database decision, Supabase persistence/retrieval, and closed-loop responses back to Discord via Switch are implemented. Additional external integrations and remote database migrations require a separate request. See `README.md` for Windows setup and run commands.
 
 ### Implemented: server-only answers from the existing Switch Codex AI
 
@@ -40,7 +40,7 @@ POST /ai/requests -> bounded queue -> team-memory-client
 GET /ai/requests <- redacted result <- FastAPI
 ```
 
-`controllers/ai.py` provides authenticated `POST /ai/requests` and `GET /ai/requests`. `models/ai.py` validates a caller-generated request UUID and either a question or a retained source reference, and defines the LLM's 4-way database decision (`db_action`: `store_only`, `query_only`, `none`, `store_and_query`). `services/ai_service.py` authorizes source previews, redacts before sending, serializes requests, correlates room, exact opaque AI sender, and request thread, and executes the LLM's chosen database action via `repositories/record_repository.py`. `repositories/ai_requests.py` retains bounded, redacted results scoped to tenant, input-room allow-list, responder, client, and internal room. Every request verifies that the room has no bridge/external channel and exactly the expected two participants before sending. No caller-supplied destination is accepted and no fallback to Discord exists. HTTP and WebSocket transport lives in `services/switch_api.py`; heartbeat processing runs independently of HTTP calls.
+`controllers/ai.py` provides authenticated `POST /ai/requests` and `GET /ai/requests`. `models/ai.py` validates a caller-generated request UUID and either a question or a retained source reference, and defines the LLM's 4-way database decision (`db_action`: `store_only`, `query_only`, `none`, `store_and_query`). `services/ai_service.py` authorizes source previews, redacts before sending, serializes requests, correlates room, exact opaque AI sender, and request thread, and executes the LLM's chosen database action via `repositories/record_repository.py`. `repositories/ai_requests.py` retains bounded, redacted results scoped to tenant, input-room allow-list, responder, client, and internal room. Every request verifies that the room has no bridge/external channel and exactly the expected two participants before sending. No caller-supplied destination is accepted. `POST /ai/requests` (viewer) results never post to Discord; only messages that arrived from Discord through the listener can produce a Discord reply, and only to their own origin room (see **Discord to FastAPI to Discord closed-loop pipeline**). HTTP and WebSocket transport lives in `services/switch_api.py`; heartbeat processing runs independently of HTTP calls.
 
 #### LLM 4-Way Database Decision (`POST /messages` & `POST /ai/requests`)
 
@@ -55,7 +55,7 @@ Rather than blindly writing every incoming message to Supabase on `POST /message
 
 The existing feed and `/messages/status` retain their behavior. `SWITCH_REQUESTER_*` takes precedence for the input listener, so it no longer claims rooms using Codex's identity. The response connection claims only the client's internal room. Setup stores returned credentials only in ignored `backend/.env` and learns the AI's sender ID from a harmless correlated readiness reply, without parsing participant IDs. The viewer renders all questions and answers as text, polls automatically, and clears them and pending browser requests on lock. Its token stays in tab memory. These are local development interfaces, not production user authentication.
 
-Server-only routing also requires removing the AI from Discord input rooms: an AI that remains a member can answer Discord messages independently of the API's private-room flow. After the user reported replies on both sides, setup was updated to retain `team-memory-client` and remove only `codex-discord` from configured input rooms. This was applied to both configured input rooms. Discord bridges, channel mappings, other agents, and Codex's internal response-room membership are preserved. Setup validates all source rooms before changing memberships and verifies each result; repeat runs do not repeat completed membership changes. Each API question now checks that Codex has not been re-invited to an input room, failing with a setup diagnostic before sending if that invariant is broken. The viewer remains the explicit trigger for AI questions; ordinary Discord chat is ingested silently.
+Server-only routing also requires removing the AI from Discord input rooms: an AI that remains a member can answer Discord messages independently of the API's private-room flow. After the user reported replies on both sides, setup was updated to retain `team-memory-client` and remove only `codex-discord` from configured input rooms. This was applied to both configured input rooms. Discord bridges, channel mappings, other agents, and Codex's internal response-room membership are preserved. Setup validates all source rooms before changing memberships and verifies each result; repeat runs do not repeat completed membership changes. Each API question now checks that Codex has not been re-invited to an input room, failing with a setup diagnostic before sending if that invariant is broken. The viewer remains an explicit trigger for AI questions whose answers stay in the viewer. Separately, every new Discord message is now evaluated automatically, and the reply policy in Section 5 decides whether an answer is posted back to Discord by `team-memory-client` (never by Codex directly).
 
 A subsequent live audit after another duplicate-reply report found Codex back in one input room with a live input-room session, while its internal session was also live. The earlier membership-only verification did not establish durable isolation. Switch Console keeps session-to-room bindings separately from server membership; its session must be stopped with the Console **Stop** control for that Discord session, leaving the internal response session running. The available agent API has no stop-session operation and local process inspection could not safely identify the bound session's process. Both setup and API requests now also inspect reported runtime sessions, reject live input-room bindings or missing runtime evidence, and return an actionable stop-session diagnostic. Final server-only delivery must be reverified after that external session is stopped; it must not be inferred solely from a successful private answer or one membership snapshot.
 
@@ -78,23 +78,49 @@ On November 4, 2026, live setup verified a readiness reply from the existing Cod
        | outbound WebSocket receives event
        | POST /messages with X-Ingest-Token
        v
-4. FastAPI backend:
-       | Ingest -> Deduplicate -> Loop Guard (ignore bot's own posts)
-       | LLM 4-Way Database Decision (store_only, query_only, none, store_and_query)
-       | If store: write commitments/decisions/memories to Supabase
-       | If query/addressed: retrieve Supabase context & synthesize response with Codex
-       | If response ready: SwitchAPI.post_room_message()
+4. FastAPI backend (app/services/ai_service.py):
+       | 1. Deduplicate & Ingest
+       | 2. Loop Guard: ignore posts from bot/agents (switch_ai_senders)
+       | 3. Direct Message Prompt: pass clean current message body to Codex
+       | 4. LLM 4-Way Database Decision: store_only, query_only, none, store_and_query
+       | 5. If store: write commitments/decisions/memories to Supabase
+       | 6. If query/addressed: query Supabase records & synthesize context with Codex
+       | 7. Outbound Dispatch: SwitchAPI.post_room_message() to origin room_id
        v
-5. Switch room (origin room_id)
-       | team-memory-client posts message via /ops/post_message
+5. Switch input room (origin room_id)
+       | team-memory-client posts message via /ops/post_message (or /message fallback)
        v
 6. Switch Discord Bridge
-       | relays agent response into Discord channel / thread
+       | relays agent response into Discord channel or active thread
        v
-7. Discord channel (users see the response in chat)
+7. Discord channel
+       | teammates see the grounded team memory answer directly in chat
 ```
 
-The loop guard ensures `SWITCH_REQUESTER_AGENT_ID`, `SWITCH_AGENT_ID`, and configured `SWITCH_AI_SENDER_IDS` are never re-evaluated, preventing recursive response loops. Ingestion is silent for `store_only` (extracting commitments into Supabase without channel noise), while `query_only`, `store_and_query`, or addressed questions post back to Discord when `SWITCH_REPLY_TO_DISCORD=true`.
+#### Dual-Agent Separation in Switch
+To deliver answers to Discord while completely avoiding double replies and uncontrolled hallucinations, the architecture separates the chat adapter from the model runtime:
+
+1. **Front-Facing Room Agent (`team-memory-client`)**:
+   - Registered as a custom agent without an autonomous LLM model attached in Switch Console.
+   - Assigned to the Discord-bridged input rooms (`SWITCH_ROOM_IDS`).
+   - Sits on the WebSocket listener to ingest chat events, and serves as the outbound sender for FastAPI replies.
+   - Because it has no attached model in Switch Console, it never blurts out unprompted or ungrounded chatter into Discord.
+2. **Private Reasoning Engine (`codex-discord`)**:
+   - Isolated inside the private, internal, unbridged room (`team-memory-server-responses`).
+   - Removed from Discord input rooms so it never processes Discord events directly.
+   - Queried privately by FastAPI over the Switch API to evaluate current messages, decide database actions, and synthesize team memory responses.
+
+#### Direct Message Evaluation and Safe Redaction
+Incoming user messages pass their raw body via `source_meta["body"]` directly into `build_decision_prompt()`, ensuring the LLM is given strictly the current message text. The message text is JSON-quoted so chat text remains untrusted data rather than instructions. Defensive redaction in `message_logging.py` safeguards against `None` values or invalid types, logging clean redacted previews while never suppressing legitimate user input.
+
+#### Outbound Dispatch and Dual Loop Guard
+- **Origin Isolation**: Only messages that originated from Discord through the listener (`origin == "discord"`) can trigger outbound Discord replies. Explicit viewer questions on `POST /ai/requests` (both typed questions and **Ask Codex about this message**) always stay inside the viewer and never post to Discord.
+- **Outbound Dispatch**: Responses are posted using `SwitchAPI.post_room_message()`, calling `/agents/{agent_id}/ops/post_message` with `{room_id, body, thread_id}` (falling back to `/message` if ops are unmapped). If an outbound post fails (e.g. transient network or permission error), the failure is logged as a warning and does not fail the saved evaluation.
+- **Thread Context**: Replies to threaded Discord messages carry `thread_id` so they appear nested in the proper Discord conversation thread.
+- **Dual Loop Guard**:
+  1. *Sender-based*: `switch_ai_senders` automatically includes `SWITCH_REQUESTER_AGENT_ID`, `SWITCH_AGENT_ID`, and configured `SWITCH_AI_SENDER_IDS`.
+  2. *Content-fingerprint based*: Switch sender IDs are opaque participant IDs that can differ from agent IDs. FastAPI maintains a bounded rolling cache (`posted_replies`) of SHA-256 fingerprints of recently posted replies keyed by `(room_id, body)`. When an echo of our own reply arrives via the WebSocket listener, FastAPI identifies the fingerprint and skips evaluation, completely preventing infinite response loops.
+- **Reply Policy Control**: Governed by `SWITCH_REPLY_TO_DISCORD=true` (default). `store_only` (extracting commitments into Supabase) and `none` (casual greetings) remain silent in chat; `query_only`, `store_and_query`, and addressed questions post back to Discord.
 
 ### Current runtime and message flow
 
@@ -223,33 +249,36 @@ Base URL: https://docs.switchagents.ai
 - **Discord setup** needs the Message Content Intent and Server Members Intent, plus bot permissions including View Channels, Send Messages, Manage Webhooks, Manage Channels, Manage Roles, Read Message History, Attach Files, Add Reactions. The Discord connect form asks for a bot token and a Guild Id. ([discord](https://docs.switchagents.ai/switch-rooms/deploy/messaging-apps/discord))
 - **Rooms.** A room is a chat channel. On Discord, Switch creates the room when the first message arrives in a channel the bot can see. The docs show no way to set a room name from code.
 
-## 5. Reply policy (`router.py`)
+## 5. Reply policy (`ai_service.py` & `message_service.py`)
 
-Every message is ingested into the authenticated preview feed (`POST /messages`). When routed to the LLM (`POST /ai/requests`), the LLM decides one of four database actions (`store_only`, `query_only`, `none`, or `store_and_query`) before FastAPI finalizes the response. Replies happen only when the policy says so.
+Every message is ingested into the authenticated preview feed (`POST /messages`). Each incoming message is automatically evaluated by the LLM (`AIService.evaluate_incoming_message`), deciding one of four database actions (`store_only`, `query_only`, `none`, or `store_and_query`). FastAPI executes database actions against Supabase and posts back to Discord only when the reply policy specifies:
 
-| Event | Action |
-|-------|--------|
-| Any message in a room | Store and extract silently (`POST /messages`). No reply. |
-| Addressed question (`@memory-agent ...`) | Post a short acknowledgement, run RAG in the background, post the cited answer. |
-| New commitment found | Store it. Reply only if `reply_mode` is `proactive`. |
-| Commitment due or overdue | Scheduler posts a chase in the room, within quiet hours and cadence settings. |
-| Decision contradicts a doc | Post a proposed doc update for approval. Never auto-apply. |
-| Message from the agent itself | Ignore (loop guard). |
+| Event / LLM Decision | FastAPI Database Action | Discord Reply Behavior |
+|-----------------------|-------------------------|------------------------|
+| `store_only` (new commitment, decision, or team fact) | Stores message and extracts commitments, decisions, and memories into Supabase. | **Silent in Discord.** Ingestion is quiet; no response message is posted. |
+| `query_only` (question requiring team memory) | Queries Supabase (`memories`, `commitments`, `decisions`, `messages`) for relevant team records. | **Replies in Discord.** Codex synthesizes a plain-text answer from Supabase records; FastAPI posts to origin room & thread via `SwitchAPI.post_room_message()`. |
+| `store_and_query` (new information + question) | Stores extracted records in Supabase, then queries Supabase records. | **Replies in Discord.** Codex synthesizes an answer incorporating newly stored and historical records; FastAPI posts to origin room & thread. |
+| `none` (casual chatter, greetings, or off-topic) | Neither stores nor reads from Supabase. | **Silent in Discord** unless the message was explicitly addressed to the bot. |
+| Message from the agent itself (`switch_ai_senders`) | Ignored by both listener and API. | **Loop Guard.** Ignored immediately to prevent infinite reply loops. |
+
+Outbound Discord posting is controlled by `SWITCH_REPLY_TO_DISCORD=true` in `backend/.env`.
 
 `reply_mode` values: `silent`, `mentions_only`, `proactive`. Set from the Preferences UI and read by `router.py`.
 
 Because follow-ups may mark an unaddressed message as addressed, the backend should also check the message body for an explicit mention before treating it as a question. This is not yet verified.
 
-## 6. RAG flow (acknowledge, then answer)
+## 6. RAG and response flow (closed-loop)
 
-1. User asks `@memory-agent what did we decide about X?`.
-2. Router client sees `addressed: true` and immediately posts "Looking that up..." with `post_message`. No LLM involved.
-3. It sends the question to the backend with `room_id` and `message_id` as a background job.
-4. Backend embeds the question, searches pgvector (filtered by `tenant_id` and `room_id`), and `llm.py` writes a cited answer.
-5. Backend calls `POST /agents/{agent_id}/message` with the answer.
-6. If retrieval fails or times out, post a short error so the user is not left waiting.
+1. **User asks question in Discord**: Teammate asks a question in a Discord channel (or active thread).
+2. **Switch relays event**: The Switch Discord bridge delivers the message event into the Switch room.
+3. **Listener forwards to API**: `switch_listener.py` receives the WebSocket event and posts to `POST /messages` with `X-Ingest-Token`.
+4. **Loop Guard check**: FastAPI checks `message.sender in settings.switch_ai_senders`. If from the bot or an AI agent, it is dropped immediately.
+5. **Direct prompt evaluation**: FastAPI passes the clean, unescaped message body directly to Codex in the private internal room (`team-memory-server-responses`).
+6. **Supabase search**: If the decision is `query_only` or `store_and_query`, FastAPI searches Supabase using `search_query` or the user question.
+7. **Synthesis**: FastAPI feeds retrieved database records to Codex to write a grounded plain-text response without Discord or execution formatting.
+8. **Outbound posting to Switch**: FastAPI calls `SwitchAPI.post_room_message(room_id, body, thread_id)` using `team-memory-client` via `POST /agents/{agent_id}/ops/post_message` (with direct `/message` fallback).
 
-Use `message_id` as the job id so a reconnect or replayed event does not run the same search twice.
+9. **Relay to Discord**: The Switch Discord bridge delivers the message into the originating Discord channel or active thread.
 
 ## 7. Data model
 
@@ -329,7 +358,8 @@ Make Switch visible: the room, the router client connected through the agent pro
 
 **Unverified items (test before relying on them):**
 
-- A message posted through `post_message` appears in the Discord channel as expected.
+- A message posted through `post_message` appears in the Discord channel as expected (test live).
+- Switch operation `ops/post_message` vs direct `/message` endpoint behavior across different Switch bridge versions (code implements `ops/post_message` with `/message` fallback).
 - The agent must be a room member to post (possible 403 otherwise).
 - Messages from bots or webhooks may not count as coming from a person.
 - `payload.addressed` behavior when follow-ups are on.
@@ -338,7 +368,7 @@ Make Switch visible: the room, the router client connected through the agent pro
 - Whether one Switch connection can serve many Discord servers.
 - A bot-posted `!follow-ups off` being accepted when provisioning a room.
 
-**Loop guard.** Ignore the agent's own posts, or it can reply to itself.
+**Loop guard.** Dual loop guard implemented: sender ID checking (`switch_ai_senders` including both agent credentials) plus rolling content-fingerprint matching (`posted_replies`) to catch echo events regardless of opaque participant IDs.
 
 **Visible Switch layer.** Users may still see Switch-voiced messages (for example "agent not available"), Switch's slash commands in the Discord menu, and the bot's permission requests. Keep the router client connected.
 

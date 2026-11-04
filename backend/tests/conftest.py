@@ -30,6 +30,7 @@ def isolate_local_configuration(monkeypatch):
         "SWITCH_AI_TIMEOUT_SECONDS": "180",
         "SWITCH_BACKEND_URL": "http://127.0.0.1:8000",
         "LOG_DISCORD_MESSAGES": "false",
+        "SWITCH_REPLY_TO_DISCORD": "true",
     }.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(message_logging, "dotenv_values", lambda path: {})
