@@ -117,7 +117,31 @@ Use `message_id` as the job id so a reconnect or replayed event does not run the
 
 ## 7. Data model
 
-Every table carries `tenant_id` and `room_id`. Every query and every vector search filters on `tenant_id`. Postgres row-level security in Supabase can enforce this at the database level.
+### Current foundation schema
+
+`supabase/migrations/20261104000100_initial_schema.sql` is the consolidated,
+destructive development reset. It creates `tenants`, `rooms`, `room_members`,
+`messages`, `commitments`, `decisions`, `reminder_deliveries`, and `memories`.
+Tenant and room primary keys are named `id`; room-scoped records carry
+`tenant_id` and `room_id`, with composite foreign keys preventing cross-room
+source references. Tenants and rooms are the scope roots, not room-scoped rows.
+
+Messages carry Switch identifiers and extraction retry/lease state. Memories
+contain searchable facts, decisions, or commitment summaries linked to source
+messages. They use locally generated 384-dimensional `Supabase/gte-small`
+embeddings. `search_memories` ranks only active, embedded memories within the
+specified tenant and room, returns source message IDs, and is executable only by
+the backend service role. It returns no rows for a missing query vector. It uses
+exact cosine search initially. Editing memory content clears its old embedding;
+the backend must regenerate it before the memory becomes searchable. The backend must
+authorize room access and keep searchable summaries synchronized with structured
+commitment/decision state. RLS is enabled and client table privileges are revoked;
+service-role access still bypasses RLS.
+
+The following list records the broader planned data model. Tables not listed in
+the current foundation above remain future scope.
+
+Room-scoped tables carry `tenant_id` and `room_id`. Every query and every vector search must enforce the caller's authorized scope. Postgres row-level security can provide additional protection for non-privileged access; privileged backend credentials require explicit authorization in FastAPI.
 
 - `tenants`: `tenant_id`, Discord server id (guild id), settings.
 - `rooms`: Switch `room_id`, `tenant_id`, project folder or channel it covers. Unknown room ids are ignored until mapped.

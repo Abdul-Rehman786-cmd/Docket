@@ -3,12 +3,37 @@ BEGIN;
 -- ============================================================
 -- TEAM MEMORY: ONE-TIME FOUNDATION RESET
 --
--- Deletes existing data in these seven tables.
+-- Deletes existing data in these eight tables, including vector memories.
 -- Intended only for the current disposable development database.
 -- Never rerun against real team data.
 -- ============================================================
 
+CREATE SCHEMA IF NOT EXISTS extensions;
+
+CREATE EXTENSION IF NOT EXISTS vector
+WITH SCHEMA extensions;
+
+-- Fail clearly if an existing vector installation uses another schema.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_extension AS e
+        JOIN pg_catalog.pg_namespace AS n ON n.oid = e.extnamespace
+        WHERE e.extname = 'vector' AND n.nspname = 'extensions'
+    ) THEN
+        RAISE EXCEPTION 'The vector extension must be installed in the extensions schema';
+    END IF;
+END;
+$$;
+
+-- Remove the previous search definition before resetting its source table.
+DROP FUNCTION IF EXISTS public.search_memories(
+    UUID, UUID, extensions.vector, INTEGER
+);
+
 DROP TABLE IF EXISTS
+    public.memories,
     public.reminder_deliveries,
     public.room_members,
     public.commitments,
@@ -294,6 +319,104 @@ CREATE INDEX idx_decisions_supersedes
     WHERE supersedes_decision_id IS NOT NULL;
 
 -- ============================================================
+-- VECTOR MEMORY STORAGE
+-- ============================================================
+
+-- Searchable facts and summaries retain their original message evidence.
+-- Commitment deadlines/status remain in commitments.
+-- Decision approval/status remain in decisions.
+-- FastAPI must synchronize these summaries with their structured records.
+CREATE TABLE public.memories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
+    room_id UUID NOT NULL,
+    message_id UUID NOT NULL,
+
+    memory_type TEXT NOT NULL
+        CHECK (memory_type IN ('fact', 'decision', 'commitment')),
+    extraction_key TEXT NOT NULL
+        CHECK (btrim(extraction_key) <> ''),
+    content TEXT NOT NULL CHECK (btrim(content) <> ''),
+
+    -- Generate embeddings in the backend, using the same model for queries.
+    -- NULL embeddings are allowed while generation is pending.
+    embedding extensions.vector(384),
+    embedding_model TEXT NOT NULL DEFAULT 'Supabase/gte-small'
+        CHECK (embedding_model = 'Supabase/gte-small'),
+
+    active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    FOREIGN KEY (tenant_id, room_id, message_id)
+        REFERENCES public.messages(tenant_id, room_id, id)
+        ON DELETE RESTRICT,
+
+    UNIQUE (message_id, memory_type, extraction_key)
+);
+
+CREATE INDEX idx_memories_room
+    ON public.memories (tenant_id, room_id);
+
+-- An edited memory must not be searched using its previous text's embedding.
+-- The backend regenerates the embedding after updating content.
+CREATE OR REPLACE FUNCTION public.clear_stale_memory_embedding()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+BEGIN
+    IF NEW.content IS DISTINCT FROM OLD.content THEN
+        NEW.embedding = NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER memories_clear_stale_embedding
+BEFORE UPDATE OF content ON public.memories
+FOR EACH ROW EXECUTE FUNCTION public.clear_stale_memory_embedding();
+
+-- Exact vector search is sufficient for the initial small dataset.
+-- Add an approximate vector index only after measuring search performance.
+CREATE FUNCTION public.search_memories(
+    p_tenant_id UUID,
+    p_room_id UUID,
+    p_embedding extensions.vector(384),
+    p_limit INTEGER DEFAULT 5
+)
+RETURNS TABLE (
+    id UUID,
+    message_id UUID,
+    memory_type TEXT,
+    content TEXT,
+    similarity DOUBLE PRECISION
+)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+    SELECT
+        m.id,
+        m.message_id,
+        m.memory_type,
+        m.content,
+        1 - (
+            m.embedding OPERATOR(extensions.<=>) p_embedding
+        ) AS similarity
+    FROM public.memories AS m
+    WHERE p_embedding IS NOT NULL
+      AND m.tenant_id = p_tenant_id
+      AND m.room_id = p_room_id
+      AND m.active = true
+      AND m.embedding IS NOT NULL
+    ORDER BY
+        m.embedding OPERATOR(extensions.<=>) p_embedding
+    LIMIT greatest(1, least(coalesce(p_limit, 5), 50));
+$$;
+
+-- ============================================================
 -- 5. REMINDER DELIVERY TRACKING
 -- ============================================================
 
@@ -374,15 +497,20 @@ FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 -- 7. BACKEND-ONLY DATABASE ACCESS
 -- ============================================================
 
+-- Required even if this migration created the extensions schema itself.
+GRANT USAGE ON SCHEMA extensions TO service_role;
+
 ALTER TABLE public.tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.memories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.commitments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.decisions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.reminder_deliveries ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL PRIVILEGES ON TABLE
+    public.memories,
     public.tenants,
     public.rooms,
     public.room_members,
@@ -393,6 +521,7 @@ REVOKE ALL PRIVILEGES ON TABLE
 FROM PUBLIC, anon, authenticated;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+    public.memories,
     public.tenants,
     public.rooms,
     public.room_members,
@@ -402,9 +531,17 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
     public.reminder_deliveries
 TO service_role;
 
+REVOKE ALL ON FUNCTION public.search_memories(
+    UUID, UUID, extensions.vector, INTEGER
+) FROM PUBLIC, anon, authenticated;
+
+GRANT EXECUTE ON FUNCTION public.search_memories(
+    UUID, UUID, extensions.vector, INTEGER
+) TO service_role;
+
 COMMIT;
 
--- Expect seven rows with rls_enabled = true.
+-- Expect eight rows with rls_enabled = true.
 SELECT tablename, rowsecurity AS rls_enabled
 FROM pg_tables
 WHERE schemaname = 'public'
@@ -413,8 +550,14 @@ WHERE schemaname = 'public'
       'rooms',
       'room_members',
       'messages',
+      'memories',
       'commitments',
       'decisions',
       'reminder_deliveries'
   )
 ORDER BY tablename;
+
+-- Expect true. Function argument identity does not include vector dimensions.
+SELECT to_regprocedure(
+    'public.search_memories(uuid,uuid,extensions.vector,integer)'
+) IS NOT NULL AS search_function_exists;
