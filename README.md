@@ -55,10 +55,10 @@ Discord -> Switch room -> Python WebSocket listener -> authenticated POST /messa
                                                    FastAPI in-memory previews
                                                              ^
                                                              |
-Browser at / -> authenticated GET /messages/recent every 2 seconds
+Browser at / <- authenticated /viewer/ws live updates
 ```
 
-**Keep both FastAPI and exactly one listener running.** Starting or reloading FastAPI does not start the listener. The browser's **Live** indicator confirms API polling only; `/health` confirms API liveness only. Neither verifies that Discord messages are being delivered.
+**Keep both FastAPI and exactly one listener running.** Starting or reloading FastAPI does not start the listener. The browser's **Live** indicator confirms the authenticated viewer socket only; `/health` confirms API liveness only. Neither verifies that Discord messages are being delivered.
 
 Use an existing Switch agent that permits a custom WebSocket client and is assigned to the Discord room. The listener does not register an agent or post replies. Configure these settings in the ignored `backend/.env`; the placeholder-only `.env.example` lists them. Existing credentials should be preserved.
 
@@ -89,7 +89,7 @@ Switch message received ref=<receipt reference> duplicate=False
 API acknowledged message ref=<same receipt reference> duplicate=False
 ```
 
-To see messages **in the browser**, open `http://127.0.0.1:8000/`, enter your local `SWITCH_INGEST_TOKEN` in the masked access-token field, and select **Open feed**. The page refreshes every two seconds and displays each sender's display name and message text, newest first. Names and text are redacted before retention; the latest 100 messages are kept in memory. Missing or blank names appear as `Unknown sender`; participant IDs are never parsed to invent a username. Keep FastAPI and the listener running, then send a new Discord message. Restart the listener after an update so it forwards Switch's `sender_name` field. Text received before this viewer was added is not available. **Lock** clears the token and displayed messages from the tab. The token is sent only in an authentication header and is not embedded in the page, stored in browser storage, or included in URLs. The page shell is public; `GET /messages/recent` requires authentication and filters previews by the configured tenant and room allow-list. Responses are marked `no-store`.
+To see messages **in the browser**, open `http://127.0.0.1:8000/`, enter your local `SWITCH_INGEST_TOKEN` in the masked access-token field, and select **Open feed**. Each unlocked tab opens its own authenticated WebSocket at `/viewer/ws` and displays each sender's display name and message text, newest first. Names and text are redacted before retention; the latest 100 messages are kept in memory. Missing or blank names appear as `Unknown sender`; participant IDs are never parsed to invent a username. Keep FastAPI and the listener running, then send a new Discord message. Restart the listener after an update so it forwards Switch's `sender_name` field. Text received before this viewer was added is not available. **Lock** closes the socket and clears the token, pending requests, and displayed messages from the tab. The token is sent in the first socket authentication frame, and in the authentication header for HTTP question submissions. It is not embedded in the page, stored in browser storage, or included in URLs. The page shell is public; `GET /messages/recent` requires authentication and filters previews by the configured tenant and room allow-list. Responses are marked `no-store`.
 
 To also print the incoming sender and message in the **FastAPI terminal**, set `LOG_DISCORD_MESSAGES=true` in the ignored `backend/.env` and restart the API. New deliveries print a line such as `Discord message ref=... sender="Ali" text="Hello from Discord!"`. This local debug option defaults to `false`; configured credential values, common credential formats, and URLs are masked, control characters are escaped, and previews are limited to 2,000 characters. Set it back to `false` to stop printing text. Browser previews work independently of this terminal logging option.
 
@@ -120,7 +120,7 @@ In **Switch Console**, ensure any session binding `codex-discord` to an input ro
 
 Setup writes `SWITCH_REQUESTER_AGENT_ID`, `SWITCH_REQUESTER_API_KEY`, `SWITCH_AI_ROOM_ID`, and `SWITCH_AI_SENDER_ID` in `.env`. `SWITCH_AI_TIMEOUT_SECONDS` defaults to 180 seconds. Once the returned credentials are saved, subsequent setup runs reuse them and the room. A registration conflict stops rather than rotating credentials; restore the saved client credentials if needed. If readiness times out, start Codex's existing runtime and rerun setup. The registration key is used only by the setup command, never by HTTP requests from the viewer.
 
-`POST /ai/requests` accepts `{request_id, question}` or `{request_id, source_message_ref}` and returns `202` with a queued result. Use a UUID for `request_id`; repeating the same ID/question reuses that result, while reusing it for different content returns `409`. `GET /ai/requests` polls the latest redacted results. Both require `X-Ingest-Token`, enforce the configured scope, and return `Cache-Control: no-store`. Client callers cannot choose a destination room or an AI identity. Invalid or expired source-message references return `404`. These are local development interfaces, not mobile user authentication.
+`POST /ai/requests` accepts `{request_id, question}` or `{request_id, source_message_ref}` and returns `202` with a queued result. Use a UUID for `request_id`; repeating the same ID/question reuses that result, while reusing it for different content returns `409`. `GET /ai/requests` remains available to read the latest redacted results; the browser receives changes over its socket. Both require `X-Ingest-Token`, enforce the configured scope, and return `Cache-Control: no-store`. Client callers cannot choose a destination room or an AI identity. Invalid or expired source-message references return `404`. These are local development interfaces, not mobile user authentication.
 
 The API processes one question at a time using one bounded queue, permits four total outstanding jobs (running plus queued), and retains at most 100 results and 100 request aliases in memory. Reusing a source evaluation preserves its canonical request ID. Aliases expire with their result or when their own retention limit is reached. Redaction runs before a question reaches Codex and before an answer is retained. Each answer is matched to the configured sender, internal room, and exact request thread. The first matching nonblank response completes the request; the prompt asks Codex to reply once. Timeout, disconnect, or restart does not resubmit a potentially delivered question. Pending work and results are not durable. Run **one API worker**.
 
@@ -158,6 +158,26 @@ If Switch refuses the connection, verify the bridge URL and agent key, and use a
 | Message endpoint returns `503` | Check ingestion configuration and API availability. |
 
 The listener is a local process with no automatic service wrapper; ensure it is running in a terminal before testing Discord delivery.
+
+### Live viewer WebSocket
+
+Unlocking a tab opens `/viewer/ws`; each connection receives a backend-generated UUID, distinct from its token, tenant, and room IDs. The token authenticates the existing shared local feed; it does not identify a user or select a Discord server. No token is embedded in socket URLs or browser storage. Browser Origin must match the backend origin, query parameters are rejected, and the first frame must authenticate within five seconds:
+
+```json
+{"type":"authenticate","token":"YOUR_LOCAL_INGEST_TOKEN"}
+```
+
+After authentication, the server sends a `snapshot` containing `connection_id`, authorized `messages`, and `answers`. It then pushes `message_added`, `message_removed`, `ai_queued`, `ai_waiting`, `ai_answered`, `ai_failed`, and `ai_removed` events. Messages remain restricted to the configured tenant and room allow-list; AI results use the existing response scope. Question submission stays on authenticated `POST /ai/requests`.
+
+The server sends an application-level `ping` about every ten seconds; the browser responds with `{"type":"pong"}`. Each outgoing event and heartbeat rechecks current credentials and scope. Token or scope changes close the connection; the user must unlock again. Refresh sends `{"type":"resync"}` for a fresh snapshot. After transient disconnection, the viewer clears stale data and reconnects with capped backoff (one to thirty seconds), reauthenticating and receiving a fresh snapshot. Reconnection creates a new UUID. A missed update outside retained history cannot be recovered. Lock and page exit close the tab's connection.
+
+There are at most 64 simultaneous viewer connections, including unauthenticated handshakes, and at most 32 buffered events per connection. Slow clients are disconnected; send operations have a five-second deadline, and missing application pongs expire the connection. Keep one API worker: broadcasts and retained history are process-local. HTTPS deployments use `wss`; forward the public host and scheme correctly through the trusted proxy. Keep WebSocket frame-level debug logging disabled, since the first frame contains the local credential.
+
+Backend socket tests run with the normal pytest suite. Offline JavaScript lifecycle tests use Node's built-in runner, from the repository root:
+
+```powershell
+node --test backend/tests/viewer_socket.test.cjs
+```
 
 ### Resource lifecycle and overload handling
 

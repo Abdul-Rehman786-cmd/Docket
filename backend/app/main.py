@@ -14,6 +14,7 @@ from app.services.ai_service import AIService
 from app.core.http_clients import HTTPClients, use_http_clients
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.services.viewer_service import ViewerHub
 
 
 @asynccontextmanager
@@ -21,12 +22,17 @@ async def lifespan(application):
     configure_logging(get_settings())
     application.state.http_clients = HTTPClients()
     application.state.ai_service = AIService()
+    application.state.viewer_hub = ViewerHub()
+    application.state.message_receipts.on_change = application.state.viewer_hub.publish
+    application.state.ai_service.repository.on_change = application.state.viewer_hub.publish
     try:
         yield
     finally:
         try:
             await application.state.ai_service.close()
         finally:
+            application.state.viewer_hub.close()
+            application.state.message_receipts.on_change = None
             await application.state.http_clients.close()
             application.state.http_clients = None
 

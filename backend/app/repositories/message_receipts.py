@@ -10,7 +10,8 @@ from app.models.messages import DeliveryStatistics, MessagePreview, MessageRecei
 class MessageReceiptRepository:
     """Bounded, process-local receipts and redacted previews. Never stores raw text."""
 
-    def __init__(self, capacity: int = 1000):
+    def __init__(self, capacity: int = 1000, on_change=None):
+        self.on_change = on_change
         self._capacity = capacity
         self._receipts: OrderedDict[str, MessageReceipt] = OrderedDict()
         self._lock = Lock()
@@ -37,6 +38,7 @@ class MessageReceiptRepository:
             self._receipts[message_ref] = receipt
             self._received_count += 1
             self._last_receipt = receipt
+            evicted = self._previews[0] if len(self._previews) == self._previews.maxlen else None
             self._previews.append((tenant_id, room_id, MessagePreview(
                 message_ref=message_ref, received_at=receipt.received_at,
                 sender_name=redacted_sender_name, text=redacted_text,
@@ -44,6 +46,13 @@ class MessageReceiptRepository:
             )))
             if len(self._receipts) > self._capacity:
                 self._receipts.popitem(last=False)
+            if self.on_change:
+                if evicted:
+                    tenant, room, preview = evicted
+                    self.on_change("message_removed", (str(tenant), room), {"message_ref": preview.message_ref})
+                self.on_change("message_added", (str(tenant_id), room_id), {
+                    "message": self._previews[-1][2].model_dump(mode="json"),
+                })
             return receipt
 
     def recent(self, tenant_id: UUID, allowed_rooms: frozenset[str]) -> list[MessagePreview]:

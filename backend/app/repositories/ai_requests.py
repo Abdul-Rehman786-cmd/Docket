@@ -8,7 +8,8 @@ from app.models.ai import AIResponse
 
 
 class AIRequestRepository:
-    def __init__(self):
+    def __init__(self, on_change=None):
+        self.on_change = on_change
         self.rows: OrderedDict[tuple, AIResponse] = OrderedDict()
         self.aliases: OrderedDict[tuple, UUID] = OrderedDict()
 
@@ -45,15 +46,22 @@ class AIRequestRepository:
             if disposable is None:
                 raise ValueError("Request history is full")
             del self.rows[disposable]
+            if self.on_change:
+                self.on_change("ai_removed", disposable[0], {"request_id": str(disposable[1])})
             for alias, target in list(self.aliases.items()):
                 if (alias[0], target) == disposable:
                     del self.aliases[alias]
         row = AIResponse(request_id=request_id, source_message_ref=source, question=question,
                          created_at=datetime.now(timezone.utc))
         self.rows[(scope, request_id)] = row
+        if self.on_change:
+            self.on_change("ai_queued", scope, {"answer": row.model_dump(mode="json")})
         return row.model_copy()
 
     def update(self, scope: tuple, request_id: UUID, **values) -> None:
         key = self._resolve_key(scope, request_id)
         if key in self.rows:
             self.rows[key] = self.rows[key].model_copy(update=values)
+            if self.on_change:
+                row = self.rows[key]
+                self.on_change("ai_" + row.status, scope, {"answer": row.model_dump(mode="json")})

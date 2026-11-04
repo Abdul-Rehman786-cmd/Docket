@@ -19,8 +19,12 @@ const aiNote = document.getElementById("ai-note");
 const aiResults = document.getElementById("ai-results");
 let pendingQuestion = null;
 let accessToken = "";
-let timer = null;
-let pendingRequest = null;
+let reconnectTimer = null;
+let socketTimer = null;
+let feedSocket = null;
+let reconnectDelay = 1000;
+let currentMessages = [];
+let currentAnswers = [];
 let session = 0;
 
 function setConnection(label, state = "") {
@@ -30,9 +34,14 @@ function setConnection(label, state = "") {
 
 function lockFeed(message = "") {
   session += 1;
-  clearTimeout(timer);
-  if (pendingRequest) pendingRequest.abort();
-  pendingRequest = null;
+  clearTimeout(reconnectTimer);
+  clearTimeout(socketTimer);
+  const previousSocket = feedSocket;
+  feedSocket = null;
+  if (previousSocket) previousSocket.close(1000);
+  currentMessages = [];
+  currentAnswers = [];
+  reconnectDelay = 1000;
   if (pendingQuestion) pendingQuestion.abort();
   pendingQuestion = null;
   accessToken = "";
@@ -42,6 +51,7 @@ function lockFeed(message = "") {
   questionInput.value = "";
   aiNote.textContent = "";
   askButton.disabled = false;
+  refreshButton.disabled = false;
   feedPanel.hidden = true;
   unlockPanel.hidden = false;
   unlockButton.disabled = false;
@@ -101,79 +111,137 @@ function renderMessages(messages) {
   emptyState.hidden = messages.length > 0;
 }
 
-async function refreshFeed() {
-  if (!accessToken || pendingRequest) return;
-  clearTimeout(timer);
+function connectFeed() {
+  if (!accessToken || feedSocket) return;
+  clearTimeout(reconnectTimer);
   const currentSession = session;
-  const controller = new AbortController();
-  pendingRequest = controller;
-  const timeout = setTimeout(() => controller.abort(), 10000);
-  refreshButton.disabled = true;
+  const url = new URL("/viewer/ws", window.location.href);
+  url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  let socket;
   try {
-    const response = await fetch("/messages/recent", {
-      headers: { "X-Ingest-Token": accessToken }, cache: "no-store",
-      credentials: "omit", redirect: "error", signal: controller.signal,
-    });
-    if (currentSession !== session) return;
-    if (response.status === 401 || response.status === 403) {
-      lockFeed("Access was denied. Check your local access token.");
-      return;
-    }
-    if (!response.ok) throw new Error("Feed unavailable");
-    const messages = await response.json();
-    if (currentSession !== session) return;
-    if (!Array.isArray(messages)) throw new Error("Invalid feed response");
-    renderMessages(messages);
-    const answersResponse = await fetch("/ai/requests", {
-      headers: { "X-Ingest-Token": accessToken }, cache: "no-store",
-      credentials: "omit", redirect: "error", signal: controller.signal,
-    });
-    if (currentSession !== session) return;
-    if (answersResponse.status === 401 || answersResponse.status === 403) {
-      lockFeed("Access was denied. Check your local access token.");
-      return;
-    }
-    if (answersResponse.ok) {
-      const answers = await answersResponse.json();
-      if (currentSession !== session) return;
-      if (Array.isArray(answers)) renderAnswers(answers);
-    }
+    socket = new WebSocket(url);
+  } catch {
+    lockFeed("Could not open the live feed. Check that FastAPI is running.");
+    return;
+  }
+  feedSocket = socket;
+  const isCurrent = () => currentSession === session && feedSocket === socket;
+  const armWatchdog = () => {
+    clearTimeout(socketTimer);
+    socketTimer = setTimeout(() => {
+      if (isCurrent()) socket.close(4000);
+    }, 45000);
+  };
+  // Opening and authenticating must complete promptly, even on a broken network.
+  socketTimer = setTimeout(() => { if (isCurrent()) socket.close(4000); }, 10000);
+  socket.addEventListener("open", () => {
+    if (!isCurrent()) { socket.close(1000); return; }
+    socket.send(JSON.stringify({ type: "authenticate", token: accessToken }));
     tokenInput.value = "";
-    unlockPanel.hidden = true;
-    feedPanel.hidden = false;
-    unlockError.hidden = true;
-    setConnection("Live", "live");
-    feedNote.textContent = `Updates every 2 seconds · Last checked ${new Date().toLocaleTimeString()}`;
-  } catch (error) {
-    if (currentSession !== session) return;
-    if (!unlockPanel.hidden) {
-      lockFeed("Could not reach the message feed. Check that FastAPI is running.");
-    } else {
-      setConnection("Reconnecting", "error-dot");
-      feedNote.textContent = "Connection interrupted. Retrying automatically…";
+  });
+  socket.addEventListener("message", event => {
+    if (!isCurrent()) return;
+    let update;
+    try { update = JSON.parse(event.data); } catch { socket.close(4000); return; }
+    if (update.type === "ping") {
+      socket.send(JSON.stringify({ type: "pong" }));
+      armWatchdog();
+      return;
     }
-  } finally {
-    clearTimeout(timeout);
-    if (pendingRequest === controller) pendingRequest = null;
+    if (update.type === "snapshot") {
+      if (!Array.isArray(update.messages) || !Array.isArray(update.answers)) {
+        socket.close(4000);
+        return;
+      }
+      currentMessages = update.messages;
+      currentAnswers = update.answers;
+      renderMessages(currentMessages);
+      renderAnswers(currentAnswers);
+      unlockPanel.hidden = true;
+      feedPanel.hidden = false;
+      unlockError.hidden = true;
+      refreshButton.disabled = false;
+      reconnectDelay = 1000;
+      setConnection("Live", "live");
+    } else if (update.type === "message_added") {
+      currentMessages = [update.message, ...currentMessages.filter(item => item.message_ref !== update.message.message_ref)].slice(0, 100);
+      renderMessages(currentMessages);
+    } else if (update.type === "message_removed") {
+      currentMessages = currentMessages.filter(item => item.message_ref !== update.message_ref);
+      renderMessages(currentMessages);
+    } else if (["ai_queued", "ai_waiting", "ai_answered", "ai_failed"].includes(update.type)) {
+      const index = currentAnswers.findIndex(item => item.request_id === update.answer.request_id);
+      if (index >= 0) currentAnswers[index] = update.answer;
+      else currentAnswers.unshift(update.answer);
+      currentAnswers = currentAnswers.slice(0, 100);
+      renderAnswers(currentAnswers);
+    } else if (update.type === "ai_removed") {
+      currentAnswers = currentAnswers.filter(item => item.request_id !== update.request_id);
+      renderAnswers(currentAnswers);
+    } else {
+      socket.close(4000);
+      return;
+    }
+    armWatchdog();
+    feedNote.textContent = `Live updates connected ? Last update ${new Date().toLocaleTimeString()}`;
+  });
+  socket.addEventListener("close", event => {
+    if (!isCurrent()) return;
+    feedSocket = null;
+    clearTimeout(socketTimer);
     refreshButton.disabled = false;
-    if (currentSession === session && accessToken) timer = setTimeout(refreshFeed, 2000);
+    if ([4401, 4403, 1008].includes(event.code)) {
+      lockFeed("Access was denied or changed. Check your local access token.");
+      return;
+    }
+    if (!unlockPanel.hidden) {
+      lockFeed("Could not open the live feed. Check that FastAPI is running.");
+      return;
+    }
+    // Remove stale private data while reconnecting; the next snapshot replaces it.
+    currentMessages = [];
+    currentAnswers = [];
+    renderMessages(currentMessages);
+    renderAnswers(currentAnswers);
+    setConnection("Reconnecting", "error-dot");
+    feedNote.textContent = "Connection interrupted. Reconnecting automatically...";
+    reconnectTimer = setTimeout(connectFeed, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+  });
+}
+
+function refreshFeed() {
+  if (!accessToken) return;
+  if (feedSocket && feedSocket.readyState === WebSocket.OPEN) {
+    feedSocket.send(JSON.stringify({ type: "resync" }));
+  } else if (!feedSocket) {
+    connectFeed();
   }
 }
 
 function renderAnswers(answers) {
+  const existing = new Map([...aiResults.children].map(node => [node.dataset.ref, node]));
   const fragment = document.createDocumentFragment();
   for (const answer of answers) {
-    const article = document.createElement("article");
-    article.className = "ai-result";
-    const question = document.createElement("p");
-    question.className = "ai-question";
-    question.textContent = answer.db_action ? `[Decision: ${answer.db_action}] ${answer.question}` : answer.question;
-    const body = document.createElement("p");
-    body.className = "message-text";
-    const statuses = { queued: "Queued for Codex…", waiting: "Waiting for Codex…" };
-    body.textContent = answer.status === "answered" ? answer.answer
-      : answer.status === "failed" ? answer.error : statuses[answer.status] || "Waiting for an update…";
-    article.append(question, body);
+    let article = existing.get(answer.request_id);
+    if (!article) {
+      article = document.createElement("article");
+      article.className = "ai-result";
+      article.dataset.ref = answer.request_id;
+      const question = document.createElement("p");
+      question.className = "ai-question";
+      const body = document.createElement("p");
+      body.className = "message-text";
+      article.append(question, body);
+    }
+    const question = article.querySelector(".ai-question");
+    const body = article.querySelector(".message-text");
+    const questionText = answer.db_action ? `[Decision: ${answer.db_action}] ${answer.question}` : answer.question;
+    const statuses = { queued: "Queued for Codex...", waiting: "Waiting for Codex..." };
+    const bodyText = answer.status === "answered" ? answer.answer
+      : answer.status === "failed" ? answer.error : statuses[answer.status] || "Waiting for an update...";
+    if (question.textContent !== questionText) question.textContent = questionText;
+    if (body.textContent !== bodyText) body.textContent = bodyText;
     fragment.append(article);
   }
   aiResults.replaceChildren(fragment);
@@ -185,7 +253,7 @@ async function submitQuestion(source) {
   const controller = new AbortController();
   pendingQuestion = controller;
   askButton.disabled = true;
-  aiNote.textContent = "Sending your question…";
+  aiNote.textContent = "Sending your question...";
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
     const response = await fetch("/ai/requests", {
@@ -208,7 +276,6 @@ async function submitQuestion(source) {
     }
     questionInput.value = "";
     aiNote.textContent = "Question accepted. The answer will appear here automatically.";
-    refreshFeed();
   } catch (error) {
     if (currentSession === session) aiNote.textContent = "Submission could not be confirmed. Check the answers below before trying again.";
   } finally {

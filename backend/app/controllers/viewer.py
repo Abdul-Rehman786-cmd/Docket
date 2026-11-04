@@ -1,7 +1,9 @@
 from pathlib import Path
+import re
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request, WebSocket
 from fastapi.responses import FileResponse
+from app.services.viewer_service import serve_viewer
 
 router = APIRouter(include_in_schema=False)
 VIEWS = Path(__file__).resolve().parents[1] / "views"
@@ -16,17 +18,35 @@ HEADERS = {
 }
 
 
+def viewer_headers(request: Request):
+    headers = dict(HEADERS)
+    # Explicit same-host ws/wss source for browsers that don't map CSP 'self'
+    # to WebSockets. Validate before inserting a Host-derived value into CSP.
+    host = request.url.netloc
+    if re.fullmatch(r"(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(?::[0-9]{1,5})?", host):
+        scheme = "wss" if request.url.scheme == "https" else "ws"
+        headers["Content-Security-Policy"] = headers["Content-Security-Policy"].replace(
+            "connect-src 'self';", f"connect-src 'self' {scheme}://{host};"
+        )
+    return headers
+
+
 @router.get("/")
-def message_viewer() -> FileResponse:
+def message_viewer(request: Request) -> FileResponse:
     """Public page shell; private data requires authentication through the API."""
-    return FileResponse(VIEWS / "messages.html", media_type="text/html", headers=HEADERS)
+    return FileResponse(VIEWS / "messages.html", media_type="text/html", headers=viewer_headers(request))
 
 
 @router.get("/viewer.css")
-def viewer_styles() -> FileResponse:
-    return FileResponse(VIEWS / "messages.css", media_type="text/css", headers=HEADERS)
+def viewer_styles(request: Request) -> FileResponse:
+    return FileResponse(VIEWS / "messages.css", media_type="text/css", headers=viewer_headers(request))
 
 
 @router.get("/viewer.js")
-def viewer_script() -> FileResponse:
-    return FileResponse(VIEWS / "messages.js", media_type="text/javascript", headers=HEADERS)
+def viewer_script(request: Request) -> FileResponse:
+    return FileResponse(VIEWS / "messages.js", media_type="text/javascript", headers=viewer_headers(request))
+
+
+@router.websocket("/viewer/ws")
+async def viewer_socket(websocket: WebSocket):
+    await serve_viewer(websocket)
