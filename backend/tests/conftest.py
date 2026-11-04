@@ -1,4 +1,5 @@
 import pytest
+import httpx
 
 from app.core.config import get_settings
 from app.core import message_logging
@@ -10,7 +11,11 @@ from app.services.ai_service import AIService
 @pytest.fixture(autouse=True)
 def isolate_local_configuration(monkeypatch):
     """Tests must never use the developer's real service credentials."""
+    async def blocked_network(self, request):
+        raise AssertionError("External HTTP requires an explicit test transport")
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", blocked_network)
     for name, value in {
+        "LOG_LEVEL": "INFO",
         "ADMIN_API_TOKEN": "",
         "SUPABASE_URL": "",
         "SUPABASE_SERVICE_ROLE_KEY": "",

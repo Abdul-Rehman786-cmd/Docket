@@ -102,7 +102,7 @@ async def setup() -> None:
         # Check the destination file before the remote registration, whose key is returned once.
         save_settings({})
         async with target.http() as client:
-            response = await client.post("agents", headers={"Authorization": "Bearer " + registration}, json={
+            response = await client.post(target.base_url + "/agents", headers={"Authorization": "Bearer " + registration}, json={
                 "name": REQUESTER_NAME, "description": "Team Memory server client; no model; private AI requests and message observation.",
                 "connector_type": "team-memory", "models": [],
                 "integration_profile": {"connection_model": "always_on", "message_exchange": True,

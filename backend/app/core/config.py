@@ -10,6 +10,7 @@ ROOT_DIR = BACKEND_DIR.parent
 
 
 class Settings(BaseSettings):
+    log_level: str = Field(default="INFO", pattern="^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$")
     admin_api_token: str = Field(default="", repr=False)
     supabase_url: str = Field(
         default="",

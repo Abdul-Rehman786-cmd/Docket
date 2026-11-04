@@ -19,25 +19,25 @@ router = APIRouter(prefix="/api/v1", tags=["records"], dependencies=[Depends(req
 
 
 @router.get("/supabase/status", response_model=DatabaseStatus)
-def supabase_status() -> dict[str, str]:
-    return get_database_status()
+async def supabase_status() -> dict[str, str]:
+    return await get_database_status()
 
 
 @router.get("/commitments", response_model=list[Commitment])
-def list_commitments() -> list[dict]:
-    return get_commitments()
+async def list_commitments() -> list[dict]:
+    return await get_commitments()
 
 
 @router.get("/decisions", response_model=list[Decision])
-def list_decisions() -> list[dict]:
-    return get_decisions()
+async def list_decisions() -> list[dict]:
+    return await get_decisions()
 
 
 @router.get("/memories", response_model=list[MemoryRecord])
-def list_memories() -> list[dict]:
-    return get_memories()
+async def list_memories() -> list[dict]:
+    return await get_memories()
 
 
 @router.get("/messages", response_model=list[StoredMessage])
-def list_stored_messages() -> list[dict]:
-    return get_stored_messages()
+async def list_stored_messages() -> list[dict]:
+    return await get_stored_messages()

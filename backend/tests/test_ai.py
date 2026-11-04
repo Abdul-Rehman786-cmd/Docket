@@ -133,7 +133,7 @@ def test_llm_four_way_database_decisions(ai_config, monkeypatch, caplog, action)
     db_reads = []
     llm_calls = []
 
-    def fake_get(url, *, params=None, headers=None, timeout=10):
+    async def fake_get(self, url, *, params=None, headers=None, timeout=10):
         table = url.rsplit("/", 1)[-1]
         if table == "rooms":
             return httpx.Response(200, json=[{
@@ -144,7 +144,7 @@ def test_llm_four_way_database_decisions(ai_config, monkeypatch, caplog, action)
         db_reads.append(table)
         return httpx.Response(200, json=[{"content": f"Stored {table} row"}], request=httpx.Request("GET", url))
 
-    def fake_post(url, *, params=None, headers=None, json=None, timeout=10):
+    async def fake_post(self, url, *, params=None, headers=None, json=None, timeout=10):
         table = url.rsplit("/", 1)[-1]
         db_writes.append((table, json))
         if table == "messages":
@@ -164,8 +164,8 @@ def test_llm_four_way_database_decisions(ai_config, monkeypatch, caplog, action)
             })
         return f"Database-grounded answer for {action}"
 
-    monkeypatch.setattr(record_repository.httpx, "get", fake_get)
-    monkeypatch.setattr(record_repository.httpx, "post", fake_post)
+    monkeypatch.setattr(record_repository.httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr(record_repository.httpx.AsyncClient, "post", fake_post)
     monkeypatch.setattr(ai_service, "ask_switch", fake_ask_switch)
 
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
@@ -451,7 +451,10 @@ def test_incoming_message_replies_to_switch_discord_room(ai_config, monkeypatch,
         return {"status": "ok"}
 
     monkeypatch.setattr(ai_service, "ask_switch", fake_ask_switch)
-    monkeypatch.setattr(ai_service, "query_team_memory", lambda settings, search_query: {})
+    async def empty_memory(settings, search_query):
+        return {}
+
+    monkeypatch.setattr(ai_service, "query_team_memory", empty_memory)
     monkeypatch.setattr(SwitchAPI, "post_room_message", fake_post_room_message)
 
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
@@ -488,7 +491,10 @@ def test_viewer_source_request_never_posts_to_discord(ai_config, monkeypatch):
         posted.append(room_id)
 
     monkeypatch.setattr(ai_service, "ask_switch", fake_ask_switch)
-    monkeypatch.setattr(ai_service, "query_team_memory", lambda settings, search_query: {})
+    async def empty_memory(settings, search_query):
+        return {}
+
+    monkeypatch.setattr(ai_service, "query_team_memory", empty_memory)
     monkeypatch.setattr(SwitchAPI, "post_room_message", fake_post_room_message)
 
     async def run():
@@ -500,7 +506,8 @@ def test_viewer_source_request_never_posts_to_discord(ai_config, monkeypatch):
         )
         service = AIService()
         await service.submit(AskRequest(request_id=uuid4(), source_message_ref="a" * 24), settings, receipts)
-        await asyncio.gather(*service.tasks)
+        await service.queue.join()
+        await service.close()
         return service.repository.recent(ai_service.response_scope(settings))
 
     rows = asyncio.run(run())

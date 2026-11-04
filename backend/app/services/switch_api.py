@@ -6,9 +6,9 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
-import httpx
 from websockets.asyncio.client import connect
 
+from app.core.http_clients import service_client
 from app.services.switch_listener import frame_parts, socket_logger
 
 
@@ -28,15 +28,14 @@ class SwitchAPI:
 
     @asynccontextmanager
     async def http(self):
-        async with httpx.AsyncClient(
-            base_url=self.base_url + "/", headers=self.headers,
-            timeout=20, trust_env=False, follow_redirects=False,
-        ) as client:
+        async with service_client("switch") as client:
             yield client
 
     async def operation(self, client, name: str, args: dict, connection_id: str | None = None):
-        headers = {"X-Switch-Connection-Id": connection_id} if connection_id else {}
-        response = await client.post(self.agent_path.lstrip("/") + "/ops/" + name, json=args, headers=headers)
+        headers = dict(self.headers)
+        if connection_id:
+            headers["X-Switch-Connection-Id"] = connection_id
+        response = await client.post(self.base_url + self.agent_path + "/ops/" + name, json=args, headers=headers)
         if response.status_code != 200:
             raise SwitchError("Switch rejected the operation. Check agent access and runtime availability.")
         try:
@@ -58,7 +57,8 @@ class SwitchAPI:
                 if thread_id:
                     direct_payload["thread_id"] = thread_id
                 response = await client.post(
-                    self.agent_path.lstrip("/") + "/message",
+                    self.base_url + self.agent_path + "/message",
+                    headers=self.headers,
                     json=direct_payload,
                 )
                 if response.status_code in (200, 201):

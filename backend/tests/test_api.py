@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 from fastapi.testclient import TestClient
 from app.main import app
@@ -53,7 +54,7 @@ def test_supabase_status_and_stored_messages_with_configured_credentials(monkeyp
     get_settings.cache_clear()
     calls = []
 
-    def fake_get(url, *, params=None, headers=None, timeout=10):
+    async def fake_get(self, url, *, params=None, headers=None, timeout=10):
         calls.append((url, params, headers))
         if url.endswith("/rest/v1/tenants"):
             return httpx.Response(200, json=[{"id": "00000000-0000-0000-0000-000000000001"}], request=httpx.Request("GET", url))
@@ -77,7 +78,7 @@ def test_supabase_status_and_stored_messages_with_configured_credentials(monkeyp
             )
         raise AssertionError(f"Unexpected URL: {url}")
 
-    monkeypatch.setattr(record_repository.httpx, "get", fake_get)
+    monkeypatch.setattr(record_repository.httpx.AsyncClient, "get", fake_get)
 
     status_resp = client.get("/api/v1/supabase/status", headers=ADMIN_HEADERS)
     assert status_resp.status_code == 200
@@ -98,10 +99,10 @@ def test_supabase_error_never_exposes_credentials_or_url(monkeypatch):
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "fixture-service-role-key")
     get_settings.cache_clear()
 
-    def failing_get(*args, **kwargs):
+    async def failing_get(*args, **kwargs):
         raise httpx.ConnectError("https://fixture.supabase.co fixture-service-role-key failed")
 
-    monkeypatch.setattr(record_repository.httpx, "get", failing_get)
+    monkeypatch.setattr(record_repository.httpx.AsyncClient, "get", failing_get)
     response = client.get("/api/v1/supabase/status", headers=ADMIN_HEADERS)
     assert response.status_code == 503
     assert response.json() == {"detail": "Database request failed"}
@@ -111,7 +112,7 @@ def test_supabase_error_never_exposes_credentials_or_url(monkeypatch):
 
 def test_repository_allows_only_known_tables():
     try:
-        list_records("random_table")
+        asyncio.run(list_records("random_table"))
     except ValueError as exc:
         assert str(exc) == "Unknown table"
     else:

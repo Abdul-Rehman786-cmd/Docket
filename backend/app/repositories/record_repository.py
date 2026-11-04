@@ -7,6 +7,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.core.config import Settings, get_settings
+from app.core.http_clients import database_client
 from app.core.message_logging import message_text_for_log
 from app.models.ai import LLMDecision
 
@@ -61,12 +62,13 @@ def _valid_iso_datetime(value: str | None) -> str | None:
         return None
 
 
-def check_database_connection(settings: Settings | None = None) -> dict[str, str]:
+@database_client
+async def check_database_connection(settings: Settings | None = None, *, client) -> dict[str, str]:
     """Verify Supabase REST connectivity using configured service-role credentials."""
     active_settings = settings or get_settings()
     url = _rest_url(active_settings, "tenants")
     try:
-        response = httpx.get(
+        response = await client.get(
             url,
             params={"select": "id", "limit": "1"},
             headers=_supabase_headers(active_settings),
@@ -87,7 +89,8 @@ def check_database_connection(settings: Settings | None = None) -> dict[str, str
         raise HTTPException(503, "Database request failed") from exc
 
 
-def list_records(table: str) -> list[dict]:
+@database_client
+async def list_records(table: str, *, client) -> list[dict]:
     """Read records via Supabase REST. Only invoked by protected backend endpoints."""
     if table not in ALLOWED_TABLES:
         raise ValueError("Unknown table")
@@ -97,7 +100,7 @@ def list_records(table: str) -> list[dict]:
     if settings.switch_tenant_id is not None:
         params["tenant_id"] = f"eq.{settings.switch_tenant_id}"
     try:
-        response = httpx.get(
+        response = await client.get(
             url,
             params=params,
             headers=_supabase_headers(settings),
@@ -110,17 +113,18 @@ def list_records(table: str) -> list[dict]:
         return data
     except (httpx.HTTPError, ValueError) as exc:
         # Do not expose database URLs, API responses, or credentials to the client.
+        logging.getLogger("team_memory").debug("Record read failed table=%s", table)
         raise HTTPException(503, "Database request failed") from exc
 
 
-def _ensure_tenant_and_room(
-    settings: Settings, tenant_id: UUID, switch_room_id: str
+async def _ensure_tenant_and_room(
+    settings: Settings, tenant_id: UUID, switch_room_id: str, *, client
 ) -> str:
     rooms_url = _rest_url(settings, "rooms")
     tenants_url = _rest_url(settings, "tenants")
     tenant_id_str = str(tenant_id)
 
-    room_lookup = httpx.get(
+    room_lookup = await client.get(
         rooms_url,
         params={
             "switch_room_id": f"eq.{switch_room_id}",
@@ -136,7 +140,7 @@ def _ensure_tenant_and_room(
         raise ValueError("Unexpected database response")
 
     if not rooms:
-        tenant_resp = httpx.post(
+        tenant_resp = await client.post(
             tenants_url,
             params={"on_conflict": "id"},
             headers=_supabase_headers(
@@ -147,7 +151,7 @@ def _ensure_tenant_and_room(
         )
         tenant_resp.raise_for_status()
 
-        room_upsert = httpx.post(
+        room_upsert = await client.post(
             rooms_url,
             params={
                 "on_conflict": "switch_room_id",
@@ -177,7 +181,8 @@ def _ensure_tenant_and_room(
     return str(room["id"])
 
 
-def store_ai_memory(
+@database_client
+async def store_ai_memory(
     settings: Settings,
     *,
     tenant_id: UUID,
@@ -187,6 +192,7 @@ def store_ai_memory(
     body: str,
     occurred_at: datetime,
     decision: LLMDecision,
+    client,
 ) -> dict[str, int]:
     """Persist the message and extracted commitments, decisions, and memories when decided by the LLM."""
     messages_url = _rest_url(settings, "messages")
@@ -197,11 +203,11 @@ def store_ai_memory(
     now_iso = datetime.now(timezone.utc).isoformat()
 
     try:
-        room_uuid = _ensure_tenant_and_room(settings, tenant_id, switch_room_id)
+        room_uuid = await _ensure_tenant_and_room(settings, tenant_id, switch_room_id, client=client)
         safe_author = _redact(author_name, settings) or "Unknown sender"
         safe_body = _redact(body, settings) or "[empty]"
 
-        msg_resp = httpx.post(
+        msg_resp = await client.post(
             messages_url,
             params={
                 "on_conflict": "tenant_id,room_id,switch_message_id",
@@ -265,7 +271,7 @@ def store_ai_memory(
             )
 
         if commitment_rows:
-            c_resp = httpx.post(
+            c_resp = await client.post(
                 commitments_url,
                 params={"on_conflict": "message_id,extraction_key"},
                 headers=_supabase_headers(
@@ -305,7 +311,7 @@ def store_ai_memory(
             )
 
         if decision_rows:
-            d_resp = httpx.post(
+            d_resp = await client.post(
                 decisions_url,
                 params={"on_conflict": "message_id,extraction_key"},
                 headers=_supabase_headers(
@@ -343,7 +349,7 @@ def store_ai_memory(
                 }
             )
 
-        mem_resp = httpx.post(
+        mem_resp = await client.post(
             memories_url,
             params={"on_conflict": "message_id,memory_type,extraction_key"},
             headers=_supabase_headers(
@@ -373,8 +379,9 @@ def store_ai_memory(
         raise HTTPException(503, "Database request failed") from exc
 
 
-def query_team_memory(
-    settings: Settings, *, search_query: str | None = None
+@database_client
+async def query_team_memory(
+    settings: Settings, *, search_query: str | None = None, client
 ) -> dict[str, list[dict]]:
     """Query Supabase for stored memories, commitments, decisions, and messages for the response."""
     if settings.switch_tenant_id is None:
@@ -405,7 +412,7 @@ def query_team_memory(
             }
             if table == "memories":
                 params["active"] = "eq.true"
-            response = httpx.get(
+            response = await client.get(
                 url,
                 params=params,
                 headers=_supabase_headers(settings),

@@ -15,7 +15,9 @@ from app.models.ai import AskRequest, LLMDecision
 from app.models.messages import IncomingMessage, MessageReceipt
 from app.repositories.ai_requests import AIRequestRepository
 from app.repositories.record_repository import query_team_memory, store_ai_memory
-from app.services.message_service import get_recent_messages
+from app.services.message_service import (
+    get_recent_messages, receive_message, message_reference, validate_message_scope,
+)
 from app.services.switch_api import (
     SwitchAPI,
     SwitchError,
@@ -26,6 +28,7 @@ from app.services.switch_api import (
 
 JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
 logger = logging.getLogger("uvicorn.error")
+MAX_PENDING_JOBS = 4
 
 
 def response_scope(settings: Settings) -> tuple:
@@ -207,7 +210,10 @@ class AIService:
     def __init__(self):
         self.repository = AIRequestRepository()
         self.tasks: set[asyncio.Task] = set()
-        self.lock = asyncio.Lock()
+        self.queue = asyncio.Queue(maxsize=MAX_PENDING_JOBS)
+        self.pending = 0
+        self.worker = None
+        self.closed = False
         # Fingerprints of replies we posted. Switch sender IDs are participant IDs that may
         # differ from agent IDs, so also recognise our own posts by room + content.
         self.posted_replies: deque[str] = deque(maxlen=100)
@@ -230,12 +236,6 @@ class AIService:
             logger.info("AI skipped own reply echo ref=%s", receipt.message_ref)
             return
         if not is_ai_configured(settings):
-            return
-        if len(self.tasks) >= 4:
-            logger.warning(
-                "AI decision deferred message_ref=%s reason=queue_full",
-                receipt.message_ref,
-            )
             return
         auto_request_id = uuid5(NAMESPACE_URL, f"message:{receipt.message_ref}")
         scope = response_scope(settings)
@@ -324,152 +324,192 @@ class AIService:
             existing_source = self.repository.get_by_source(scope, request.source_message_ref)
             if existing_source:
                 return self.repository.rekey(scope, existing_source.request_id, request.request_id)
-        if len(self.tasks) >= 4:
+        if self.closed:
+            raise HTTPException(503, "AI processing is stopping")
+        if self.pending >= MAX_PENDING_JOBS:
             raise HTTPException(429, "Codex already has several pending questions. Try again shortly.")
         row = self.repository.create(scope, request.request_id, safe_question, request.source_message_ref)
-        task = asyncio.create_task(self._run(scope, row, settings, source_meta=source_meta))
-        self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
+        # No await between capacity check and enqueue: admission is atomic on this loop.
+        safe_meta = None
+        if source_meta:
+            safe_meta = {key: value for key, value in source_meta.items() if key != "body"}
+            safe_meta["author_name"] = json.loads(message_text_for_log(
+                source_meta.get("author_name"), settings
+            ))
+        self.queue.put_nowait((scope, row, settings, safe_meta))
+        self.pending += 1
+        if self.worker is None or self.worker.done():
+            self.worker = asyncio.create_task(self._work())
+            self.tasks.add(self.worker)
+            self.worker.add_done_callback(self.tasks.discard)
         return row
+
+    async def ingest(self, message, settings, receipts):
+        validate_message_scope(message, settings)
+        eligible = (
+            is_ai_configured(settings)
+            and message.sender not in settings.switch_ai_senders
+            and self._reply_fingerprint(message.room_id, message.body) not in self.posted_replies
+        )
+        # Existing deliveries are acknowledged even when no new work fits.
+        if eligible and not receipts.contains(message_reference(message)):
+            if self.closed:
+                raise HTTPException(503, "AI processing is stopping")
+            if self.pending >= MAX_PENDING_JOBS:
+                raise HTTPException(429, "AI queue is full; retry this delivery", headers={"Retry-After": "2"})
+        # Neither receive_message nor submit yields before the enqueue completes.
+        receipt = receive_message(message, settings, receipts)
+        await self.evaluate_incoming_message(message, receipt, settings, receipts)
+        return receipt
+
+    async def _work(self):
+        while True:
+            scope, row, settings, meta = await self.queue.get()
+            try:
+                await self._run(scope, row, settings, source_meta=meta)
+            finally:
+                self.pending -= 1
+                self.queue.task_done()
+                # Do not retain the previous job while idle on queue.get().
+                del scope, row, settings, meta
 
     async def _run(self, scope, row, settings: Settings, *, source_meta: dict | None = None):
         msg_ref = row.source_message_ref or "direct-question"
         try:
-            async with self.lock:
-                self.repository.update(scope, row.request_id, status="waiting")
+            self.repository.update(scope, row.request_id, status="waiting")
+            logger.info(
+                "AI evaluating message ref=%s request_id=%s text=%s",
+                msg_ref,
+                row.request_id,
+                message_text_for_log(row.question, settings),
+            )
+            async with asyncio.timeout(settings.switch_ai_timeout_seconds):
+                raw_answer = await ask_switch(settings, row.question)
+                decision = parse_llm_decision(raw_answer)
                 logger.info(
-                    "AI evaluating message ref=%s request_id=%s text=%s",
-                    msg_ref,
-                    row.request_id,
-                    message_text_for_log(row.question, settings),
-                )
-                async with asyncio.timeout(settings.switch_ai_timeout_seconds):
-                    raw_answer = await ask_switch(settings, row.question)
-                    decision = parse_llm_decision(raw_answer)
-                    logger.info(
-                        "AI decision ref=%s request_id=%s action=%s commitments=%d decisions=%d memories=%d search_query=%s",
-                        msg_ref,
-                        row.request_id,
-                        decision.action,
-                        len(decision.commitments),
-                        len(decision.decisions),
-                        len(decision.memories),
-                        message_text_for_log(decision.search_query, settings)
-                        if decision.search_query
-                        else "None",
-                    )
-                    stored_counts: dict[str, int] | None = None
-
-                    if decision.action in ("store_only", "store_and_query"):
-                        default_room = sorted(settings.allowed_switch_rooms)[0]
-                        meta = source_meta or {
-                            "room_id": default_room,
-                            "switch_message_id": f"ai-req-{row.request_id}",
-                            "author_name": "Viewer user",
-                            "occurred_at": row.created_at,
-                        }
-                        stored_counts = store_ai_memory(
-                            settings,
-                            tenant_id=settings.switch_tenant_id,
-                            switch_room_id=meta["room_id"],
-                            switch_message_id=meta["switch_message_id"],
-                            author_name=meta["author_name"],
-                            body=row.question,
-                            occurred_at=meta["occurred_at"],
-                            decision=decision,
-                        )
-                        logger.info(
-                            "AI database store complete ref=%s request_id=%s action=%s stored=%s",
-                            msg_ref,
-                            row.request_id,
-                            decision.action,
-                            json.dumps(stored_counts, sort_keys=True),
-                        )
-
-                    if decision.action in ("query_only", "store_and_query"):
-                        db_context = query_team_memory(
-                            settings,
-                            search_query=decision.search_query or row.question,
-                        )
-                        logger.info(
-                            "AI database query complete ref=%s request_id=%s action=%s matched=%s",
-                            msg_ref,
-                            row.request_id,
-                            decision.action,
-                            json.dumps({k: len(v) for k, v in db_context.items()}, sort_keys=True),
-                        )
-                        synthesis_prompt = build_context_synthesis_prompt(
-                            row.question, db_context, stored_counts=stored_counts
-                        )
-                        synthesized = await ask_switch(settings, synthesis_prompt)
-                        final_answer = _extract_plain_answer(synthesized)
-                    else:
-                        final_answer = (decision.answer or "").strip()
-                        if not final_answer:
-                            final_answer = (
-                                "Stored in team memory database."
-                                if decision.action == "store_only"
-                                else "No database action was needed."
-                            )
-
-                safe_answer_log = message_text_for_log(final_answer, settings)
-                safe_answer = json.loads(safe_answer_log)
-                logger.info(
-                    "AI response complete ref=%s request_id=%s action=%s answer=%s",
+                    "AI decision ref=%s request_id=%s action=%s commitments=%d decisions=%d memories=%d search_query=%s",
                     msg_ref,
                     row.request_id,
                     decision.action,
-                    safe_answer_log,
+                    len(decision.commitments),
+                    len(decision.decisions),
+                    len(decision.memories),
+                    message_text_for_log(decision.search_query, settings)
+                    if decision.search_query
+                    else "None",
                 )
-                self.repository.update(
-                    scope,
-                    row.request_id,
-                    status="answered",
-                    answer=safe_answer,
-                    db_action=decision.action,
-                    stored_counts=stored_counts,
-                )
-                # Reply pipeline: Discord -> Switch -> FastAPI -> Switch -> Discord
-                should_reply = (
-                    settings.switch_reply_to_discord
-                    and source_meta
-                    and source_meta.get("origin") == "discord"
-                    and source_meta.get("room_id")
-                    and bool(final_answer and final_answer.strip())
-                    and (
-                        decision.action in ("query_only", "store_and_query")
-                        or (source_meta.get("addressed") and decision.action != "store_only")
+                stored_counts: dict[str, int] | None = None
+
+                if decision.action in ("store_only", "store_and_query"):
+                    default_room = sorted(settings.allowed_switch_rooms)[0]
+                    meta = source_meta or {
+                        "room_id": default_room,
+                        "switch_message_id": f"ai-req-{row.request_id}",
+                        "author_name": "Viewer user",
+                        "occurred_at": row.created_at,
+                    }
+                    stored_counts = await store_ai_memory(
+                        settings,
+                        tenant_id=settings.switch_tenant_id,
+                        switch_room_id=meta["room_id"],
+                        switch_message_id=meta["switch_message_id"],
+                        author_name=meta["author_name"],
+                        body=row.question,
+                        occurred_at=meta["occurred_at"],
+                        decision=decision,
                     )
+                    logger.info(
+                        "AI database store complete ref=%s request_id=%s action=%s stored=%s",
+                        msg_ref,
+                        row.request_id,
+                        decision.action,
+                        json.dumps(stored_counts, sort_keys=True),
+                    )
+
+                if decision.action in ("query_only", "store_and_query"):
+                    db_context = await query_team_memory(
+                        settings,
+                        search_query=decision.search_query or row.question,
+                    )
+                    logger.info(
+                        "AI database query complete ref=%s request_id=%s action=%s matched=%s",
+                        msg_ref,
+                        row.request_id,
+                        decision.action,
+                        json.dumps({k: len(v) for k, v in db_context.items()}, sort_keys=True),
+                    )
+                    synthesis_prompt = build_context_synthesis_prompt(
+                        row.question, db_context, stored_counts=stored_counts
+                    )
+                    synthesized = await ask_switch(settings, synthesis_prompt)
+                    final_answer = _extract_plain_answer(synthesized)
+                else:
+                    final_answer = (decision.answer or "").strip()
+                    if not final_answer:
+                        final_answer = (
+                            "Stored in team memory database."
+                            if decision.action == "store_only"
+                            else "No database action was needed."
+                        )
+
+            safe_answer_log = message_text_for_log(final_answer, settings)
+            safe_answer = json.loads(safe_answer_log)
+            logger.info(
+                "AI response complete ref=%s request_id=%s action=%s answer=%s",
+                msg_ref,
+                row.request_id,
+                decision.action,
+                safe_answer_log,
+            )
+            self.repository.update(
+                scope,
+                row.request_id,
+                status="answered",
+                answer=safe_answer,
+                db_action=decision.action,
+                stored_counts=stored_counts,
+            )
+            # Reply pipeline: Discord -> Switch -> FastAPI -> Switch -> Discord
+            should_reply = (
+                settings.switch_reply_to_discord
+                and source_meta
+                and source_meta.get("origin") == "discord"
+                and source_meta.get("room_id")
+                and bool(final_answer and final_answer.strip())
+                and (
+                    decision.action in ("query_only", "store_and_query")
+                    or (source_meta.get("addressed") and decision.action != "store_only")
                 )
-                if should_reply:
-                    try:
-                        requester_api = SwitchAPI(
-                            settings.switch_bridge_url,
-                            settings.switch_requester_agent_id,
-                            settings.switch_requester_api_key.get_secret_value(),
-                        )
-                        reply_room_id = source_meta["room_id"]
-                        reply_thread_id = source_meta.get("thread_id")
-                        # Record before posting: the echo can arrive before the HTTP call returns.
-                        self.posted_replies.append(self._reply_fingerprint(reply_room_id, final_answer))
-                        await requester_api.post_room_message(
-                            room_id=reply_room_id,
-                            body=final_answer,
-                            thread_id=reply_thread_id,
-                        )
-                        logger.info(
-                            "AI reply posted to Switch room=%s ref=%s request_id=%s",
-                            reply_room_id,
-                            msg_ref,
-                            row.request_id,
-                        )
-                    except Exception as post_err:
-                        logger.warning(
-                            "Failed to post AI reply to Switch room=%s ref=%s reason=%s",
-                            source_meta.get("room_id"),
-                            msg_ref,
-                            message_text_for_log(str(post_err), settings),
-                        )
+            )
+            if should_reply:
+                try:
+                    requester_api = SwitchAPI(
+                        settings.switch_bridge_url,
+                        settings.switch_requester_agent_id,
+                        settings.switch_requester_api_key.get_secret_value(),
+                    )
+                    reply_room_id = source_meta["room_id"]
+                    reply_thread_id = source_meta.get("thread_id")
+                    # Record before posting: the echo can arrive before the HTTP call returns.
+                    self.posted_replies.append(self._reply_fingerprint(reply_room_id, final_answer))
+                    await requester_api.post_room_message(
+                        room_id=reply_room_id,
+                        body=final_answer,
+                        thread_id=reply_thread_id,
+                    )
+                    logger.info(
+                        "AI reply posted to Switch room=%s ref=%s request_id=%s",
+                        reply_room_id,
+                        msg_ref,
+                        row.request_id,
+                    )
+                except Exception as post_err:
+                    logger.warning(
+                        "Failed to post AI reply to Switch room=%s ref=%s reason=%s",
+                        source_meta.get("room_id"),
+                        msg_ref,
+                        message_text_for_log(str(post_err), settings),
+                    )
         except asyncio.CancelledError:
             self.repository.update(
                 scope,
@@ -525,7 +565,14 @@ class AIService:
             )
 
     async def close(self):
+        self.closed = True
         tasks = list(self.tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        while not self.queue.empty():
+            scope, row, _, _ = self.queue.get_nowait()
+            self.repository.update(scope, row.request_id, status="failed",
+                                   error="Server stopped before processing. The question was not retried.")
+            self.pending -= 1
+            self.queue.task_done()

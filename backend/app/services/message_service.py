@@ -20,10 +20,7 @@ def message_reference(message: IncomingMessage) -> str:
 def receive_message(
     message: IncomingMessage, settings: Settings, receipts: MessageReceiptRepository
 ) -> MessageReceipt:
-    if settings.switch_tenant_id is None or not settings.allowed_switch_rooms:
-        raise HTTPException(503, "Switch ingestion is not configured")
-    if message.tenant_id != settings.switch_tenant_id or message.room_id not in settings.allowed_switch_rooms:
-        raise HTTPException(403, "Message tenant or room is not authorized")
+    validate_message_scope(message, settings)
     safe_text = message_text_for_log(message.body, settings)
     display_name = (message.sender_name or "").strip() or "Unknown sender"
     safe_name = message_text_for_log(display_name, settings)
@@ -54,3 +51,10 @@ def get_message_status(settings: Settings, receipts: MessageReceiptRepository) -
         sender_name=latest.sender_name if latest else None,
         message=latest.text if latest else None,
     )
+
+
+def validate_message_scope(message: IncomingMessage, settings: Settings) -> None:
+    if settings.switch_tenant_id is None or not settings.allowed_switch_rooms:
+        raise HTTPException(503, "Switch ingestion is not configured")
+    if message.tenant_id != settings.switch_tenant_id or message.room_id not in settings.allowed_switch_rooms:
+        raise HTTPException(403, "Message tenant or room is not authorized")

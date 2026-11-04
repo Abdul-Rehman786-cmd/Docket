@@ -10,7 +10,7 @@ from app.models.ai import AIResponse
 class AIRequestRepository:
     def __init__(self):
         self.rows: OrderedDict[tuple, AIResponse] = OrderedDict()
-        self.aliases: dict[tuple, UUID] = {}
+        self.aliases: OrderedDict[tuple, UUID] = OrderedDict()
 
     def _resolve_key(self, scope: tuple, request_id: UUID) -> tuple:
         target_id = self.aliases.get((scope, request_id), request_id)
@@ -27,13 +27,14 @@ class AIRequestRepository:
         return None
 
     def rekey(self, scope: tuple, old_request_id: UUID, new_request_id: UUID) -> AIResponse:
+        """Alias a caller ID without moving the row an active worker will update."""
         old_key = self._resolve_key(scope, old_request_id)
-        row = self.rows.pop(old_key)
-        updated = row.model_copy(update={"request_id": new_request_id})
-        self.rows[(scope, new_request_id)] = updated
-        self.aliases[(scope, old_request_id)] = new_request_id
-        self.aliases[old_key] = new_request_id
-        return updated.model_copy()
+        row = self.rows[old_key]
+        self.aliases[(scope, new_request_id)] = row.request_id
+        self.aliases.move_to_end((scope, new_request_id))
+        if len(self.aliases) > 100:
+            self.aliases.popitem(last=False)
+        return row.model_copy()
 
     def recent(self, scope: tuple) -> list[AIResponse]:
         return [row.model_copy() for (key, _), row in reversed(self.rows.items()) if key == scope]
@@ -44,6 +45,9 @@ class AIRequestRepository:
             if disposable is None:
                 raise ValueError("Request history is full")
             del self.rows[disposable]
+            for alias, target in list(self.aliases.items()):
+                if (alias[0], target) == disposable:
+                    del self.aliases[alias]
         row = AIResponse(request_id=request_id, source_message_ref=source, question=question,
                          created_at=datetime.now(timezone.utc))
         self.rows[(scope, request_id)] = row

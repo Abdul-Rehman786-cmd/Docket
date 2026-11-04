@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import logging
+from time import perf_counter
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -9,15 +11,24 @@ from app.controllers.viewer import router as viewer_router
 from app.repositories.message_receipts import MessageReceiptRepository
 from app.controllers.ai import router as ai_router
 from app.services.ai_service import AIService
+from app.core.http_clients import HTTPClients, use_http_clients
+from app.core.config import get_settings
+from app.core.logging import configure_logging
 
 
 @asynccontextmanager
 async def lifespan(application):
+    configure_logging(get_settings())
+    application.state.http_clients = HTTPClients()
     application.state.ai_service = AIService()
     try:
         yield
     finally:
-        await application.state.ai_service.close()
+        try:
+            await application.state.ai_service.close()
+        finally:
+            await application.state.http_clients.close()
+            application.state.http_clients = None
 
 
 app = FastAPI(title="Team Memory API", version="0.1.0", lifespan=lifespan)
@@ -31,16 +42,25 @@ app.include_router(ai_router)
 
 @app.middleware("http")
 async def prevent_message_caching(request, call_next):
-    response = await call_next(request)
+    started = perf_counter()
+    with use_http_clients(getattr(request.app.state, "http_clients", None)):
+        response = await call_next(request)
     if request.url.path.startswith(("/messages", "/ai")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
+    route = request.scope.get("route")
+    logging.getLogger("team_memory").debug(
+        "route=%s status=%d duration_ms=%.2f",
+        getattr(route, "path", "unmatched"), response.status_code,
+        (perf_counter() - started) * 1000,
+    )
     return response
 
 
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request, exc: RequestValidationError):
     # FastAPI's default 422 response echoes invalid input, which may contain chat secrets.
+    logging.getLogger("team_memory").debug("Request validation rejected")
     return JSONResponse(status_code=422, content={"detail": "Invalid request payload"})
 
 

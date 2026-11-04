@@ -93,7 +93,7 @@ To see messages **in the browser**, open `http://127.0.0.1:8000/`, enter your lo
 
 To also print the incoming sender and message in the **FastAPI terminal**, set `LOG_DISCORD_MESSAGES=true` in the ignored `backend/.env` and restart the API. New deliveries print a line such as `Discord message ref=... sender="Ali" text="Hello from Discord!"`. This local debug option defaults to `false`; configured credential values, common credential formats, and URLs are masked, control characters are escaped, and previews are limited to 2,000 characters. Set it back to `false` to stop printing text. Browser previews work independently of this terminal logging option.
 
-Default delivery logs use receipt metadata to correlate API and listener activity. The current FastAPI entry point does not configure a general `LOG_LEVEL` setting. Keep HTTP and WebSocket wire-level debugging disabled because those traces can expose authentication headers.
+Default delivery logs use receipt metadata to correlate API and listener activity. `LOG_LEVEL` controls application diagnostics (`INFO` by default; `DEBUG` adds matched route names, status codes, and timings without request contents). It does not enable HTTP or WebSocket wire logging. Keep HTTP and WebSocket wire-level debugging disabled because those traces can expose authentication headers.
 
 Check the latest sender and message in a third terminal, also from `backend/`:
 
@@ -105,7 +105,7 @@ The protected `GET /messages/status` and the `--status` command return the lates
 
 ### Ask the existing Switch AI and receive answers only in the viewer
 
-The viewer now has **Ask Codex** beside each received message and a question box above the feed. Select a message or enter a question. The answer appears in the **Ask Codex** panel automatically. This reuses the existing `codex-discord` AI and its model authentication; FastAPI needs no model API key. Questions go through a separate non-AI Switch client to an internal room with no Discord bridge. No automatic questions are sent for ordinary incoming chat.
+The viewer now has **Ask Codex** beside each received message and a question box above the feed. Select a message or enter a question. The answer appears in the **Ask Codex** panel automatically. This reuses the existing `codex-discord` AI and its model authentication; FastAPI needs no model API key. Questions go through a separate non-AI Switch client to an internal room with no Discord bridge. Eligible incoming chat also receives automatic AI evaluation for the database decision.
 
 For a new local installation:
 
@@ -122,7 +122,7 @@ Setup writes `SWITCH_REQUESTER_AGENT_ID`, `SWITCH_REQUESTER_API_KEY`, `SWITCH_AI
 
 `POST /ai/requests` accepts `{request_id, question}` or `{request_id, source_message_ref}` and returns `202` with a queued result. Use a UUID for `request_id`; repeating the same ID/question reuses that result, while reusing it for different content returns `409`. `GET /ai/requests` polls the latest redacted results. Both require `X-Ingest-Token`, enforce the configured scope, and return `Cache-Control: no-store`. Client callers cannot choose a destination room or an AI identity. Invalid or expired source-message references return `404`. These are local development interfaces, not mobile user authentication.
 
-The API processes one question at a time, permits up to four pending questions, and retains at most 100 results in memory. Redaction runs before a question reaches Codex and before an answer is retained. Each answer is matched to the configured sender, internal room, and exact request thread. The first matching nonblank response completes the request; the prompt asks Codex to reply once. Timeout, disconnect, or restart does not resubmit a potentially delivered question. Pending work and results are not durable. Run **one API worker**.
+The API processes one question at a time using one bounded queue, permits four total outstanding jobs (running plus queued), and retains at most 100 results and 100 request aliases in memory. Reusing a source evaluation preserves its canonical request ID. Aliases expire with their result or when their own retention limit is reached. Redaction runs before a question reaches Codex and before an answer is retained. Each answer is matched to the configured sender, internal room, and exact request thread. The first matching nonblank response completes the request; the prompt asks Codex to reply once. Timeout, disconnect, or restart does not resubmit a potentially delivered question. Pending work and results are not durable. Run **one API worker**.
 
 Every request verifies that the internal room has no bridge or external channel and contains only Codex and the client. It also checks Codex's reported sessions for live input-room bindings, and checks that every configured input room contains the listener without Codex. Missing runtime evidence, an active input-room session, or re-invitation causes a diagnostic before another question is posted. Stop the Discord-attached Codex session in Switch Console first, then rerun `python -m app.switch_setup`. Setup refuses to report success while an active input-room session is reported. Requests never fall back to an input room. Codex remains available in the private response room. Ask questions using the viewer's question box or **Ask Codex about this message**. Keep the internal room unbridged. The listener uses `SWITCH_REQUESTER_*`, preserving `SWITCH_AGENT_*` for the actual AI. Restarting the listener after an identity change starts a separate cursor; its old identity's messages are not replayed automatically.
 
@@ -158,6 +158,16 @@ If Switch refuses the connection, verify the bridge URL and agent key, and use a
 | Message endpoint returns `503` | Check ingestion configuration and API availability. |
 
 The listener is a local process with no automatic service wrapper; ensure it is running in a terminal before testing Discord delivery.
+
+### Resource lifecycle and overload handling
+
+FastAPI startup creates separate reusable asynchronous HTTP pools for Supabase and Switch. Each pool allows eight connections, with four idle keep-alive connections. Requests supply current credentials explicitly; clients do not keep default authentication headers. Database requests retain a ten-second timeout; Switch requests use a twenty-second timeout with five-second connection/pool waits. Shutdown cancels the AI worker, marks outstanding jobs failed, then closes both pools. Standalone setup commands own and close their temporary clients. No new dependencies are required.
+
+When AI processing is configured and all four job slots are occupied, `POST /messages` returns `429` with `Retry-After: 2` **before** retaining a new receipt or preview. The listener does not advance its acknowledged cursor and retries through its existing reconnect/replay mechanism. Duplicate accepted deliveries are still acknowledged; configured agent messages and recognized reply echoes do not consume AI capacity. Viewer submissions also return `429` when full. Admission and enqueue run without yielding on the single API event loop. Queued jobs retain redacted text and routing metadata rather than the raw message body.
+
+FastAPI and the listener remain **two separate processes**, and AI execution remains serialized. Receipt acknowledgement confirms in-process admission, not durable processing. A crash can lose acknowledged pending jobs; these changes do not add durable delivery or multiple-worker support. Continue running one API worker and one listener.
+
+Offline regression tests use mocked transports and reject accidental external HTTP. They cover slow database responsiveness, overload/retry behavior, alias retention, current credential headers, and pool shutdown. Live Supabase compatibility, remote query performance, and end-to-end Switch behavior still require service access. No database migrations are part of these changes.
 
 ## 2. Supabase
 The initial migration is a **destructive development reset**, not an incremental

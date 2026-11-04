@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import httpx
@@ -12,7 +13,8 @@ from app.repositories.record_repository import list_records
 
 
 @pytest.fixture
-def debug_logs(caplog):
+def debug_logs(caplog, monkeypatch):
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
     logger = logging.getLogger("team_memory")
     previous_level = logger.level
     configure_logging(Settings(_env_file=None, log_level="DEBUG"))
@@ -27,9 +29,9 @@ def test_debug_setting_is_app_only_and_configuration_is_idempotent():
     previous_level = logger.level
     root_level = logging.getLogger().level
     http_level = logging.getLogger("httpx").level
-    handlers = list(logger.handlers)
     try:
         configure_logging(Settings(_env_file=None, log_level="DEBUG"))
+        handlers = list(logger.handlers)
         configure_logging(Settings(_env_file=None, log_level="DEBUG"))
         assert logger.level == logging.DEBUG
         assert logger.handlers == handlers
@@ -65,12 +67,12 @@ def test_database_failure_diagnostics_exclude_exception_and_credentials(monkeypa
     monkeypatch.setenv("SUPABASE_URL", "https://fixture-db.invalid")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "fixture-db-credential")
 
-    def fail(*args, **kwargs):
+    async def fail(*args, **kwargs):
         raise httpx.ConnectError("fixture-db-credential fixture-private-exception")
 
-    monkeypatch.setattr(httpx, "get", fail)
+    monkeypatch.setattr(httpx.AsyncClient, "get", fail)
     with pytest.raises(HTTPException) as error:
-        list_records("commitments")
+        asyncio.run(list_records("commitments"))
     assert error.value.status_code == 503
     assert "Record read failed table=commitments" in debug_logs.text
     for value in ("fixture-db.invalid", "fixture-db-credential", "fixture-private-exception"):

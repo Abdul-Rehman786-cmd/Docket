@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Request
 from app.core.config import get_settings
 from app.core.security import require_ingest_token
 from app.models.messages import IncomingMessage, MessagePreview, MessageReceipt, MessageStatus
-from app.services.message_service import get_message_status, get_recent_messages, receive_message
+from app.services.message_service import get_message_status, get_recent_messages
 
 router = APIRouter(prefix="/messages", tags=["messages"], dependencies=[Depends(require_ingest_token)])
 
@@ -12,11 +12,9 @@ router = APIRouter(prefix="/messages", tags=["messages"], dependencies=[Depends(
 async def ingest_message(message: IncomingMessage, request: Request) -> MessageReceipt:
     """Acknowledge delivery, retain a redacted preview, and trigger AI 4-way database evaluation."""
     settings = get_settings()
-    receipt = receive_message(message, settings, request.app.state.message_receipts)
-    await request.app.state.ai_service.evaluate_incoming_message(
-        message, receipt, settings, request.app.state.message_receipts
+    return await request.app.state.ai_service.ingest(
+        message, settings, request.app.state.message_receipts
     )
-    return receipt
 
 
 @router.get("/status", response_model=MessageStatus)

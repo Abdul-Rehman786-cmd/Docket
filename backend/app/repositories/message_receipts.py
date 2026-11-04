@@ -19,6 +19,10 @@ class MessageReceiptRepository:
         self._last_receipt: MessageReceipt | None = None
         self._previews: deque[tuple[UUID, str, MessagePreview]] = deque(maxlen=100)
 
+    def contains(self, message_ref: str) -> bool:
+        with self._lock:
+            return message_ref in self._receipts
+
     def record(
         self, message_ref: str, *, tenant_id: UUID, room_id: str,
         redacted_sender_name: str, redacted_text: str,
