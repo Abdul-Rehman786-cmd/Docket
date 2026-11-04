@@ -357,6 +357,9 @@ CREATE TABLE public.memories (
 CREATE INDEX idx_memories_room
     ON public.memories (tenant_id, room_id);
 
+CREATE INDEX idx_memories_source_message
+    ON public.memories (tenant_id, room_id, message_id);
+
 -- An edited memory must not be searched using its previous text's embedding.
 -- The backend regenerates the embedding after updating content.
 CREATE OR REPLACE FUNCTION public.clear_stale_memory_embedding()
@@ -464,6 +467,9 @@ CREATE INDEX idx_reminder_deliveries_lease
 
 CREATE INDEX idx_reminder_deliveries_room
     ON public.reminder_deliveries (tenant_id, room_id);
+
+CREATE INDEX idx_reminder_deliveries_commitment
+    ON public.reminder_deliveries (tenant_id, room_id, commitment_id);
 
 -- ============================================================
 -- 6. AUTOMATIC UPDATE TIMESTAMPS
