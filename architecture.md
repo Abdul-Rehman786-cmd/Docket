@@ -19,6 +19,41 @@ The diagram and implementation plan below describe the target system. The curren
 
 The diagram's extraction, RAG, conflict checks, scheduler, LLM gateway, and `/ask`, `/docs/sync`, `/docs/apply-update`, and `/memories` endpoints remain future work. Additional external integrations and remote database migrations require a separate request. See `README.md` for Windows setup and run commands.
 
+### Implemented: server-only answers from the existing Switch Codex AI
+
+The viewer can ask the existing `codex-discord` AI about a selected incoming message or a typed question, and display its answer only on our server. Its existing model authentication remains in Switch; no model key is added to FastAPI. The user explicitly authorized a separate non-AI server client and supplied a registration key locally. `python -m app.switch_setup` registers `team-memory-client` once and creates an internal, private response room. Existing Codex credentials remain intact. The client belongs to the same owner, is invited to the input rooms, and has no model. Permissions are never widened automatically, and registration conflicts never overwrite an identity.
+
+```text
+Discord -> Switch input rooms -> non-AI listener -> authenticated message feed
+                                                         |
+                                       Select Ask Codex, or type a question
+                                                         |
+                                                         v
+POST /ai/requests -> bounded queue -> team-memory-client
+                                             |
+                                  Internal Switch room (no bridge)
+                                             |
+                                  Existing codex-discord AI/runtime
+                                             |
+                                  Correlated reply in request thread
+                                             |
+GET /ai/requests <- redacted result <- FastAPI
+```
+
+`controllers/ai.py` provides authenticated `POST /ai/requests` and `GET /ai/requests`. `models/ai.py` validates a caller-generated request UUID and either a question or a retained source reference. `services/ai_service.py` authorizes source previews, redacts before sending, serializes requests, and correlates room, exact opaque AI sender, and request thread. `repositories/ai_requests.py` retains bounded, redacted results scoped to tenant, input-room allow-list, responder, client, and internal room. Every request verifies that the room has no bridge/external channel and exactly the expected two participants before sending. No caller-supplied destination is accepted and no fallback to Discord exists. HTTP and WebSocket transport lives in `services/switch_api.py`; heartbeat processing runs independently of HTTP calls.
+
+The existing feed and `/messages/status` retain their behavior. `SWITCH_REQUESTER_*` takes precedence for the input listener, so it no longer claims rooms using Codex's identity. The response connection claims only the client's internal room. Setup stores returned credentials only in ignored `backend/.env` and learns the AI's sender ID from a harmless correlated readiness reply, without parsing participant IDs. The viewer renders all questions and answers as text, polls automatically, and clears them and pending browser requests on lock. Its token stays in tab memory. These are local development interfaces, not production user authentication.
+
+Server-only routing also requires removing the AI from Discord input rooms: an AI that remains a member can answer Discord messages independently of the API's private-room flow. After the user reported replies on both sides, setup was updated to retain `team-memory-client` and remove only `codex-discord` from configured input rooms. This was applied to both configured input rooms. Discord bridges, channel mappings, other agents, and Codex's internal response-room membership are preserved. Setup validates all source rooms before changing memberships and verifies each result; repeat runs do not repeat completed membership changes. Each API question now checks that Codex has not been re-invited to an input room, failing with a setup diagnostic before sending if that invariant is broken. The viewer remains the explicit trigger for AI questions; ordinary Discord chat is ingested silently.
+
+A subsequent live audit after another duplicate-reply report found Codex back in one input room with a live input-room session, while its internal session was also live. The earlier membership-only verification did not establish durable isolation. Switch Console keeps session-to-room bindings separately from server membership; its session must be stopped with the Console **Stop** control for that Discord session, leaving the internal response session running. The available agent API has no stop-session operation and local process inspection could not safely identify the bound session's process. Both setup and API requests now also inspect reported runtime sessions, reject live input-room bindings or missing runtime evidence, and return an actionable stop-session diagnostic. Final server-only delivery must be reverified after that external session is stopped; it must not be inferred solely from a successful private answer or one membership snapshot.
+
+After the user stopped the Codex session for `Idk`, setup and live checks reported no active Codex input-room sessions. During recovery the saved non-AI client's key returned `401`, and its configured identity/name were confirmed absent from Switch. The supplied registration key restored only that missing client without overwriting any existing agent; its new credentials were saved in ignored `.env`. Setup now verifies the preserved private room through Codex's existing access and re-invites a restored client before it attempts member-only room reads. The input listener was restarted with the restored credentials and covered both configured input rooms. A uniquely marked question was then sent through the running authenticated API; the expected private answer arrived, and four subsequent checks of both configured input-room histories found no copy of the marker. Runtime-session and membership checks passed throughout the observation window. Keep the Discord-attached `Idk` session stopped; reopening it would restore a separate reply path.
+
+One process permits four pending questions, runs one at a time, and retains at most 100 results. Same request UUID and question is idempotent within retained history. A timeout defaults to 180 seconds; a disconnect or restart never blindly resends a potentially delivered request. Only the first matching nonblank response is retained; the prompt asks Codex to reply once. Each question/answer uses the existing redaction and 2,000-character preview cap. Results and pending jobs are process-local and not durable. Run one API worker. No ordinary chat automatically triggers a question. RAG and extraction remain future work.
+
+On November 4, 2026, live setup verified a readiness reply from the existing Codex runtime, and the running FastAPI endpoint received the expected answer to a harmless arithmetic question through the unbridged room. Tests cover authentication, scope isolation, redaction before prompting, room routing checks, exact sender/thread correlation, heartbeats during HTTP waits, idempotency, and safe registration recovery. Switch's [agent protocol](https://docs.switchagents.ai/switch-rooms/internals/agent-protocol), [connections](https://docs.switchagents.ai/switch-rooms/internals/agent-connection), and [room routing](https://docs.switchagents.ai/switch-rooms/internals/rooms-and-resources) were checked before implementation. See README for restart and setup commands.
+
 ### Current runtime and message flow
 
 ```text
@@ -77,7 +112,7 @@ Switch is required for the hackathon. Switch is the chat layer and the agent ide
 |---|----------|--------|
 | 1 | Switch is the only chat layer for the hackathon (Discord through Switch's built-in bridge). No custom Discord bot. | Hackathon requirement. Less code. |
 | 2 | Backend is Python: FastAPI, Postgres (Supabase) with pgvector, APScheduler, one LLM gateway. | Best library support for RAG and extraction. Standard stack. |
-| 3 | One shared Switch agent for all servers and rooms. Do not create or delete an agent per server. | Switch docs: one agent can be in many rooms. Docs say to register once. |
+| 3 | Reuse one existing Codex AI plus one shared non-AI server client; no agent per server. Register the client once and preserve its credentials. | The user authorized the client so server requests have a different sender from the existing AI and do not take over its runtime. |
 | 4 | A small custom agent client ("router client") with no LLM sits on the Switch WebSocket. | Lets our code decide when to reply, instead of an LLM answering everything. |
 | 5 | The backend owns the reply decision (`router.py`). | Switch has no "reply only if needed" setting. |
 | 6 | Every reply goes out through the `post_message` API. | Single path for speaking, easy to control. |

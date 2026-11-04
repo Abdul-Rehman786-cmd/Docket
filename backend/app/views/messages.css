@@ -50,6 +50,15 @@ h3 { font-size: 15px; color: #49665f; font-weight: 550; margin: 0 0 10px; }
 .message { padding: 24px 28px; border-top: 1px solid #eef2ef; animation: arrive .22s ease-out; }
 .message:first-child { border-top: 0; }
 .message-meta { display: flex; justify-content: space-between; gap: 18px; align-items: center; margin-bottom: 11px; }
+.message-kind { font-size: 11px; color: #61767c; background: #f0f4f3; border-radius: 5px; padding: 3px 7px; margin-right: auto; white-space: nowrap; }
+.ai-kind { color: #176b60; background: #e6f4ed; }
+.thread-context { font-size: 12px; color: #61767c; border-left: 2px solid #b1d5c5; padding-left: 10px; overflow-wrap: anywhere; margin: 0 0 12px; }
+.ai-panel { padding: 24px 28px; border-bottom: 1px solid #dfe6e5; background: #f7fbf9; }
+.ai-panel form { margin-top: 18px; }
+.ai-panel .feed-note { padding: 12px 0 0; border: 0; }
+.ai-result { border: 1px solid #dfe6e5; padding: 16px; margin-top: 16px; border-radius: 9px; background: white; }
+.ai-question { font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; margin: 0 0 10px; }
+.ask-message { margin-top: 12px; }
 .source { font-size: 12px; font-weight: 600; color: #486d63; display: flex; align-items: center; gap: 7px; }
 .source::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #80ae96; }
 time { font-size: 11px; color: #8b9a9d; }

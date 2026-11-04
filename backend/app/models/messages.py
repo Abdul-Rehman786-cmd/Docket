@@ -46,3 +46,5 @@ class MessagePreview(BaseModel):
     received_at: datetime
     sender_name: str = Field(repr=False)
     text: str = Field(repr=False)
+    sender_kind: Literal["message", "ai"] = "message"
+    thread_ref: MessageRef | None = None

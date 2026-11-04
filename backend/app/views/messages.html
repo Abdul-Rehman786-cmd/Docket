@@ -15,7 +15,7 @@
     </header>
 
     <div class="heading">
-      <div><p class="eyebrow">DISCORD → SWITCH → FASTAPI</p><h1>Incoming messages</h1><p class="subtitle">See your team's messages arrive, as they happen.</p></div>
+      <div><p class="eyebrow">DISCORD → SWITCH → FASTAPI</p><h1>Incoming messages</h1><p class="subtitle">See team messages and responses from your Switch AI agents.</p></div>
       <div class="connection" role="status"><span id="connection-dot" class="dot"></span><span id="connection-label">Locked</span></div>
     </div>
 
@@ -33,6 +33,16 @@
     <section id="feed-panel" class="panel feed-panel" aria-labelledby="feed-title" hidden>
       <div class="feed-toolbar"><div class="feed-title-row"><h2 id="feed-title">Messages</h2></div><div class="actions"><button id="refresh-button" class="secondary" type="button">Refresh</button><button id="lock-button" class="secondary" type="button">Lock</button></div></div>
       <p id="feed-note" class="feed-note" role="status">Updates every 2 seconds · Newest first</p>
+      <section class="ai-panel" aria-labelledby="ai-title">
+        <h2 id="ai-title">Ask Codex</h2>
+        <p class="subtitle">Answers appear here through your existing Switch AI. They are not posted to Discord.</p>
+        <form id="ask-form" method="post" action="/ai/requests" autocomplete="off">
+          <label for="question">Your question</label>
+          <div class="input-row"><input id="question" name="question" maxlength="4000" placeholder="Ask a question, or select a message below" required><button id="ask-button" type="submit">Ask Codex</button></div>
+        </form>
+        <p id="ai-note" class="feed-note" role="status"></p>
+        <div id="ai-results" aria-live="polite"></div>
+      </section>
       <div id="empty-state" class="empty-state"><div class="empty-icon" aria-hidden="true">↘</div><h3>Waiting for your first message</h3><p>Send a new message in your connected Discord channel.<br>Keep the Switch listener running in your terminal.</p></div>
       <div id="message-list" class="message-list" aria-live="polite" aria-relevant="additions"></div>
     </section>

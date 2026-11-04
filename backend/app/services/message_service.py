@@ -31,6 +31,9 @@ def receive_message(
         message_reference(message), tenant_id=message.tenant_id,
         room_id=message.room_id, redacted_sender_name=json.loads(safe_name),
         redacted_text=json.loads(safe_text),
+        sender_kind="ai" if message.sender in settings.switch_ai_senders else "message",
+        thread_ref=message_reference(message.model_copy(update={"message_id": message.thread_id}))
+        if message.thread_id else None,
     )
     logger.info("Switch message received ref=%s duplicate=%s", receipt.message_ref, receipt.duplicate)
     if settings.log_discord_messages:

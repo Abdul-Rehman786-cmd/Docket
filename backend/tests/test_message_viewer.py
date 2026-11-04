@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
@@ -106,3 +107,62 @@ def test_sender_names_are_redacted_before_storage_and_status(monkeypatch):
     latest = client.get("/messages/status", headers=HEADERS)
     assert latest.json() == {"sender_name": "[REDACTED]", "message": "[REDACTED]"}
     assert client.get("/messages/recent", headers=HEADERS).json()[0]["sender_name"] == "[REDACTED]"
+
+
+def test_switch_ai_response_preserves_thread_without_exposing_participant_ids():
+    root = client.post("/messages", headers=HEADERS, json=message(
+        body="@fixture-agent what is the plan?"
+    )).json()
+    reply = client.post("/messages", headers=HEADERS, json=message(
+        1, sender="fixture-ai-participant", sender_name="Fixture agent",
+        body="We agreed to ship Friday. test-ingest-token", thread_id="viewer-fixture-0",
+    )).json()
+    feed = client.get("/messages/recent", headers=HEADERS)
+    answer, question = feed.json()
+    assert answer["sender_kind"] == "ai"
+    assert answer["thread_ref"] == root["message_ref"]
+    assert answer["message_ref"] == reply["message_ref"]
+    assert answer["text"] == "We agreed to ship Friday. [REDACTED]"
+    assert question["sender_kind"] == "message"
+    assert question["thread_ref"] is None
+    assert "fixture-ai-participant" not in feed.text
+    assert "viewer-fixture-0" not in feed.text
+    assert "test-ingest-token" not in feed.text
+
+
+@pytest.mark.parametrize("sender", ["fixture-sender", "@switch-agent-unconfigured:fixture.invalid"])
+def test_ai_display_name_or_id_shape_does_not_impersonate_configured_ai(sender):
+    client.post("/messages", headers=HEADERS, json=message(sender=sender, sender_name="Fixture agent"))
+    assert client.get("/messages/recent", headers=HEADERS).json()[0]["sender_kind"] == "message"
+
+
+def test_unconfigured_ai_senders_still_appear_as_messages(monkeypatch):
+    monkeypatch.setenv("SWITCH_AI_SENDER_IDS", "")
+    get_settings.cache_clear()
+    client.post("/messages", headers=HEADERS, json=message(sender="fixture-ai-participant"))
+    assert client.get("/messages/recent", headers=HEADERS).json()[0]["sender_kind"] == "message"
+
+
+def test_thread_references_are_isolated_by_room():
+    root = client.post("/messages", headers=HEADERS, json=message()).json()
+    client.post("/messages", headers=HEADERS, json=message(
+        1, room_id="second-room", sender="fixture-ai-participant", thread_id="viewer-fixture-0"
+    ))
+    answer = client.get("/messages/recent", headers=HEADERS).json()[0]
+    assert answer["thread_ref"] != root["message_ref"]
+
+
+def test_ai_response_replay_is_not_displayed_twice():
+    body = message(sender="fixture-ai-participant", thread_id="earlier-question")
+    first = client.post("/messages", headers=HEADERS, json=body).json()
+    second = client.post("/messages", headers=HEADERS, json=body).json()
+    feed = client.get("/messages/recent", headers=HEADERS).json()
+    assert second["duplicate"] is True
+    assert len(feed) == 1 and feed[0]["message_ref"] == first["message_ref"]
+
+
+def test_ai_responses_obey_existing_authorization():
+    body = message(sender="fixture-ai-participant", body="Private AI response")
+    assert client.post("/messages", json=body).status_code == 401
+    assert client.post("/messages", headers=HEADERS, json={**body, "room_id": "unmapped"}).status_code == 403
+    assert client.get("/messages/recent", headers=HEADERS).json() == []

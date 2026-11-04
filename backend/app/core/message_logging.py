@@ -32,6 +32,8 @@ def message_text_for_log(body: str, settings: Settings) -> str:
             settings.admin_api_token, settings.supabase_service_role_key,
             settings.switch_agent_api_key.get_secret_value(),
             settings.switch_ingest_token.get_secret_value(),
+            settings.switch_registration_token.get_secret_value(),
+            settings.switch_requester_api_key.get_secret_value(),
         }
         # Include credentials not otherwise used by the receiver, such as LLM keys.
         for source in (os.environ, dotenv_values(BACKEND_DIR / ".env")):

@@ -33,8 +33,8 @@ class RetryConnection(Exception):
 def validate_settings(settings: Settings) -> None:
     required = {
         "SWITCH_BRIDGE_URL": settings.switch_bridge_url,
-        "SWITCH_AGENT_ID": settings.switch_agent_id,
-        "SWITCH_AGENT_API_KEY": settings.switch_agent_api_key.get_secret_value(),
+        "Switch listener agent ID": settings.listener_agent_id,
+        "Switch listener API key": settings.listener_api_key.get_secret_value(),
         "SWITCH_INGEST_TOKEN": settings.switch_ingest_token.get_secret_value(),
         "SWITCH_TENANT_ID": settings.switch_tenant_id,
         "SWITCH_ROOM_IDS": settings.allowed_switch_rooms,
@@ -67,7 +67,7 @@ class SwitchListener:
         self.settings = settings
         self.state_path = state_path or BACKEND_DIR / ".local" / "switch-listener.json"
         identity = json.dumps([
-            settings.switch_bridge_url, settings.switch_agent_id,
+            settings.switch_bridge_url, settings.listener_agent_id,
             str(settings.switch_tenant_id), sorted(settings.allowed_switch_rooms),
         ])
         identity_ref = hashlib.sha256(identity.encode()).hexdigest()
@@ -85,14 +85,14 @@ class SwitchListener:
         if claim_rooms:
             # Declare at open: subscribing after catch-up can skip buffered events.
             params["rooms"] = ",".join(sorted(self.settings.allowed_switch_rooms))
-        path = parsed.path.rstrip("/") + "/agents/" + quote(self.settings.switch_agent_id, safe="") + "/connection/ws"
+        path = parsed.path.rstrip("/") + "/agents/" + quote(self.settings.listener_agent_id, safe="") + "/connection/ws"
         scheme = "wss" if parsed.scheme == "https" else "ws"
         return urlunsplit((scheme, parsed.netloc, path, urlencode(params), ""))
 
     def _connect(self, state: ListenerState | None = None, *, claim_rooms: bool = True):
         return connect(
             self.socket_url(state, claim_rooms=claim_rooms),
-            additional_headers={"Authorization": "Bearer " + self.settings.switch_agent_api_key.get_secret_value()},
+            additional_headers={"Authorization": "Bearer " + self.settings.listener_api_key.get_secret_value()},
             proxy=None, ping_interval=None, open_timeout=15, close_timeout=3,
             max_size=1048576, logger=socket_logger,
         )
@@ -128,9 +128,9 @@ class SwitchListener:
         # Room membership is distinct from this temporary connection's room claims.
         async with httpx.AsyncClient(
             timeout=10, trust_env=False, follow_redirects=False,
-            headers={"Authorization": "Bearer " + self.settings.switch_agent_api_key.get_secret_value()},
+            headers={"Authorization": "Bearer " + self.settings.listener_api_key.get_secret_value()},
         ) as client:
-            url = self.settings.switch_bridge_url.rstrip("/") + "/agents/" + quote(self.settings.switch_agent_id, safe="") + "/ops/list_rooms"
+            url = self.settings.switch_bridge_url.rstrip("/") + "/agents/" + quote(self.settings.listener_agent_id, safe="") + "/ops/list_rooms"
             response = await client.post(url, json={})
         if response.status_code != 200:
             raise ListenerStopped("Switch room membership check failed.")

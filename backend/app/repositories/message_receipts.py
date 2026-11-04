@@ -2,6 +2,7 @@ from collections import OrderedDict, deque
 from datetime import datetime, timezone
 from threading import Lock
 from uuid import UUID
+from typing import Literal
 
 from app.models.messages import DeliveryStatistics, MessagePreview, MessageReceipt
 
@@ -20,7 +21,8 @@ class MessageReceiptRepository:
 
     def record(
         self, message_ref: str, *, tenant_id: UUID, room_id: str,
-        redacted_sender_name: str, redacted_text: str
+        redacted_sender_name: str, redacted_text: str,
+        sender_kind: Literal["message", "ai"] = "message", thread_ref: str | None = None,
     ) -> MessageReceipt:
         with self._lock:
             existing = self._receipts.get(message_ref)
@@ -34,6 +36,7 @@ class MessageReceiptRepository:
             self._previews.append((tenant_id, room_id, MessagePreview(
                 message_ref=message_ref, received_at=receipt.received_at,
                 sender_name=redacted_sender_name, text=redacted_text,
+                sender_kind=sender_kind, thread_ref=thread_ref,
             )))
             if len(self._receipts) > self._capacity:
                 self._receipts.popitem(last=False)
