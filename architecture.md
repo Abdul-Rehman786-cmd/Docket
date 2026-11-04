@@ -1,6 +1,6 @@
 # Team Memory Agent: Architecture and Implementation Plan
 
-Prepared November 4, 2026 for the Flip the Switch hackathon. This file records what we decided, why, and what is still unverified.
+This document describes the system architecture, component boundaries, Switch agent integration, and database schema for the Team Memory backend.
 
 ## Current implementation: FastAPI and Switch message delivery
 
@@ -55,15 +55,19 @@ Rather than blindly writing every incoming message to Supabase on `POST /message
 
 The existing feed and `/messages/status` retain their behavior. `SWITCH_REQUESTER_*` takes precedence for the input listener, so it no longer claims rooms using Codex's identity. The response connection claims only the client's internal room. Setup stores returned credentials only in ignored `backend/.env` and learns the AI's sender ID from a harmless correlated readiness reply, without parsing participant IDs. The viewer renders all questions and answers as text, polls automatically, and clears them and pending browser requests on lock. Its token stays in tab memory. These are local development interfaces, not production user authentication.
 
-Server-only routing also requires removing the AI from Discord input rooms: an AI that remains a member can answer Discord messages independently of the API's private-room flow. After the user reported replies on both sides, setup was updated to retain `team-memory-client` and remove only `codex-discord` from configured input rooms. This was applied to both configured input rooms. Discord bridges, channel mappings, other agents, and Codex's internal response-room membership are preserved. Setup validates all source rooms before changing memberships and verifies each result; repeat runs do not repeat completed membership changes. Each API question now checks that Codex has not been re-invited to an input room, failing with a setup diagnostic before sending if that invariant is broken. The viewer remains an explicit trigger for AI questions whose answers stay in the viewer. Separately, every new Discord message is now evaluated automatically, and the reply policy in Section 5 decides whether an answer is posted back to Discord by `team-memory-client` (never by Codex directly).
+#### Agent Isolation Invariant
+To ensure AI answers are routed exclusively through FastAPI and prevent duplicate or ungrounded responses in Discord:
+1. `codex-discord` must remain strictly inside the internal private room (`team-memory-server-responses`). Setup removes Codex from configured input rooms, and FastAPI checks report active input-room sessions or re-invitations as fatal errors before sending.
+2. In Switch Console, any session binding `codex-discord` directly to a Discord channel must remain stopped. Only the session for `team-memory-server-responses` should run.
+3. Only `team-memory-client` (the non-AI client) is permitted in Discord input rooms to ingest messages and post FastAPI-approved replies.
 
-A subsequent live audit after another duplicate-reply report found Codex back in one input room with a live input-room session, while its internal session was also live. The earlier membership-only verification did not establish durable isolation. Switch Console keeps session-to-room bindings separately from server membership; its session must be stopped with the Console **Stop** control for that Discord session, leaving the internal response session running. The available agent API has no stop-session operation and local process inspection could not safely identify the bound session's process. Both setup and API requests now also inspect reported runtime sessions, reject live input-room bindings or missing runtime evidence, and return an actionable stop-session diagnostic. Final server-only delivery must be reverified after that external session is stopped; it must not be inferred solely from a successful private answer or one membership snapshot.
 
-After the user stopped the Codex session for `Idk`, setup and live checks reported no active Codex input-room sessions. During recovery the saved non-AI client's key returned `401`, and its configured identity/name were confirmed absent from Switch. The supplied registration key restored only that missing client without overwriting any existing agent; its new credentials were saved in ignored `.env`. Setup now verifies the preserved private room through Codex's existing access and re-invites a restored client before it attempts member-only room reads. The input listener was restarted with the restored credentials and covered both configured input rooms. A uniquely marked question was then sent through the running authenticated API; the expected private answer arrived, and four subsequent checks of both configured input-room histories found no copy of the marker. Runtime-session and membership checks passed throughout the observation window. Keep the Discord-attached `Idk` session stopped; reopening it would restore a separate reply path.
+
+
 
 One process permits four pending questions, runs one at a time, and retains at most 100 results. Same request UUID and question is idempotent within retained history, and explicit viewer requests for an already-evaluated `source_message_ref` reuse that evaluation. A timeout defaults to 180 seconds; a disconnect or restart never blindly resends a potentially delivered request. Only the first matching nonblank response is retained; the prompt asks Codex to reply once. Each question/answer uses the existing redaction and 2,000-character preview cap. Results and pending jobs are process-local, while records chosen by `store_only` or `store_and_query` are persisted in Supabase (`tenants`, `rooms`, `messages`, `commitments`, `decisions`, `memories`). Run one API worker. Vector embedding generation (`Supabase/gte-small`) on `memories.embedding` remains future work.
 
-On November 4, 2026, live setup verified a readiness reply from the existing Codex runtime, and the running FastAPI endpoint received the expected answer to a harmless arithmetic question through the unbridged room. Tests cover authentication, scope isolation, redaction before prompting, room routing checks, exact sender/thread correlation, heartbeats during HTTP waits, idempotency, and safe registration recovery. Switch's [agent protocol](https://docs.switchagents.ai/switch-rooms/internals/agent-protocol), [connections](https://docs.switchagents.ai/switch-rooms/internals/agent-connection), and [room routing](https://docs.switchagents.ai/switch-rooms/internals/rooms-and-resources) were checked before implementation. See README for restart and setup commands.
+Tests cover authentication, scope isolation, redaction before prompting, room routing checks, exact sender/thread correlation, heartbeats during HTTP waits, idempotency, and safe registration recovery. Switch's [agent protocol](https://docs.switchagents.ai/switch-rooms/internals/agent-protocol), [connections](https://docs.switchagents.ai/switch-rooms/internals/agent-connection), and [room routing](https://docs.switchagents.ai/switch-rooms/internals/rooms-and-resources) were checked before implementation. See README for restart and setup commands.
 
 ### Discord to FastAPI to Discord closed-loop pipeline
 
@@ -147,9 +151,9 @@ FastAPI and the listener are separate processes. Starting or reloading FastAPI d
 
 The listener reads settings from the ignored `backend/.env`, opens the outbound Switch connection, and forwards authorized room events to FastAPI. The browser contacts FastAPI only. The listener's persisted cursor survives restarts, while the API's receipt and preview memory does not. Restarting the API therefore clears displayed history; resuming the listener does not restore messages it already acknowledged. Unacknowledged events can be replayed while they remain in Switch's retention window.
 
-### Delivery diagnostics and verified recovery
+### Delivery diagnostics and operational troubleshooting
 
-During the November 4, 2026 investigation, the API and authenticated preview endpoint were healthy, but the feed was empty because no listener process was running. The existing listener's `--check` command verified API authentication, the WebSocket connection, and membership in both configured rooms. Restarting the listener restored message acknowledgements, and the authenticated preview endpoint returned messages with sender and text fields. No application code change was needed for this recovery.
+When the message feed or preview endpoint is empty, verify listener connectivity and room membership:
 
 For an empty Incoming messages screen:
 
@@ -158,7 +162,7 @@ For an empty Incoming messages screen:
 3. Check listener output for room coverage and `API acknowledged message ref=...`, and API output for the matching `Switch message received ref=...`. Receipt references allow delivery correlation without printing message text or credentials.
 4. Unlock or refresh the browser feed and send a new harmless Discord marker. An authenticated empty preview response means no authorized previews are currently retained; `401` indicates an authentication failure, and `503` can indicate missing ingestion configuration.
 
-The recovered local listener was started in the background, with output redirected to ignored `backend/.local/listener.stdout.log` and `backend/.local/listener.stderr.log`. This is a local process, not an installed service or automatic startup mechanism. Its checkpoint remains at `backend/.local/switch-listener.json`; do not delete or reset it as a routine recovery step.
+The listener checkpoint is persisted at `backend/.local/switch-listener.json`; do not delete or reset it as a routine step, as it maintains the connection ID and acknowledged cursor.
 
 Default delivery logs contain receipt metadata. `LOG_DISCORD_MESSAGES=true` separately enables redacted sender and message previews in the API terminal after authentication and authorization. HTTP and WebSocket wire-level debugging can expose authentication headers and must remain disabled. The current FastAPI entry point does not configure a general `LOG_LEVEL` setting.
 
@@ -172,13 +176,13 @@ A team memory agent that lives in chat (Discord first) and:
 - Notices when a chat decision contradicts a doc and proposes a doc update for approval.
 - Replies only when it should. It stays silent otherwise.
 
-Switch is required for the hackathon. Switch is the chat layer and the agent identity. Our Python backend does all the real work.
+Switch provides the chat bridge and agent protocol identity, while the Python FastAPI backend manages ingestion, extraction, database access, and LLM reasoning.
 
 ## 2. Decisions made
 
 | # | Decision | Reason |
 |---|----------|--------|
-| 1 | Switch is the only chat layer for the hackathon (Discord through Switch's built-in bridge). No custom Discord bot. | Hackathon requirement. Less code. |
+| 1 | Switch is the chat layer (Discord via Switch's built-in bridge). No custom Discord bot. | Standardized agent protocol and reduced bot maintenance. |
 | 2 | Backend is Python: FastAPI, Postgres (Supabase) with pgvector, APScheduler, one LLM gateway. | Best library support for RAG and extraction. Standard stack. |
 | 3 | Reuse one existing Codex AI plus one shared non-AI server client; no agent per server. Register the client once and preserve its credentials. | The user authorized the client so server requests have a different sender from the existing AI and do not take over its runtime. |
 | 4 | A small custom agent client ("router client") with no LLM sits on the Switch WebSocket. | Lets our code decide when to reply, instead of an LLM answering everything. |
@@ -188,8 +192,8 @@ Switch is required for the hackathon. Switch is the chat layer and the agent ide
 | 8 | RAG runs asynchronously: acknowledge fast, search in the backend, post the answer when ready. | Embedding and search take seconds. |
 | 9 | Data is keyed by `tenant_id` and `room_id`. Never by room name. | Names change and can collide. |
 | 10 | Follow-ups are turned off and no main agent is assigned. | Otherwise Switch routes unaddressed messages to the agent. |
-| 11 | A SaaS version would not use Switch. Plain Discord bot, one bot, many servers. | Switch is built for per-team self-hosting, and its license says internal use only (see section 10). |
-| 12 | Scope for the demo: Discord only, one end-to-end flow. | One polished flow beats many rough features. |
+| 11 | Scope: Discord-first end-to-end flow. | Validates complete closed loop before multi-platform adapters. |
+
 
 ## 3. Architecture
 
@@ -223,7 +227,7 @@ FastAPI backend
    +--> POST /agents/{agent_id}/message --> Switch --> Discord
 ```
 
-The earlier draw.io file (`team-memory-agent-architecture.drawio`) shows this layout. It predates two later decisions: embeddings plus vector search in `answer.py` (the file still says keyword search), and the acknowledgement posted by the router client. Update it if you present it.
+
 
 ### Components
 
@@ -327,9 +331,9 @@ Open question: Switch events may not include the Discord server id. If not, reco
 - A server has many rooms (one per channel). Keep the rooms-to-server mapping in `rooms`.
 - If Switch does not give the server id in events, store the guild id at onboarding.
 - Connecting a server to Switch is a manual step in Switch Console (token and Guild Id, admin only). No API found to automate it. Ask the Switch team.
-- For the hackathon this is out of scope. One Discord server is enough.
+- Single Discord server scope for initial deployment.
 
-## 9. Demo flow (hackathon)
+## 9. End-to-end flow
 
 1. Someone writes "I'll send the report by Friday" in Discord.
 2. The router client sees it. The backend silently stores the commitment.
@@ -354,7 +358,7 @@ Make Switch visible: the room, the router client connected through the agent pro
 
 ## 10. Risks and open questions
 
-**License.** Switch's legal terms (`/legal/terms`) grant a license "solely for Licensee's internal purposes" and bar making the software or its access available to third parties. That makes a multi-customer SaaS on Switch a poor fit and possibly a violation. Only that page was read. It may not match the GitHub repo's license. Read the repo's LICENSE, check the hackathon rules, and ask SandboxAQ in writing. The earlier comparison doc also flagged this. This is not legal advice.
+
 
 **Unverified items (test before relying on them):**
 
@@ -372,20 +376,20 @@ Make Switch visible: the room, the router client connected through the agent pro
 
 **Visible Switch layer.** Users may still see Switch-voiced messages (for example "agent not available"), Switch's slash commands in the Discord menu, and the bot's permission requests. Keep the router client connected.
 
-## 11. Competitive reality
 
-The earlier comparison doc marked several features F for all competitors. Searches on November 4, 2026 found products that already do pieces of this:
 
-- Chasing commitments in chat: Commitment Crawler, Mem Agent, and Claude Tag follow-ups (June 2026 roundup).
-- Doc vs chat contradiction with proposed fix and approval: Slite Agent.
-- Discord memory that is mostly silent, with cited answers: Cassandra for Discord and MemoryBot.
-- Open-source or self-hosted memory layers: Mem0, Mengram (MIT, team memory, Curator for contradictions), Letta (Slack and Discord).
 
-Not found, though not searched exhaustively: all five capabilities in one product across Discord, Slack and Teams; memory kept in the user's own Drive; person profiles built over time as we define them. These checks came from product pages and marketing, not hands-on tests.
 
-**How to pitch it.** Do not claim "nobody does X". Pitch the combination and the closed loop: chat promise, then chase, then doc updated, then memory the user owns. Update the comparison table before presenting.
 
-## 12. Build order
+
+
+
+
+
+
+
+
+## 11. Build order
 
 1. Register the agent and open the router client WebSocket. Confirm events arrive and pings are answered.
 2. Backend `POST /messages` with silent extraction into Postgres. Add deduplication.
@@ -396,7 +400,7 @@ Not found, though not searched exhaustively: all five capabilities in one produc
 7. Reply policy and `reply_mode`. Turn follow-ups off.
 8. Small settings page. Polish the demo script.
 
-## 13. Reference docs
+## 12. Reference docs
 
 - Agent protocol: https://docs.switchagents.ai/switch-rooms/internals/agent-protocol
 - Agent connection: https://docs.switchagents.ai/switch-rooms/internals/agent-connection

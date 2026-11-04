@@ -109,9 +109,9 @@ The viewer now has **Ask Codex** beside each received message and a question box
 
 For a new local installation:
 
-First stop any Codex session attached to a Discord/input channel in **Switch Console**, using that session's **Stop** control. Keep the session for `team-memory-server-responses` running. A live input-room session can remain after server membership removal and has been observed rejoining a Discord room. The agent API has no stop-session operation; setup does not kill unidentified processes or edit Console's local database. Room removal alone is insufficient evidence that Discord replies have stopped.
+In **Switch Console**, ensure any session binding `codex-discord` to an input room is stopped, leaving only the session for `team-memory-server-responses` running. `team-memory-client` must remain registered and running as the input listener.
 
-The workspace recovery verified this after the `Idk` session was stopped: a unique answer reached the API, and four checks found no matching cross-post in either configured input-room history. Keep that Discord-attached session stopped. The non-AI `team-memory-client` must remain registered and running as the input listener; it does not generate replies. If that client is restored after deletion, setup reattaches it to the preserved rooms, and the listener must be restarted to load its new local credentials.
+
 
 1. Preserve `SWITCH_AGENT_ID` and `SWITCH_AGENT_API_KEY` for the existing Codex agent. Set `SWITCH_AI_AGENT_NAME` to its registered name (default `codex-discord`). Keep its Switch Console or managed runtime available.
 2. Add `SWITCH_REGISTRATION_TOKEN` to ignored `backend/.env`, using a Switch registration key created under the **same owner** as Codex. Do not paste credentials into commands, chat, or screenshots.
@@ -126,7 +126,7 @@ The API processes one question at a time, permits up to four pending questions, 
 
 Every request verifies that the internal room has no bridge or external channel and contains only Codex and the client. It also checks Codex's reported sessions for live input-room bindings, and checks that every configured input room contains the listener without Codex. Missing runtime evidence, an active input-room session, or re-invitation causes a diagnostic before another question is posted. Stop the Discord-attached Codex session in Switch Console first, then rerun `python -m app.switch_setup`. Setup refuses to report success while an active input-room session is reported. Requests never fall back to an input room. Codex remains available in the private response room. Ask questions using the viewer's question box or **Ask Codex about this message**. Keep the internal room unbridged. The listener uses `SWITCH_REQUESTER_*`, preserving `SWITCH_AGENT_*` for the actual AI. Restarting the listener after an identity change starts a separate cursor; its old identity's messages are not replayed automatically.
 
-On November 4, 2026, live setup verified a private readiness reply from the existing Codex runtime, and the running authenticated API completed a server-only arithmetic question with the expected answer. The internal room's absent bridge/external channel was verified before posting. Automated tests additionally check sender/thread correlation, responsive heartbeats, authentication, scope isolation, redaction, request deduplication, and setup recovery.
+Automated tests cover sender/thread correlation, responsive heartbeats, authentication, scope isolation, redaction, request deduplication, and setup recovery.
 
 ### Observe other messages and agent replies
 
@@ -157,7 +157,7 @@ If Switch refuses the connection, verify the bridge URL and agent key, and use a
 | `POST /messages` returns `403` | Check the configured tenant and room allow-list. |
 | Message endpoint returns `503` | Check ingestion configuration and API availability. |
 
-The November 4, 2026 recovery confirmed that an absent listener caused a healthy API to show an empty feed. Restarting the listener restored delivery without an application code change. That recovered listener was launched in the background with output in ignored `backend/.local/listener.stdout.log` and `backend/.local/listener.stderr.log`. It is a local process with no installed service or automatic startup; check for it before starting a terminal copy. Normal foreground launches print output in their terminal.
+The listener is a local process with no automatic service wrapper; ensure it is running in a terminal before testing Discord delivery.
 
 ## 2. Supabase
 The initial migration is a **destructive development reset**, not an incremental
