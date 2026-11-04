@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Discord Messages · Team Memory</title>
+  <link rel="stylesheet" href="/viewer.css">
+  <script src="/viewer.js" defer></script>
+</head>
+<body>
+  <main class="workspace">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Team Memory home"><span class="brand-icon" aria-hidden="true">M</span> Team Memory</a>
+      <a class="docs-link" href="/docs">API docs <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <div class="heading">
+      <div><p class="eyebrow">DISCORD → SWITCH → FASTAPI</p><h1>Incoming messages</h1><p class="subtitle">See your team's messages arrive, as they happen.</p></div>
+      <div class="connection" role="status"><span id="connection-dot" class="dot"></span><span id="connection-label">Locked</span></div>
+    </div>
+
+    <section id="unlock-panel" class="panel unlock-panel" aria-labelledby="unlock-title">
+      <div class="lock-icon" aria-hidden="true">⌑</div>
+      <h2 id="unlock-title">Unlock your message feed</h2>
+      <p>Use <code>SWITCH_INGEST_TOKEN</code> from your local <code>backend/.env</code>. Your token stays in this tab and is cleared when you lock or close it.</p>
+      <form id="unlock-form" method="post" action="/" autocomplete="off">
+        <label for="access-token">Local access token</label>
+        <div class="input-row"><input id="access-token" name="access-token" type="password" autocomplete="off" placeholder="Enter your local token" required spellcheck="false"><button id="unlock-button" type="submit">Open feed <span aria-hidden="true">→</span></button></div>
+        <p id="unlock-error" class="error" role="alert" hidden></p>
+      </form>
+    </section>
+
+    <section id="feed-panel" class="panel feed-panel" aria-labelledby="feed-title" hidden>
+      <div class="feed-toolbar"><div class="feed-title-row"><h2 id="feed-title">Messages</h2></div><div class="actions"><button id="refresh-button" class="secondary" type="button">Refresh</button><button id="lock-button" class="secondary" type="button">Lock</button></div></div>
+      <p id="feed-note" class="feed-note" role="status">Updates every 2 seconds · Newest first</p>
+      <div id="empty-state" class="empty-state"><div class="empty-icon" aria-hidden="true">↘</div><h3>Waiting for your first message</h3><p>Send a new message in your connected Discord channel.<br>Keep the Switch listener running in your terminal.</p></div>
+      <div id="message-list" class="message-list" aria-live="polite" aria-relevant="additions"></div>
+    </section>
+
+    <footer><span class="footer-dot" aria-hidden="true"></span> Local message viewer <span class="footer-separator">·</span> Credentials are masked <span class="footer-separator">·</span> Latest 100 messages, cleared on API restart</footer>
+    <noscript><p class="error">Enable JavaScript to unlock and view incoming messages.</p></noscript>
+  </main>
+</body>
+</html>

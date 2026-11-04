@@ -1,6 +1,6 @@
 # Team Memory — Clean Foundation
 
-A clean project scaffold for **FastAPI + Supabase + React Native (Expo)**. No messaging agent, listener, bot, external connector, or inherited script is present.
+A project scaffold for **FastAPI + Supabase + React Native (Expo)** with a Switch listener for verifying Discord-to-API message delivery.
 
 ## Structure
 - `architecture.md`: design and boundaries.
@@ -10,22 +10,89 @@ A clean project scaffold for **FastAPI + Supabase + React Native (Expo)**. No me
 - `mobile/`: Expo TypeScript starter screen (backend health-check only).
 
 ## 1. Backend setup (Windows PowerShell)
+
+The FastAPI foundation runs independently: `/health`, `/docs`, and `/openapi.json` do not require database or LLM credentials. The directories for controllers, models, services, repositories, and configuration are already in place.
+
+From the repository root, install the backend and test dependencies into a local virtual environment:
+
 ```powershell
 cd backend
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item .env.example .env
-# Edit backend/.env with private ADMIN_API_TOKEN and optional Supabase credentials.
-uvicorn app.main:app --reload
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+if (-not (Test-Path -LiteralPath .env)) {
+    Copy-Item -LiteralPath .env.example -Destination .env
+}
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
-Open `http://127.0.0.1:8000/docs` and test `GET /health`. For protected read endpoints, supply the `X-Admin-Token` header. **This admin token is for local/server-side testing only, never for mobile.**
 
-Run tests:
+Use `python`, since the optional Windows `py` launcher may not be installed. If `.venv` already exists, skip creating it. These commands use the virtual environment's interpreter directly, so PowerShell activation and execution-policy changes are unnecessary. Keep the server terminal open; press `Ctrl+C` to stop it. The launch command follows the [FastAPI server guide](https://fastapi.tiangolo.com/deployment/manually/).
+
+Open `http://127.0.0.1:8000/` for the browser message viewer, or `http://127.0.0.1:8000/docs` for Swagger. Try `GET /health`; it returns `{"status":"ok"}`. `/health` checks that the API is running, not database connectivity. You can also check it from another PowerShell terminal:
+
 ```powershell
-pip install -r requirements-dev.txt
-pytest -q
+Invoke-RestMethod -Uri http://127.0.0.1:8000/health
 ```
+
+The existing `/api/v1/commitments` and `/api/v1/decisions` read endpoints require the `X-Admin-Token` header. Before using them, set `ADMIN_API_TOKEN` in the ignored `backend/.env` to a unique private value and configure the Supabase variables. Without authentication, they return `401`; with valid authentication but no database configuration, they return `503`. **This admin token is for local/server-side testing only, never for mobile.** Leave Supabase settings blank for the initial health-check setup.
+
+The diagram's `/ask`, `/docs/sync`, `/docs/apply-update`, and `/memories` routes are planned features and are not implemented in this foundation.
+
+Run tests from `backend/`:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pip check
+```
+
+### Receive Discord messages through Switch
+
+```text
+Discord -> Switch room -> Python WebSocket listener -> authenticated POST /messages
+```
+
+Use an existing Switch agent that permits a custom WebSocket client and is assigned to the Discord room. The listener does not register an agent or post replies. Configure these settings in the ignored `backend/.env`; the placeholder-only `.env.example` lists them. Existing credentials should be preserved.
+
+| Variable | Purpose |
+| --- | --- |
+| `SWITCH_BRIDGE_URL` | Switch bridge HTTP(S) base URL, without credentials or query parameters; this is usually different from the Gateway URL. |
+| `SWITCH_AGENT_ID` | Existing custom agent ID. |
+| `SWITCH_AGENT_API_KEY` | Private key belonging to that agent. |
+| `SWITCH_INGEST_TOKEN` | Separate private random token shared by the listener and FastAPI. It grants no access to commitment/decision reads. |
+| `SWITCH_TENANT_ID` | UUID for the single demo tenant. |
+| `SWITCH_ROOM_IDS` | Comma-separated Switch room IDs mapped to that tenant. Unknown rooms are ignored. |
+| `SWITCH_BACKEND_URL` | FastAPI base URL; defaults to `http://127.0.0.1:8000`. |
+
+All settings load from `backend/.env`, independent of the current working directory. Keep the API running in the first terminal. From `backend/`, use a second PowerShell terminal:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.switch_listener --check
+.\.venv\Scripts\python.exe -m app.switch_listener
+```
+
+`--check` verifies API authentication, the Switch WebSocket, and configured room membership, then exits without claiming rooms or forwarding messages. The second command keeps listening; press `Ctrl+C` to stop. Run one listener for this agent: it declares the configured rooms at connection open for reliable replay, which takes over those room claims from any other client of the same agent. If Switch is on another machine, it does not need to call your PC: the Python listener opens the outbound Switch connection and forwards to the local API.
+
+Send a harmless marker such as `delivery-test-001` in the configured Discord channel. A delivered message produces matching `ref=...` entries in the API and listener terminals:
+
+```text
+Switch message received ref=<receipt reference> duplicate=False
+API acknowledged message ref=<same receipt reference> duplicate=False
+```
+
+To see messages **in the browser**, open `http://127.0.0.1:8000/`, enter your local `SWITCH_INGEST_TOKEN` in the masked access-token field, and select **Open feed**. The page refreshes every two seconds and displays each sender's display name and message text, newest first. Names and text are redacted before retention; the latest 100 messages are kept in memory. Missing or blank names appear as `Unknown sender`; participant IDs are never parsed to invent a username. Keep FastAPI and the listener running, then send a new Discord message. Restart the listener after an update so it forwards Switch's `sender_name` field. Text received before this viewer was added is not available. **Lock** clears the token and displayed messages from the tab. The token is sent only in an authentication header and is not embedded in the page, stored in browser storage, or included in URLs. The page shell is public; `GET /messages/recent` requires authentication and filters previews by the configured tenant and room allow-list. Responses are marked `no-store`.
+
+To also print the incoming sender and message in the **FastAPI terminal**, set `LOG_DISCORD_MESSAGES=true` in the ignored `backend/.env` and restart the API. New deliveries print a line such as `Discord message ref=... sender="Ali" text="Hello from Discord!"`. This local debug option defaults to `false`; configured credential values, common credential formats, and URLs are masked, control characters are escaped, and previews are limited to 2,000 characters. Set it back to `false` to stop printing text. Browser previews work independently of this terminal logging option.
+
+Check the latest sender and message in a third terminal, also from `backend/`:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.switch_listener --status
+```
+
+The protected `GET /messages/status` and the `--status` command return the latest authorized message as `{"sender_name":"Ali","message":"Hello team"}`, replacing the previous counter response. Both values are `null` until a message arrives. Preview reads and latest-message status filter by tenant and allowed rooms. The CLI reads the token internally, so it never has to appear in terminal commands. All `/messages` endpoints require `X-Ingest-Token`. `POST /messages` also checks the tenant and room mapping; an invalid mapping returns `403`. Payload validation returns a generic `422` without reflecting chat text. Text logging runs only after authentication and authorization succeed.
+
+**Receipt means delivery to the API, not database storage.** The backend discards raw message contents after acknowledgement. It retains receipt metadata for the latest 1,000 message identities and up to 100 redacted previews in memory. Duplicate detection is limited to the receipt window. Counters, duplicate detection, and browser history reset on API restart; run one API worker for this demo. The listener stores only its connection ID, generation, processed cursor, and configuration fingerprint in ignored `backend/.local/switch-listener.json`. It saves progress after the API acknowledges each message, answers heartbeats while HTTP requests are pending, and resumes after transient failures. A takeover or retention gap stops the listener with a diagnostic instead of silently skipping the problem.
+
+If Switch refuses the connection, verify the bridge URL and agent key, and use a custom agent rather than a controller-managed agent. For Discord setup, confirm the Message Content Intent and room membership. See the official [Switch agent connection](https://docs.switchagents.ai/switch-rooms/internals/agent-connection) and [Discord setup](https://docs.switchagents.ai/switch-rooms/deploy/messaging-apps/discord) guides.
 
 ## 2. Supabase
 The initial migration is a **destructive development reset**, not an incremental
@@ -88,4 +155,4 @@ git diff --cached --name-only
 The two `.env` files should be reported as ignored when they exist. Inspect staged contents and never force-push. If any credential was previously committed, revoke/rotate it; `.gitignore` alone cannot remove history.
 
 ## Current limits
-Backend and UI are scaffolds. Supabase credentials are not included, database migrations have not been applied, mobile private data authentication is not implemented, and external integrations are intentionally absent.
+Switch messages are acknowledged and temporarily shown as redacted previews in the browser. Durable message storage, extraction, RAG, reminders, and replies are not implemented. Database migrations have not been applied by this setup, and mobile private data authentication remains future work. Development credentials belong only in ignored local environment files.

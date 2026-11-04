@@ -1,8 +1,31 @@
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from app.controllers.messages import router as messages_router
 from app.controllers.records import router as records_router
+from app.controllers.viewer import router as viewer_router
+from app.repositories.message_receipts import MessageReceiptRepository
 
 app = FastAPI(title="Team Memory API", version="0.1.0")
+app.state.message_receipts = MessageReceiptRepository()
 app.include_router(records_router)
+app.include_router(messages_router)
+app.include_router(viewer_router)
+
+
+@app.middleware("http")
+async def prevent_message_caching(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/messages"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request, exc: RequestValidationError):
+    # FastAPI's default 422 response echoes invalid input, which may contain chat secrets.
+    return JSONResponse(status_code=422, content={"detail": "Invalid request payload"})
 
 
 @app.get("/health", tags=["health"])
