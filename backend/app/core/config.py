@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     switch_room_ids: str = Field(default="", repr=False)
     switch_ai_sender_ids: str = Field(default="", repr=False)
     switch_backend_url: str = Field(default="http://127.0.0.1:8000", repr=False)
+    switch_reply_to_discord: bool = Field(default=True, validation_alias=AliasChoices("SWITCH_REPLY_TO_DISCORD"))
     log_discord_messages: bool = False
 
     @property
@@ -78,6 +79,10 @@ class Settings(BaseSettings):
         senders = {sender.strip() for sender in self.switch_ai_sender_ids.split(",") if sender.strip()}
         if self.switch_ai_sender_id:
             senders.add(self.switch_ai_sender_id)
+        if self.switch_agent_id:
+            senders.add(self.switch_agent_id)
+        if self.switch_requester_agent_id:
+            senders.add(self.switch_requester_agent_id)
         return frozenset(senders)
 
     @field_validator("switch_tenant_id", mode="before")

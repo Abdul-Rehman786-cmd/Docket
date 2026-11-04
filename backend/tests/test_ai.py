@@ -428,3 +428,44 @@ def test_real_socket_correlates_exact_sender_and_thread_and_keeps_heartbeat(ai_c
         assert operations == ["get_room_detail", "get_agent_detail", "get_room_detail", "get_room_detail", "list_participants", "get_room_detail", "send_targeted_message"]
 
     asyncio.run(run())
+
+
+def test_incoming_message_replies_to_switch_discord_room(ai_config, monkeypatch, caplog):
+    posted_messages = []
+
+    async def fake_ask_switch(settings, prompt):
+        return json.dumps({
+            "action": "query_only",
+            "search_query": "deadline",
+            "answer": "The project launch deadline is Friday.",
+        })
+
+    async def fake_post_room_message(self, room_id, body, thread_id=None):
+        posted_messages.append({"room_id": room_id, "body": body, "thread_id": thread_id})
+        return {"status": "ok"}
+
+    monkeypatch.setattr(ai_service, "ask_switch", fake_ask_switch)
+    monkeypatch.setattr(SwitchAPI, "post_room_message", fake_post_room_message)
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        with TestClient(app) as client:
+            receipt = client.post("/messages", headers=HEADERS, json={
+                "tenant_id": "00000000-0000-0000-0000-000000000001",
+                "room_id": "test-room",
+                "message_id": "discord-msg-42",
+                "sender": "fixture-discord-user",
+                "body": "When is the launch deadline?",
+                "addressed": True,
+                "thread_id": "discord-thread-99",
+            }).json()
+            for _ in range(30):
+                rows = client.get("/ai/requests", headers=HEADERS).json()
+                if rows and rows[0]["status"] == "answered":
+                    break
+
+    assert len(posted_messages) == 1
+    assert posted_messages[0]["room_id"] == "test-room"
+    assert posted_messages[0]["thread_id"] == "discord-thread-99"
+    assert "Friday" in posted_messages[0]["body"]
+    assert "AI reply posted to Switch room=test-room" in caplog.text
+

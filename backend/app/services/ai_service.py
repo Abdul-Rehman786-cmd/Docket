@@ -230,6 +230,14 @@ class AIService:
             scope, receipt.message_ref
         ):
             return
+        source_meta = {
+            "room_id": message.room_id,
+            "switch_message_id": message.message_id,
+            "author_name": message.sender_name or "Unknown sender",
+            "occurred_at": receipt.received_at,
+            "thread_id": message.thread_id,
+            "addressed": message.addressed,
+        }
         await self.submit(
             AskRequest(
                 request_id=auto_request_id,
@@ -237,14 +245,21 @@ class AIService:
             ),
             settings,
             receipts,
+            source_meta=source_meta,
         )
 
-    async def submit(self, request: AskRequest, settings: Settings, receipts):
+    async def submit(
+        self,
+        request: AskRequest,
+        settings: Settings,
+        receipts,
+        *,
+        source_meta: dict | None = None,
+    ):
         scope = response_scope(settings)
         validate_ai_settings(settings)
         question = request.question
-        source_meta: dict | None = None
-        if request.source_message_ref:
+        if source_meta is None and request.source_message_ref:
             found = None
             if hasattr(receipts, "get_preview_with_room"):
                 found = receipts.get_preview_with_room(
@@ -391,6 +406,42 @@ class AIService:
                     db_action=decision.action,
                     stored_counts=stored_counts,
                 )
+                # Reply pipeline: Discord -> Switch -> FastAPI -> Switch -> Discord
+                if (
+                    settings.switch_reply_to_discord
+                    and source_meta
+                    and source_meta.get("room_id")
+                    and (
+                        decision.action in ("query_only", "store_and_query")
+                        or source_meta.get("addressed")
+                    )
+                ):
+                    try:
+                        requester_api = SwitchAPI(
+                            settings.switch_bridge_url,
+                            settings.switch_requester_agent_id,
+                            settings.switch_requester_api_key.get_secret_value(),
+                        )
+                        reply_room_id = source_meta["room_id"]
+                        reply_thread_id = source_meta.get("thread_id")
+                        await requester_api.post_room_message(
+                            room_id=reply_room_id,
+                            body=final_answer,
+                            thread_id=reply_thread_id,
+                        )
+                        logger.info(
+                            "AI reply posted to Switch room=%s ref=%s request_id=%s",
+                            reply_room_id,
+                            msg_ref,
+                            row.request_id,
+                        )
+                    except Exception as post_err:
+                        logger.warning(
+                            "Failed to post AI reply to Switch room=%s ref=%s reason=%s",
+                            source_meta.get("room_id"),
+                            msg_ref,
+                            message_text_for_log(str(post_err), settings),
+                        )
         except asyncio.CancelledError:
             self.repository.update(
                 scope,

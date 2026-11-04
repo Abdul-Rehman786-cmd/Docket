@@ -44,6 +44,30 @@ class SwitchAPI:
         except (ValueError, KeyError, TypeError):
             raise SwitchError("Switch returned an invalid operation response.") from None
 
+    async def post_room_message(self, room_id: str, body: str, thread_id: str | None = None) -> dict:
+        """Post a message to a Switch room so it relays to bridged channels (e.g. Discord)."""
+        async with self.http() as client:
+            payload = {"room_id": room_id, "body": body}
+            if thread_id:
+                payload["thread_id"] = thread_id
+            try:
+                return await self.operation(client, "post_message", payload)
+            except SwitchError:
+                # Fallback to direct /message endpoint if ops/post_message is not mapped
+                direct_payload = {"room_id": room_id, "content": body, "body": body}
+                if thread_id:
+                    direct_payload["thread_id"] = thread_id
+                response = await client.post(
+                    self.agent_path.lstrip("/") + "/message",
+                    json=direct_payload,
+                )
+                if response.status_code in (200, 201):
+                    try:
+                        return response.json()
+                    except Exception:
+                        return {"status": "ok"}
+                raise SwitchError("Switch failed to post the room message.")
+
     @asynccontextmanager
     async def room_connection(self, room_id: str):
         """Claim only the requester's internal room; never the AI's connection."""

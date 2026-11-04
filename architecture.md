@@ -65,6 +65,37 @@ One process permits four pending questions, runs one at a time, and retains at m
 
 On November 4, 2026, live setup verified a readiness reply from the existing Codex runtime, and the running FastAPI endpoint received the expected answer to a harmless arithmetic question through the unbridged room. Tests cover authentication, scope isolation, redaction before prompting, room routing checks, exact sender/thread correlation, heartbeats during HTTP waits, idempotency, and safe registration recovery. Switch's [agent protocol](https://docs.switchagents.ai/switch-rooms/internals/agent-protocol), [connections](https://docs.switchagents.ai/switch-rooms/internals/agent-connection), and [room routing](https://docs.switchagents.ai/switch-rooms/internals/rooms-and-resources) were checked before implementation. See README for restart and setup commands.
 
+### Discord to FastAPI to Discord closed-loop pipeline
+
+```text
+1. Discord channel
+       | user sends message
+       v
+2. Switch Discord Bridge
+       | relays event into Switch room
+       v
+3. Python listener process: python -m app.switch_listener
+       | outbound WebSocket receives event
+       | POST /messages with X-Ingest-Token
+       v
+4. FastAPI backend:
+       | Ingest -> Deduplicate -> Loop Guard (ignore bot's own posts)
+       | LLM 4-Way Database Decision (store_only, query_only, none, store_and_query)
+       | If store: write commitments/decisions/memories to Supabase
+       | If query/addressed: retrieve Supabase context & synthesize response with Codex
+       | If response ready: SwitchAPI.post_room_message()
+       v
+5. Switch room (origin room_id)
+       | team-memory-client posts message via /ops/post_message
+       v
+6. Switch Discord Bridge
+       | relays agent response into Discord channel / thread
+       v
+7. Discord channel (users see the response in chat)
+```
+
+The loop guard ensures `SWITCH_REQUESTER_AGENT_ID`, `SWITCH_AGENT_ID`, and configured `SWITCH_AI_SENDER_IDS` are never re-evaluated, preventing recursive response loops. Ingestion is silent for `store_only` (extracting commitments into Supabase without channel noise), while `query_only`, `store_and_query`, or addressed questions post back to Discord when `SWITCH_REPLY_TO_DISCORD=true`.
+
 ### Current runtime and message flow
 
 ```text
