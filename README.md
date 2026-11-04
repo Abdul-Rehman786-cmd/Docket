@@ -2,6 +2,8 @@
 
 A project scaffold for **FastAPI + Supabase + React Native (Expo)** with a Switch listener for verifying Discord-to-API message delivery.
 
+The implemented flow receives Discord messages through Switch and displays redacted sender names and text in a local browser viewer. FastAPI and the Switch listener run as separate processes. See [architecture.md](architecture.md) for the current runtime, security boundaries, and planned extraction, RAG, reminders, and reply flows.
+
 ## Structure
 - `architecture.md`: design and boundaries.
 - `AGENTS.md`: mandatory AI development and security rules.
@@ -48,7 +50,15 @@ Run tests from `backend/`:
 
 ```text
 Discord -> Switch room -> Python WebSocket listener -> authenticated POST /messages
+                                                             |
+                                                             v
+                                                   FastAPI in-memory previews
+                                                             ^
+                                                             |
+Browser at / -> authenticated GET /messages/recent every 2 seconds
 ```
+
+**Keep both FastAPI and exactly one listener running.** Starting or reloading FastAPI does not start the listener. The browser's **Live** indicator confirms API polling only; `/health` confirms API liveness only. Neither verifies that Discord messages are being delivered.
 
 Use an existing Switch agent that permits a custom WebSocket client and is assigned to the Discord room. The listener does not register an agent or post replies. Configure these settings in the ignored `backend/.env`; the placeholder-only `.env.example` lists them. Existing credentials should be preserved.
 
@@ -82,6 +92,8 @@ To see messages **in the browser**, open `http://127.0.0.1:8000/`, enter your lo
 
 To also print the incoming sender and message in the **FastAPI terminal**, set `LOG_DISCORD_MESSAGES=true` in the ignored `backend/.env` and restart the API. New deliveries print a line such as `Discord message ref=... sender="Ali" text="Hello from Discord!"`. This local debug option defaults to `false`; configured credential values, common credential formats, and URLs are masked, control characters are escaped, and previews are limited to 2,000 characters. Set it back to `false` to stop printing text. Browser previews work independently of this terminal logging option.
 
+Default delivery logs use receipt metadata to correlate API and listener activity. The current FastAPI entry point does not configure a general `LOG_LEVEL` setting. Keep HTTP and WebSocket wire-level debugging disabled because those traces can expose authentication headers.
+
 Check the latest sender and message in a third terminal, also from `backend/`:
 
 ```powershell
@@ -92,7 +104,26 @@ The protected `GET /messages/status` and the `--status` command return the lates
 
 **Receipt means delivery to the API, not database storage.** The backend discards raw message contents after acknowledgement. It retains receipt metadata for the latest 1,000 message identities and up to 100 redacted previews in memory. Duplicate detection is limited to the receipt window. Counters, duplicate detection, and browser history reset on API restart; run one API worker for this demo. The listener stores only its connection ID, generation, processed cursor, and configuration fingerprint in ignored `backend/.local/switch-listener.json`. It saves progress after the API acknowledges each message, answers heartbeats while HTTP requests are pending, and resumes after transient failures. A takeover or retention gap stops the listener with a diagnostic instead of silently skipping the problem.
 
+Restarting the listener does not restore messages already acknowledged before an API restart. Its saved cursor survives while the API's preview memory is cleared. Unacknowledged events can be replayed within Switch's retention window; do not delete or reset the checkpoint as a routine recovery step.
+
 If Switch refuses the connection, verify the bridge URL and agent key, and use a custom agent rather than a controller-managed agent. For Discord setup, confirm the Message Content Intent and room membership. See the official [Switch agent connection](https://docs.switchagents.ai/switch-rooms/internals/agent-connection) and [Discord setup](https://docs.switchagents.ai/switch-rooms/deploy/messaging-apps/discord) guides.
+
+### Troubleshoot an empty Incoming messages screen
+
+1. Confirm FastAPI is running. From `backend/`, run `.\.venv\Scripts\python.exe -m app.switch_listener --check` to verify API authentication, the Switch WebSocket, and configured room membership. This command exits after checking; it does not keep listening.
+2. Confirm one listener for the agent is running. If none is running, start `.\.venv\Scripts\python.exe -m app.switch_listener` in a second terminal. Avoid starting another copy while a listener is active, because it can take over room claims.
+3. Look for configured room coverage and `API acknowledged message ref=...` in listener output, with the matching `Switch message received ref=...` in the API terminal.
+4. Open or refresh `http://127.0.0.1:8000/`, unlock the feed, and send a new harmless marker in the configured Discord channel.
+
+| Result | Meaning / next check |
+| --- | --- |
+| `/health` returns `200`, but the feed is empty | Check the listener and delivery acknowledgements; API liveness alone does not confirm ingestion. |
+| Authenticated `/messages/recent` returns `[]` | No authorized previews are currently retained. Check for an API restart or an inactive listener. |
+| Message endpoint returns `401` | Check the local ingest token used by the browser/listener and API. |
+| `POST /messages` returns `403` | Check the configured tenant and room allow-list. |
+| Message endpoint returns `503` | Check ingestion configuration and API availability. |
+
+The November 4, 2026 recovery confirmed that an absent listener caused a healthy API to show an empty feed. Restarting the listener restored delivery without an application code change. That recovered listener was launched in the background with output in ignored `backend/.local/listener.stdout.log` and `backend/.local/listener.stderr.log`. It is a local process with no installed service or automatic startup; check for it before starting a terminal copy. Normal foreground launches print output in their terminal.
 
 ## 2. Supabase
 The initial migration is a **destructive development reset**, not an incremental
