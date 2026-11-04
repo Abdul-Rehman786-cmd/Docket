@@ -19,6 +19,46 @@ The diagram and implementation plan below describe the target system. The curren
 
 The diagram's extraction, RAG, conflict checks, scheduler, LLM gateway, and `/ask`, `/docs/sync`, `/docs/apply-update`, and `/memories` endpoints remain future work. Additional external integrations and remote database migrations require a separate request. See `README.md` for Windows setup and run commands.
 
+### Current runtime and message flow
+
+```text
+Discord channel
+    |
+    v
+Switch bridge / configured rooms
+    | outbound WebSocket opened by the listener
+    v
+Python listener process: python -m app.switch_listener
+    | POST /messages with X-Ingest-Token
+    v
+FastAPI process: python -m uvicorn app.main:app --reload
+    | authenticate -> validate tenant/room -> redact -> retain in memory
+    v
+MessageReceiptRepository (one API worker)
+    ^
+    | GET /messages/recent with X-Ingest-Token, every 2 seconds
+Browser: Incoming messages screen at /
+```
+
+FastAPI and the listener are separate processes. Starting or reloading FastAPI does not start the listener. Both must remain running for new Discord messages to appear. The browser's **Live** indicator confirms successful API polling; it does not confirm that the listener is connected to Switch. Likewise, `/health` can return `200` while Discord delivery is stopped.
+
+The listener reads settings from the ignored `backend/.env`, opens the outbound Switch connection, and forwards authorized room events to FastAPI. The browser contacts FastAPI only. The listener's persisted cursor survives restarts, while the API's receipt and preview memory does not. Restarting the API therefore clears displayed history; resuming the listener does not restore messages it already acknowledged. Unacknowledged events can be replayed while they remain in Switch's retention window.
+
+### Delivery diagnostics and verified recovery
+
+During the November 4, 2026 investigation, the API and authenticated preview endpoint were healthy, but the feed was empty because no listener process was running. The existing listener's `--check` command verified API authentication, the WebSocket connection, and membership in both configured rooms. Restarting the listener restored message acknowledgements, and the authenticated preview endpoint returned messages with sender and text fields. No application code change was needed for this recovery.
+
+For an empty Incoming messages screen:
+
+1. Confirm FastAPI is running, then run `python -m app.switch_listener --check` from `backend/` using its virtual-environment interpreter. This command checks connectivity and membership, then exits; it does not keep listening.
+2. Confirm exactly one listener for the agent is running. If none is running, start `python -m app.switch_listener`. Do not start a competing listener, because it can take over room claims.
+3. Check listener output for room coverage and `API acknowledged message ref=...`, and API output for the matching `Switch message received ref=...`. Receipt references allow delivery correlation without printing message text or credentials.
+4. Unlock or refresh the browser feed and send a new harmless Discord marker. An authenticated empty preview response means no authorized previews are currently retained; `401` indicates an authentication failure, and `503` can indicate missing ingestion configuration.
+
+The recovered local listener was started in the background, with output redirected to ignored `backend/.local/listener.stdout.log` and `backend/.local/listener.stderr.log`. This is a local process, not an installed service or automatic startup mechanism. Its checkpoint remains at `backend/.local/switch-listener.json`; do not delete or reset it as a routine recovery step.
+
+Default delivery logs contain receipt metadata. `LOG_DISCORD_MESSAGES=true` separately enables redacted sender and message previews in the API terminal after authentication and authorization. HTTP and WebSocket wire-level debugging can expose authentication headers and must remain disabled. The current FastAPI entry point does not configure a general `LOG_LEVEL` setting.
+
 ## 1. What we are building
 
 A team memory agent that lives in chat (Discord first) and:
@@ -49,6 +89,8 @@ Switch is required for the hackathon. Switch is the chat layer and the agent ide
 | 12 | Scope for the demo: Discord only, one end-to-end flow. | One polished flow beats many rough features. |
 
 ## 3. Architecture
+
+This section describes the target architecture. The implemented delivery and viewer path is shown in **Current runtime and message flow** above; extraction, replies, and scheduling below remain planned.
 
 ```
 Discord server
