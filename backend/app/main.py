@@ -15,6 +15,7 @@ from app.core.http_clients import HTTPClients, use_http_clients
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.services.viewer_service import ViewerHub
+from app.services.embedding_service import EmbeddingWorker
 
 
 @asynccontextmanager
@@ -25,12 +26,17 @@ async def lifespan(application):
     application.state.viewer_hub = ViewerHub()
     application.state.message_receipts.on_change = application.state.viewer_hub.publish
     application.state.ai_service.repository.on_change = application.state.viewer_hub.publish
+    application.state.embedding_worker = EmbeddingWorker()
+    with use_http_clients(application.state.http_clients):
+        application.state.ai_service.start_recovery()
+        application.state.embedding_worker.start()
     try:
         yield
     finally:
         try:
             await application.state.ai_service.close()
         finally:
+            await application.state.embedding_worker.close()
             application.state.viewer_hub.close()
             application.state.message_receipts.on_change = None
             await application.state.http_clients.close()

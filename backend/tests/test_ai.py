@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from threading import Event
 from contextlib import asynccontextmanager
 from uuid import uuid4
 from urllib.parse import parse_qs, urlsplit
@@ -74,7 +75,7 @@ def test_question_answer_redaction_idempotency_and_scope(ai_config, monkeypatch)
 
     async def answer(settings, question):
         sent.append(question)
-        return "Codex answer fixture-client-key test-ingest-token"
+        return json.dumps({"action": "none", "answer": "Codex answer fixture-client-key test-ingest-token"})
 
     monkeypatch.setattr(ai_service, "ask_switch", answer)
     with TestClient(app) as client:
@@ -102,7 +103,7 @@ def test_source_message_must_be_retained_and_authorized(ai_config, monkeypatch):
 
     async def answer(settings, question):
         sent.append(question)
-        return "The answer"
+        return '{"action":"none","answer":"The answer"}'
 
     monkeypatch.setattr(ai_service, "ask_switch", answer)
     with TestClient(app) as client:
@@ -125,6 +126,7 @@ def test_source_message_must_be_retained_and_authorized(ai_config, monkeypatch):
 
 @pytest.mark.parametrize("action", ["store_only", "query_only", "none", "store_and_query"])
 def test_llm_four_way_database_decisions(ai_config, monkeypatch, caplog, action):
+    monkeypatch.setenv("SWITCH_ROOM_IDS", "test-room")
     monkeypatch.setenv("SUPABASE_URL", "https://fixture.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "fixture-service-role-key")
     get_settings.cache_clear()
@@ -147,19 +149,19 @@ def test_llm_four_way_database_decisions(ai_config, monkeypatch, caplog, action)
     async def fake_post(self, url, *, params=None, headers=None, json=None, timeout=10):
         table = url.rsplit("/", 1)[-1]
         db_writes.append((table, json))
-        if table == "messages":
-            return httpx.Response(201, json=[{"id": "00000000-0000-0000-0000-000000000099"}], request=httpx.Request("POST", url))
+        if table == "store_message_extraction":
+            return httpx.Response(200, json={"messages": 1, "commitments": 1, "decisions": 1, "memories": 3}, request=httpx.Request("POST", url))
         return httpx.Response(201, content=b"", request=httpx.Request("POST", url))
 
-    async def fake_ask_switch(settings, prompt):
+    async def fake_ask_switch(settings, prompt, **kwargs):
         llm_calls.append(prompt)
         if len(llm_calls) == 1:
             return json.dumps({
                 "action": action,
-                "search_query": "launch",
-                "commitments": [{"description": "Send launch report", "owner_name": "Ali", "due_at": "2026-11-06T17:00:00Z"}],
-                "decisions": [{"topic": "Launch", "summary": "Ship on Friday"}],
-                "memories": [{"memory_type": "fact", "content": "Launch is Friday"}],
+                "search_query": "launch" if action in ("query_only", "store_and_query") else None,
+                "commitments": [{"description": "Send launch report", "owner_name": "Ali", "due_at": "2026-11-06T17:00:00Z"}] if action in ("store_only", "store_and_query") else [],
+                "decisions": [{"topic": "Launch", "summary": "Ship on Friday"}] if action in ("store_only", "store_and_query") else [],
+                "memories": [{"memory_type": "fact", "content": "Launch is Friday"}] if action in ("store_only", "store_and_query") else [],
                 "answer": f"Direct answer for {action}",
             })
         return f"Database-grounded answer for {action}"
@@ -190,7 +192,7 @@ def test_llm_four_way_database_decisions(ai_config, monkeypatch, caplog, action)
         assert row["answer"] == "Direct answer for none"
         assert row["stored_counts"] is None
     elif action == "store_only":
-        assert [t for t, _ in db_writes] == ["messages", "commitments", "decisions", "memories"]
+        assert [t for t, _ in db_writes] == ["store_message_extraction"]
         assert db_reads == []
         assert row["answer"] == "Direct answer for store_only"
         assert row["stored_counts"] == {"messages": 1, "commitments": 1, "decisions": 1, "memories": 3}
@@ -200,7 +202,7 @@ def test_llm_four_way_database_decisions(ai_config, monkeypatch, caplog, action)
         assert row["answer"] == "Database-grounded answer for query_only"
         assert row["stored_counts"] is None
     elif action == "store_and_query":
-        assert [t for t, _ in db_writes] == ["messages", "commitments", "decisions", "memories"]
+        assert [t for t, _ in db_writes] == ["store_message_extraction"]
         assert set(db_reads) == {"memories", "commitments", "decisions", "messages"}
         assert row["answer"] == "Database-grounded answer for store_and_query"
         assert row["stored_counts"] == {"messages": 1, "commitments": 1, "decisions": 1, "memories": 3}
@@ -209,7 +211,7 @@ def test_llm_four_way_database_decisions(ai_config, monkeypatch, caplog, action)
 def test_incoming_message_automatically_logs_ai_decision(ai_config, monkeypatch, caplog):
     prompts_received = []
 
-    async def fake_ask_switch(settings, prompt):
+    async def fake_ask_switch(settings, prompt, **kwargs):
         prompts_received.append(prompt)
         return json.dumps({
             "action": "none",
@@ -438,8 +440,9 @@ def test_real_socket_correlates_exact_sender_and_thread_and_keeps_heartbeat(ai_c
 
 def test_incoming_message_replies_to_switch_discord_room(ai_config, monkeypatch, caplog):
     posted_messages = []
+    delivered = Event()
 
-    async def fake_ask_switch(settings, prompt):
+    async def fake_ask_switch(settings, prompt, **kwargs):
         return json.dumps({
             "action": "query_only",
             "search_query": "deadline",
@@ -448,10 +451,11 @@ def test_incoming_message_replies_to_switch_discord_room(ai_config, monkeypatch,
 
     async def fake_post_room_message(self, room_id, body, thread_id=None):
         posted_messages.append({"room_id": room_id, "body": body, "thread_id": thread_id})
+        delivered.set()
         return {"status": "ok"}
 
     monkeypatch.setattr(ai_service, "ask_switch", fake_ask_switch)
-    async def empty_memory(settings, search_query):
+    async def empty_memory(settings, search_query, **kwargs):
         return {}
 
     monkeypatch.setattr(ai_service, "query_team_memory", empty_memory)
@@ -473,6 +477,8 @@ def test_incoming_message_replies_to_switch_discord_room(ai_config, monkeypatch,
                 if rows and rows[0]["status"] == "answered":
                     break
 
+            assert delivered.wait(2), "The worker must finish the durable checkpoint and post before shutdown"
+
     assert len(posted_messages) == 1
     assert posted_messages[0]["room_id"] == "test-room"
     assert posted_messages[0]["thread_id"] == "discord-thread-99"
@@ -484,14 +490,14 @@ def test_incoming_message_replies_to_switch_discord_room(ai_config, monkeypatch,
 def test_viewer_source_request_never_posts_to_discord(ai_config, monkeypatch):
     posted = []
 
-    async def fake_ask_switch(settings, prompt):
+    async def fake_ask_switch(settings, prompt, **kwargs):
         return json.dumps({"action": "query_only", "search_query": "x", "answer": "Viewer-only answer"})
 
     async def fake_post_room_message(self, room_id, body, thread_id=None):
         posted.append(room_id)
 
     monkeypatch.setattr(ai_service, "ask_switch", fake_ask_switch)
-    async def empty_memory(settings, search_query):
+    async def empty_memory(settings, search_query, **kwargs):
         return {}
 
     monkeypatch.setattr(ai_service, "query_team_memory", empty_memory)

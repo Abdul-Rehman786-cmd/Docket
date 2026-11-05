@@ -1,0 +1,10 @@
+{
+  "name": "team-memory-schema-tests",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node fresh-schema.mjs" },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.15",
+    "@electric-sql/pglite-pgvector": "0.0.16"
+  }
+}

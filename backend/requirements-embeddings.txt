@@ -1,0 +1,5 @@
+# Optional CPU-only local embedding worker; verified Windows CPython 3.13 wheels.
+-r requirements.txt
+numpy==2.3.4
+onnxruntime==1.23.2
+tokenizers==0.22.2

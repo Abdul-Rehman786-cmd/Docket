@@ -26,7 +26,7 @@ OPAQUE_TOKEN = re.compile(
 )
 
 
-def message_text_for_log(body: str | None, settings: Settings) -> str:
+def message_text_for_log(body: str | None, settings: Settings, *, max_length: int = 2000) -> str:
     try:
         configured = {
             settings.admin_api_token, settings.supabase_service_role_key,
@@ -47,8 +47,8 @@ def message_text_for_log(body: str | None, settings: Settings) -> str:
         text = BEARER.sub(lambda match: match[1] + " " + REDACTED, text)
         text = CREDENTIAL.sub(lambda match: match["label"] + REDACTED, text)
         text = OPAQUE_TOKEN.sub(REDACTED, text)
-        if len(text) > 2000:
-            text = text[:2000] + "... [truncated]"
+        if len(text) > max_length:
+            text = text[:max_length] + "... [truncated]"
         # Escape newlines and control characters so chat cannot forge terminal log entries.
         return json.dumps(text, ensure_ascii=True)
     except Exception:

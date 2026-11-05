@@ -115,9 +115,11 @@ def test_queue_rejection_does_not_record_receipt_and_retry_runs_once(monkeypatch
     async def run():
         gate = asyncio.Event()
         calls = []
+        started = asyncio.Event()
 
         async def answer(settings, question):
             calls.append(question)
+            started.set()
             await gate.wait()
             return '{"action":"none","answer":"Done"}'
 
@@ -144,7 +146,7 @@ def test_queue_rejection_does_not_record_receipt_and_retry_runs_once(monkeypatch
             assert service.pending == 4
             # Queue retains only redacted text, never the raw body in metadata.
             assert all("body" not in job[3] for job in service.queue._queue)
-            await asyncio.sleep(0)
+            await asyncio.wait_for(started.wait(), 2)
             assert calls == ["Question 0"]
             gate.set()
             await asyncio.wait_for(service.queue.join(), 2)
@@ -181,7 +183,7 @@ def test_alias_of_active_job_observes_completion(monkeypatch):
 
         async def answer(settings, question):
             await gate.wait()
-            return "Done"
+            return '{"action":"none","answer":"Done"}'
 
         monkeypatch.setattr("app.services.ai_service.ask_switch", answer)
         service, config, receipts = AIService(), settings(), MessageReceiptRepository()
@@ -208,7 +210,7 @@ def test_simultaneous_submissions_cannot_exceed_total_capacity(monkeypatch):
 
         async def answer(settings, question):
             await gate.wait()
-            return "Done"
+            return '{"action":"none","answer":"Done"}'
 
         monkeypatch.setattr("app.services.ai_service.ask_switch", answer)
         service, config, receipts = AIService(), settings(), MessageReceiptRepository()

@@ -194,7 +194,8 @@ BEGIN
     IF (SELECT embedding IS NULL FROM public.memories WHERE id=memory1) THEN RAISE EXCEPTION 'Unchanged content cleared embedding'; END IF;
     UPDATE public.memories SET content='Synthetic revised fact' WHERE id=memory1;
     IF (SELECT embedding IS NOT NULL FROM public.memories WHERE id=memory1) THEN RAISE EXCEPTION 'Edited content retained embedding'; END IF;
-    UPDATE public.memories SET embedding=v1 WHERE id=memory1;
+    UPDATE public.memories SET embedding=v1,embedding_status='completed',
+        embedding_content_hash=content_hash,embedding_completed_at=now() WHERE id=memory1;
     passed := passed || jsonb_build_array('Embedding preserved for unchanged content, cleared for edits, and replaceable');
     UPDATE public.commitments SET description='Synthetic revised task' WHERE id=c1;
     UPDATE public.decisions SET summary='Synthetic revised decision' WHERE id=d1;

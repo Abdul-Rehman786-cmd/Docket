@@ -19,6 +19,7 @@ class MessageReceiptRepository:
         self._duplicate_count = 0
         self._last_receipt: MessageReceipt | None = None
         self._previews: deque[tuple[UUID, str, MessagePreview]] = deque(maxlen=100)
+        self._source_metadata: OrderedDict[str, dict] = OrderedDict()
 
     def contains(self, message_ref: str) -> bool:
         with self._lock:
@@ -28,6 +29,7 @@ class MessageReceiptRepository:
         self, message_ref: str, *, tenant_id: UUID, room_id: str,
         redacted_sender_name: str, redacted_text: str,
         sender_kind: Literal["message", "ai"] = "message", thread_ref: str | None = None,
+        source_metadata: dict | None = None,
     ) -> MessageReceipt:
         with self._lock:
             existing = self._receipts.get(message_ref)
@@ -36,6 +38,10 @@ class MessageReceiptRepository:
                 return existing.model_copy(update={"duplicate": True})
             receipt = MessageReceipt(message_ref=message_ref, received_at=datetime.now(timezone.utc))
             self._receipts[message_ref] = receipt
+            if source_metadata is not None:
+                self._source_metadata[message_ref] = source_metadata.copy()
+                if len(self._source_metadata) > 100:
+                    self._source_metadata.popitem(last=False)
             self._received_count += 1
             self._last_receipt = receipt
             evicted = self._previews[0] if len(self._previews) == self._previews.maxlen else None
@@ -54,6 +60,11 @@ class MessageReceiptRepository:
                     "message": self._previews[-1][2].model_dump(mode="json"),
                 })
             return receipt
+
+    def source_metadata(self, ref):
+        with self._lock:
+            meta = self._source_metadata.get(ref)
+            return meta.copy() if meta else None
 
     def recent(self, tenant_id: UUID, allowed_rooms: frozenset[str]) -> list[MessagePreview]:
         with self._lock:

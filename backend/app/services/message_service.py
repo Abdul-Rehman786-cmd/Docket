@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
@@ -31,6 +32,14 @@ def receive_message(
         sender_kind="ai" if message.sender in settings.switch_ai_senders else "message",
         thread_ref=message_reference(message.model_copy(update={"message_id": message.thread_id}))
         if message.thread_id else None,
+        source_metadata={
+            "switch_message_id": message.message_id, "switch_author_id": message.sender,
+            "thread_id": message.thread_id,
+            "occurred_at": datetime.fromtimestamp(message.timestamp_ms / 1000, timezone.utc)
+            if message.timestamp_ms is not None else datetime.now(timezone.utc),
+            **{field: getattr(message, field) for field in (
+                "workspace_id", "channel_id", "external_message_id", "external_author_id")},
+        },
     )
     logger.info("Switch message received ref=%s duplicate=%s", receipt.message_ref, receipt.duplicate)
     if settings.log_discord_messages:

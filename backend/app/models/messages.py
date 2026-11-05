@@ -18,8 +18,12 @@ class IncomingMessage(BaseModel):
     sender_name: str | None = Field(default=None, max_length=256, repr=False)
     body: str = Field(default="", max_length=64000, repr=False)
     addressed: bool = False
-    timestamp_ms: int | None = Field(default=None, ge=0)
+    timestamp_ms: int | None = Field(default=None, ge=0, le=253402300799000)
     thread_id: OpaqueId | None = None
+    workspace_id: OpaqueId | None = None
+    channel_id: OpaqueId | None = None
+    external_message_id: OpaqueId | None = None
+    external_author_id: OpaqueId | None = None
 
 
 class MessageReceipt(BaseModel):

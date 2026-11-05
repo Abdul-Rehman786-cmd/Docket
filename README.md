@@ -1,8 +1,8 @@
-# Team Memory — Clean Foundation
+# Team Memory â€” Clean Foundation
 
 A project scaffold for **FastAPI + Supabase + React Native (Expo)** with a Switch listener for verifying Discord-to-API message delivery.
 
-The implemented flow receives Discord messages through Switch and displays redacted sender names and text in a local browser viewer. FastAPI and the Switch listener run as separate processes. See [architecture.md](architecture.md) for the current runtime, security boundaries, and planned extraction, RAG, reminders, and reply flows.
+The implemented flow receives Discord messages through Switch, journals human input durably, displays bounded redacted previews, and evaluates useful information through the existing private Codex runtime. Atomic storage and versioned embedding jobs are defined in the single consolidated development baseline. The hosted non-destructive upgrade is prepared for review and approval; never replay the baseline reset on the hosted database. FastAPI and the Switch listener run as separate processes. See [architecture.md](architecture.md) for runtime boundaries, recovery, storage, retrieval and reply behavior.
 
 ## Structure
 - `architecture.md`: design and boundaries.
@@ -52,7 +52,7 @@ Run tests from `backend/`:
 Discord -> Switch room -> Python WebSocket listener -> authenticated POST /messages
                                                              |
                                                              v
-                                                   FastAPI in-memory previews
+                                                   durable jobs + bounded previews
                                                              ^
                                                              |
 Browser at / <- authenticated /viewer/ws live updates
@@ -60,7 +60,7 @@ Browser at / <- authenticated /viewer/ws live updates
 
 **Keep both FastAPI and exactly one listener running.** Starting or reloading FastAPI does not start the listener. The browser's **Live** indicator confirms the authenticated viewer socket only; `/health` confirms API liveness only. Neither verifies that Discord messages are being delivered.
 
-Use an existing Switch agent that permits a custom WebSocket client and is assigned to the Discord room. The listener does not register an agent or post replies. Configure these settings in the ignored `backend/.env`; the placeholder-only `.env.example` lists them. Existing credentials should be preserved.
+Use an existing Switch agent that permits a custom WebSocket client and is assigned to the Discord room. The listener does not register an agent or post replies; FastAPI can post policy-approved answers through the separate Switch client. Configure these settings in the ignored `backend/.env`; the placeholder-only `.env.example` lists them. Existing credentials should be preserved.
 
 | Variable | Purpose |
 | --- | --- |
@@ -122,7 +122,9 @@ Setup writes `SWITCH_REQUESTER_AGENT_ID`, `SWITCH_REQUESTER_API_KEY`, `SWITCH_AI
 
 `POST /ai/requests` accepts `{request_id, question}` or `{request_id, source_message_ref}` and returns `202` with a queued result. Use a UUID for `request_id`; repeating the same ID/question reuses that result, while reusing it for different content returns `409`. `GET /ai/requests` remains available to read the latest redacted results; the browser receives changes over its socket. Both require `X-Ingest-Token`, enforce the configured scope, and return `Cache-Control: no-store`. Client callers cannot choose a destination room or an AI identity. Invalid or expired source-message references return `404`. These are local development interfaces, not mobile user authentication.
 
-The API processes one question at a time using one bounded queue, permits four total outstanding jobs (running plus queued), and retains at most 100 results and 100 request aliases in memory. Reusing a source evaluation preserves its canonical request ID. Aliases expire with their result or when their own retention limit is reached. Redaction runs before a question reaches Codex and before an answer is retained. Each answer is matched to the configured sender, internal room, and exact request thread. The first matching nonblank response completes the request; the prompt asks Codex to reply once. Timeout, disconnect, or restart does not resubmit a potentially delivered question. Pending work and results are not durable. Run **one API worker**.
+The API serializes AI execution and permits four running/queued jobs. Automatic incoming human messages are committed to ignored `backend/.local/ingestion.sqlite3` before acknowledgement, then recovered after restart. Keep this directory on private persistent storage and run one API worker. Completed jobs clear their redacted payload and retain replay identities/counts. Failed jobs retain redacted evidence; retries reuse validated extraction and stop after three attempts, with thirty-second backoff. Messages accepted before AI setup remain durably pending. Explicit viewer questions and the latest 100 results/aliases remain in memory; viewer-only work is not recovered after restart.
+
+The four-way parser requires valid, consistent structured output. Invalid output is an explicit extraction failure, never `none`. Commitments/decisions generate one corresponding memory each; additional memories contain facts only. Relative deadlines remain unresolved unless date/timezone evidence supports an exact timestamp. Newly extracted records remain pending human approval. Useful `store_only` results and ordinary chatter remain silent in Discord.
 
 Every request verifies that the internal room has no bridge or external channel and contains only Codex and the client. It also checks Codex's reported sessions for live input-room bindings, and checks that every configured input room contains the listener without Codex. Missing runtime evidence, an active input-room session, or re-invitation causes a diagnostic before another question is posted. Stop the Discord-attached Codex session in Switch Console first, then rerun `python -m app.switch_setup`. Setup refuses to report success while an active input-room session is reported. Requests never fall back to an input room. Codex remains available in the private response room. Ask questions using the viewer's question box or **Ask Codex about this message**. Keep the internal room unbridged. The listener uses `SWITCH_REQUESTER_*`, preserving `SWITCH_AGENT_*` for the actual AI. Restarting the listener after an identity change starts a separate cursor; its old identity's messages are not replayed automatically.
 
@@ -136,9 +138,15 @@ Messages in the existing feed have the same authorization, redaction, 2,000-char
 
 The transport and identity behavior follow the official Switch [event catalog and participant IDs](https://docs.switchagents.ai/switch-rooms/internals/agent-events), [agent operations](https://docs.switchagents.ai/switch-rooms/internals/agent-protocol), and [room routing](https://docs.switchagents.ai/switch-rooms/internals/rooms-and-resources). For an unavailable responder, see [agent troubleshooting](https://docs.switchagents.ai/switch-rooms/using/agent-not-answering).
 
-**Receipt means delivery to the API, not database storage.** The backend discards raw message contents after acknowledgement. It retains receipt metadata for the latest 1,000 message identities and up to 100 redacted previews in memory. Duplicate detection is limited to the receipt window. Counters, duplicate detection, and browser history reset on API restart; run one API worker for this demo. The listener stores only its connection ID, generation, processed cursor, and configuration fingerprint in ignored `backend/.local/switch-listener.json`. It saves progress after the API acknowledges each message, answers heartbeats while HTTP requests are pending, and resumes after transient failures. A takeover or retention gap stops the listener with a diagnostic instead of silently skipping the problem.
+**Receipt means durable local acceptance, not successful Supabase storage.** Human source text is credential-redacted before journaling or prompting. The viewer keeps at most 100 previews, capped at 2,000 characters; ingestion retains the admitted redacted source up to 64,000 characters. Preview history resets on API restart, while jobs and replay identities survive. The listener saves progress only after acknowledgement and keeps heartbeats independent of processing. Do not delete its checkpoint or the ingestion journal as a routine recovery step.
 
-Restarting the listener does not restore messages already acknowledged before an API restart. Its saved cursor survives while the API's preview memory is cleared. Unacknowledged events can be replayed within Switch's retention window; do not delete or reset the checkpoint as a routine recovery step.
+Inspect safe processing state from `backend/`:
+
+```powershell
+python -m app.ingestion_jobs
+```
+
+For an exhausted job, stop the API, run `python -m app.ingestion_jobs --retry MESSAGE_REF`, and restart it. This resets attempts for the same job and preserves saved extraction/counts. Completed jobs cannot be reset. Removed/unauthorized rooms are not recovered. A disk failure returns a retryable ingestion error before acknowledgement.
 
 If Switch refuses the connection, verify the bridge URL and agent key, and use a custom agent rather than a controller-managed agent. For Discord setup, confirm the Message Content Intent and room membership. See the official [Switch agent connection](https://docs.switchagents.ai/switch-rooms/internals/agent-connection) and [Discord setup](https://docs.switchagents.ai/switch-rooms/deploy/messaging-apps/discord) guides.
 
@@ -181,13 +189,13 @@ node --test backend/tests/viewer_socket.test.cjs
 
 ### Resource lifecycle and overload handling
 
-FastAPI startup creates separate reusable asynchronous HTTP pools for Supabase and Switch. Each pool allows eight connections, with four idle keep-alive connections. Requests supply current credentials explicitly; clients do not keep default authentication headers. Database requests retain a ten-second timeout; Switch requests use a twenty-second timeout with five-second connection/pool waits. Shutdown cancels the AI worker, marks outstanding jobs failed, then closes both pools. Standalone setup commands own and close their temporary clients. No new dependencies are required.
+FastAPI startup creates separate reusable asynchronous HTTP pools for Supabase and Switch. Shutdown stops worker/recovery tasks before closing pools. Automatic queued work remains recoverable in the journal. Explicit viewer questions remain ephemeral. Exactly one API worker and one listener are supported.
 
-When AI processing is configured and all four job slots are occupied, `POST /messages` returns `429` with `Retry-After: 2` **before** retaining a new receipt or preview. The listener does not advance its acknowledged cursor and retries through its existing reconnect/replay mechanism. Duplicate accepted deliveries are still acknowledged; configured agent messages and recognized reply echoes do not consume AI capacity. Viewer submissions also return `429` when full. Admission and enqueue run without yielding on the single API event loop. Queued jobs retain redacted text and routing metadata rather than the raw message body.
+When configured AI processing has four running/queued jobs, new ingestion returns `429` with `Retry-After: 2` before durable admission. Already accepted duplicate deliveries are acknowledged. Viewer submissions share the same admission lock/capacity. Journal errors return `503`; the listener does not advance its checkpoint. Processing logs contain safe references, state, validated actions, stored counts and failure categories, without chat or model responses.
 
-FastAPI and the listener remain **two separate processes**, and AI execution remains serialized. Receipt acknowledgement confirms in-process admission, not durable processing. A crash can lose acknowledged pending jobs; these changes do not add durable delivery or multiple-worker support. Continue running one API worker and one listener.
+Database storage is a single backend-only transaction: source evidence and all extracted records succeed together, and only then is extraction marked completed. A source replay returns existing counts without altering approvals. A delivery failure after processing does not repeat storage; replies remain best effort, without a durable delivery outbox. Sender-ID and persisted reply-fingerprint guards prevent own-message loops. Room mappings must already exist and be enabled in Supabase; ingestion never creates/reassigns them.
 
-Offline regression tests use mocked transports and reject accidental external HTTP. They cover slow database responsiveness, overload/retry behavior, alias retention, current credential headers, and pool shutdown. Live Supabase compatibility, remote query performance, and end-to-end Switch behavior still require service access. No database migrations are part of these changes.
+Offline regressions mock Codex and database transports and use real disposable SQLite journals. See [storage verification](supabase/USEFUL_STORAGE_VERIFICATION.md) for live evidence, remaining gates and the exact integration test.
 
 ## 2. Supabase
 The initial migration is a **destructive development reset**, not an incremental
@@ -207,13 +215,35 @@ summaries synchronized with their structured records and
 deactivate obsolete memories. FastAPI must authorize every requested room;
 service-role database access bypasses RLS.
 
-Review `supabase/migrations/20261104000100_initial_schema.sql`. From the **repository root**:
+The only core migration is [20261104000100_initial_schema.sql](supabase/migrations/20261104000100_initial_schema.sql). It includes atomic storage, durable versioned embedding state, lease/hash guarded completion, invalidation and authorized vector search. The earlier untracked additive migration was confirmed absent from the connected project's migration history and live functions, copied exactly into the baseline, and removed locally. No hosted migration history was edited.
+
+**The consolidated baseline is destructive. Do not run it or `db push` against the hosted project.** See [the non-destructive deployment proposal](supabase/DEPLOYMENT_PROPOSAL.md). `python -m app.schema_upgrade` from `backend/` prints the exact reviewable delta, derived from the baseline; it never connects or applies it. Hosted schema changes still require approval. Until the new functions are installed, writes fail explicitly and remain recoverable.
+
+### Local embeddings and semantic retrieval
+
+Use Windows/Linux CPython 3.11-3.13 (tested here on Windows 3.13). From `backend/`:
+
 ```powershell
-npx supabase login
-npx supabase link --project-ref YOUR_PROJECT_REF
-npx supabase db push
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt -r requirements-embeddings.txt
+.\.venv\Scripts\python.exe -m app.embedding_setup
 ```
-`supabase db push` changes the linked remote database: get approval and confirm the target project first. Put `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` only in `backend/.env`; never in mobile.
+
+The optional dependency file pins NumPy 2.3.4, ONNX Runtime CPU 1.23.2 and Tokenizers 0.22.2. `requirements-local.lock` records the tested environment including transitive dependencies. Model setup downloads about 133 MB of public ONNX weights plus its tokenizer, pinned to revision `93b36ff09519291b77d6000d2e86bd8565378086` and verified against SHA-256 checksums. Assets live only in ignored `backend/.local/models/`. Runtime inference is entirely local, uses one lazily loaded CPU model and never sends chat to a model download server. No embedding account or API key is needed.
+
+`LOCAL_EMBEDDINGS_ENABLED=true` enables the independent worker. Useful memory text commits before embedding work starts. Memory rows carry pending/processing/completed/failed state, a content hash, a five-minute lease, claim token and three-attempt retry limit with thirty-second backoff. Restart recovery uses database state. Content edits clear the vector, reset attempts and reject stale worker results. Replays do not re-embed unchanged completed memories. A single worker claims at most eight rows, and one inference thread handles bounded inputs without blocking FastAPI or listener heartbeats.
+
+Storage and questions share the same tokenizer, FP32 ONNX model, attention-mask mean pooling and L2 normalization. Vectors must have 384 finite values and unit norm. The model limit is 512 tokens including special tokens. Oversized text is preserved fully in the memory and marked `failed/input_too_long`; it is never silently truncated for inference. Deliberate chunking is not implemented. Oversized questions use labelled keyword fallback.
+
+Semantic retrieval filters by tenant and enabled authorized rooms before limiting results; Discord questions remain in their origin room. Completed, active, current-version embeddings alone are eligible. Matches include source message UUIDs, and corresponding structured ownership/deadline/status fields and source metadata are retrieved separately. The synthesis prompt requests `[source:<message_id>]` citations. If embeddings are unavailable or no vector matches exist, results explicitly say `keyword_fallback`, without implying vector similarity. There is no HNSW index for the currently tiny corpus; exact cosine search avoids approximate filtering loss. No 100k-1M capacity claim has been tested.
+
+Run real local-model tests explicitly:
+
+```powershell
+$env:RUN_LOCAL_MODEL_TESTS='1'
+.\.venv\Scripts\python.exe -m pytest -q tests/test_local_embeddings.py
+```
+
+The disposable PostgreSQL/pgvector schema runner is prepared under `supabase/tests/` (`npm install`, then `npm test`). Its dependency installation was declined in this session, so fresh-schema and SQL behavior execution remain pending. It never loads project credentials or connects remotely. See [verification evidence](supabase/USEFUL_STORAGE_VERIFICATION.md) for exact distinctions between mocked tests, real local inference and unverified hosted/Discord work.
 
 ## 3. Mobile (Expo)
 Use Node.js 20.19.4 or newer and npm. The mobile dependencies follow the [official Expo SDK 54 TypeScript template](https://github.com/expo/expo/blob/sdk-54/templates/expo-template-blank-typescript/package.json): Expo 54, React Native 0.81.5, React 19.1.0, and `expo-status-bar` 3.0.9. See the [SDK 54 release notes](https://expo.dev/changelog/sdk-54) for platform and tool requirements. Use an Expo Go build compatible with SDK 54 or a matching development build.
@@ -250,4 +280,5 @@ git diff --cached --name-only
 The two `.env` files should be reported as ignored when they exist. Inspect staged contents and never force-push. If any credential was previously committed, revoke/rotate it; `.gitignore` alone cannot remove history.
 
 ## Current limits
-Switch messages are acknowledged, evaluated by the LLM 4-way decision, and either stored to Supabase (commitments, decisions, memories) or answered back into Discord and the browser viewer. Conflict checks, APScheduler reminders, and mobile private data authentication remain future work. Development credentials belong only in ignored local environment files.
+
+Local model inference is verified. The hosted non-destructive schema upgrade, versioned vector storage, and full Discord -> Switch -> Codex -> Supabase -> semantic answer flow remain pending deployment approval and live verification. Human input is durably journaled before acknowledgement; embedding failures preserve useful text. Oversized memories remain explicit failed embedding jobs. Fresh-schema execution is pending the declined disposable-database test dependency installation. Conflict checks, reminders, document workflows and mobile private-data authentication remain outside this task. No hosted data reset or migration-history rewrite was performed.

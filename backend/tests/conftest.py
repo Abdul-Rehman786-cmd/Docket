@@ -9,11 +9,12 @@ from app.services.ai_service import AIService
 
 
 @pytest.fixture(autouse=True)
-def isolate_local_configuration(monkeypatch):
+def isolate_local_configuration(monkeypatch, tmp_path):
     """Tests must never use the developer's real service credentials."""
     async def blocked_network(self, request):
         raise AssertionError("External HTTP requires an explicit test transport")
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", blocked_network)
+    monkeypatch.setattr("app.repositories.ingestion_jobs.JOURNAL_PATH", tmp_path / "ingestion.sqlite3")
     for name, value in {
         "LOG_LEVEL": "INFO",
         "ADMIN_API_TOKEN": "",
@@ -35,6 +36,7 @@ def isolate_local_configuration(monkeypatch):
         "SWITCH_AI_TIMEOUT_SECONDS": "180",
         "SWITCH_BACKEND_URL": "http://127.0.0.1:8000",
         "LOG_DISCORD_MESSAGES": "false",
+        "LOCAL_EMBEDDINGS_ENABLED": "false",
         "SWITCH_REPLY_TO_DISCORD": "true",
     }.items():
         monkeypatch.setenv(name, value)

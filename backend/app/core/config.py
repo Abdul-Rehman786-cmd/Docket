@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     switch_backend_url: str = Field(default="http://127.0.0.1:8000", repr=False)
     switch_reply_to_discord: bool = Field(default=True, validation_alias=AliasChoices("SWITCH_REPLY_TO_DISCORD"))
     log_discord_messages: bool = False
+    local_embeddings_enabled: bool = True
 
     @property
     def supabase_configured(self) -> bool:

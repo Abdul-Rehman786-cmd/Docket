@@ -202,6 +202,9 @@ class SwitchListener:
                         sender_name=payload.get("sender_name"),
                         body=payload.get("body", ""), addressed=payload.get("addressed", False),
                         timestamp_ms=payload.get("timestamp"), thread_id=payload.get("thread_id"),
+                        workspace_id=payload.get("workspace_id"), channel_id=payload.get("channel_id"),
+                        external_message_id=payload.get("external_message_id"),
+                        external_author_id=payload.get("external_author_id"),
                     )
                 except ValidationError:
                     raise ListenerStopped("Switch sent an invalid message; cursor was not advanced.") from None
