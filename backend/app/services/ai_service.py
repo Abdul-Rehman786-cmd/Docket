@@ -6,12 +6,14 @@ import re
 from collections import deque
 from datetime import datetime, timezone
 import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.core.config import Settings, get_settings
+from app.core.config import BACKEND_DIR, Settings, get_settings
 from app.core.message_logging import message_text_for_log,redact_source_identifier
 from app.models.ai import AskRequest, LLMDecision
 from app.models.messages import IncomingMessage, MessageReceipt
@@ -19,6 +21,7 @@ from app.repositories.ai_requests import AIRequestRepository
 from app.repositories.ingestion_jobs import IngestionJobs
 from app.services.retrieval_service import query_team_memory
 from app.services.extraction_service import redact_decision, store_ai_memory
+from app.repositories.reply_state import ReplyState
 from app.services.message_service import (
     get_recent_messages, receive_message, message_reference, validate_message_scope,
 )
@@ -229,7 +232,7 @@ async def ask_switch(settings: Settings, question: str, *, synthesis: bool = Fal
 
 
 class AIService:
-    def __init__(self):
+    def __init__(self, reply_state_path: Path | None = None):
         self.repository = AIRequestRepository()
         self.tasks: set[asyncio.Task] = set()
         self.queue = asyncio.Queue(maxsize=MAX_PENDING_JOBS)
@@ -289,6 +292,49 @@ class AIService:
     @staticmethod
     def _reply_fingerprint(room_id: str, body: str) -> str:
         return hashlib.sha256(json.dumps([room_id, (body or "").strip()]).encode()).hexdigest()
+
+    async def evaluate_incoming_message(
+        self,
+        message: IncomingMessage,
+        receipt: MessageReceipt,
+        settings: Settings,
+        receipts,
+    ) -> None:
+        """Automatically trigger and log the LLM's 4-way decision for each incoming user message."""
+        if receipt.duplicate or message.sender in settings.switch_ai_senders:
+            return
+        if self._reply_fingerprint(message.room_id, message.body) in self.posted_replies:
+            logger.info("AI skipped own reply echo ref=%s", receipt.message_ref)
+            return
+        if not is_ai_configured(settings):
+            return
+        auto_request_id = uuid5(NAMESPACE_URL, f"message:{receipt.message_ref}")
+        scope = response_scope(settings)
+        if self.repository.get(scope, auto_request_id) or self.repository.get_by_source(
+            scope, receipt.message_ref
+        ):
+            return
+        source_meta = {
+            "room_id": message.room_id,
+            "switch_message_id": message.message_id,
+            "author_name": message.sender_name or "Unknown sender",
+            "occurred_at": receipt.received_at,
+            "timestamp_ms": message.timestamp_ms or int(receipt.received_at.timestamp() * 1000),
+            "thread_id": message.thread_id,
+            "addressed": message.addressed,
+            "body": message.body,
+            # Only Discord-originated messages may produce a Discord reply.
+            "origin": "discord",
+        }
+        await self.submit(
+            AskRequest(
+                request_id=auto_request_id,
+                source_message_ref=receipt.message_ref,
+            ),
+            settings,
+            receipts,
+            source_meta=source_meta,
+        )
 
     async def submit(
         self, request, settings, receipts, *, source_meta=None,
@@ -515,23 +561,36 @@ class AIService:
                     )
 
                 if decision.action in ("query_only", "store_and_query"):
-                    db_context = await query_team_memory(
-                        settings,
-                        search_query=decision.search_query or row.question,
-                        switch_room_id=source_meta.get("room_id") if source_meta else None,
-                    )
-                    logger.info(
-                        "AI database query complete ref=%s request_id=%s action=%s matched=%s",
-                        msg_ref,
-                        row.request_id,
-                        decision.action,
-                        json.dumps({k: len(v) for k, v in db_context.items()}, sort_keys=True),
-                    )
-                    synthesis_prompt = build_context_synthesis_prompt(
-                        row.question, db_context, stored_counts=stored_counts
-                    )
-                    synthesized = await ask_switch(settings, synthesis_prompt, synthesis=True)
-                    final_answer = _extract_plain_answer(synthesized)
+                    msg_timestamp = source_meta.get("timestamp_ms") if source_meta else None
+                    if (
+                        source_meta
+                        and source_meta.get("origin") == "discord"
+                        and self.is_message_older_than_last_reply(msg_timestamp)
+                    ):
+                        logger.info(
+                            "AI skipped database query/synthesis for older message ref=%s timestamp_ms=%s last_replied_ms=%s",
+                            msg_ref,
+                            msg_timestamp,
+                            self.reply_state.timestamp_ms,
+                        )
+                        final_answer = "Skipped response for older message."
+                    else:
+                        db_context = await query_team_memory(
+                            settings,
+                            search_query=decision.search_query or row.question,
+                        )
+                        logger.info(
+                            "AI database query complete ref=%s request_id=%s action=%s matched=%s",
+                            msg_ref,
+                            row.request_id,
+                            decision.action,
+                            json.dumps({k: len(v) for k, v in db_context.items()}, sort_keys=True),
+                        )
+                        synthesis_prompt = build_context_synthesis_prompt(
+                            row.question, db_context, stored_counts=stored_counts
+                        )
+                        synthesized = await ask_switch(settings, synthesis_prompt)
+                        final_answer = _extract_plain_answer(synthesized)
                 else:
                     final_answer = (decision.answer or "").strip()
                     if not final_answer:
@@ -566,6 +625,17 @@ class AIService:
                 )
             )
             if should_reply:
+                msg_timestamp = source_meta.get("timestamp_ms")
+                if self.is_message_older_than_last_reply(msg_timestamp):
+                    logger.info(
+                        "AI skipped reply to older message ref=%s timestamp_ms=%s last_replied_ms=%s",
+                        msg_ref,
+                        msg_timestamp,
+                        self.reply_state.timestamp_ms,
+                    )
+                    should_reply = False
+
+            if should_reply:
                 try:
                     requester_api = SwitchAPI(
                         settings.switch_bridge_url,
@@ -582,11 +652,18 @@ class AIService:
                         body=final_answer,
                         thread_id=reply_thread_id,
                     )
+                    msg_timestamp = source_meta.get("timestamp_ms")
+                    self.record_reply(
+                        timestamp_ms=msg_timestamp,
+                        message_id=source_meta.get("switch_message_id"),
+                        room_id=reply_room_id,
+                    )
                     logger.info(
-                        "AI reply posted to Switch room=%s ref=%s request_id=%s",
+                        "AI reply posted to Switch room=%s ref=%s request_id=%s watermark=%s",
                         reply_room_id,
                         msg_ref,
                         row.request_id,
+                        self.reply_state.timestamp_ms,
                     )
                 except Exception as post_err:
                     logger.warning(

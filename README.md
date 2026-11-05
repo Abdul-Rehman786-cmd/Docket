@@ -148,6 +148,8 @@ python -m app.ingestion_jobs
 
 For an exhausted job, stop the API, run `python -m app.ingestion_jobs --retry MESSAGE_REF`, and restart it. This resets attempts for the same job and preserves saved extraction/counts. Completed jobs cannot be reset. Removed/unauthorized rooms are not recovered. A disk failure returns a retryable ingestion error before acknowledgement.
 
+When `SWITCH_REPLY_TO_DISCORD=true`, `AIService` maintains a persistent timestamp watermark in `backend/.local/last_replied_message.txt`. If the backend is restarted after an offline period and Switch replays unacknowledged messages, any message with a timestamp at or before the last replied watermark is recognized as an older/replayed message; its Discord reply and synthesis are skipped, preventing the bot from re-answering past questions.
+
 If Switch refuses the connection, verify the bridge URL and agent key, and use a custom agent rather than a controller-managed agent. For Discord setup, confirm the Message Content Intent and room membership. See the official [Switch agent connection](https://docs.switchagents.ai/switch-rooms/internals/agent-connection) and [Discord setup](https://docs.switchagents.ai/switch-rooms/deploy/messaging-apps/discord) guides.
 
 ### Troubleshoot an empty Incoming messages screen

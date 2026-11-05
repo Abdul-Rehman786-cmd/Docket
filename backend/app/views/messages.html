@@ -11,6 +11,10 @@
   <main class="workspace">
     <header class="topbar">
       <a class="brand" href="/" aria-label="Team Memory home"><span class="brand-icon" aria-hidden="true">M</span> Team Memory</a>
+      <nav class="topbar-nav" aria-label="Main Navigation">
+        <button id="nav-feed-btn" class="nav-btn active" type="button">Feed</button>
+        <button id="nav-settings-btn" class="nav-btn" type="button">Settings</button>
+      </nav>
       <a class="docs-link" href="/docs">API docs <span aria-hidden="true">↗</span></a>
     </header>
 
@@ -45,6 +49,168 @@
       </section>
       <div id="empty-state" class="empty-state"><div class="empty-icon" aria-hidden="true">↘</div><h3>Waiting for your first message</h3><p>Send a new message in your connected Discord channel.<br>Keep the Switch listener running in your terminal.</p></div>
       <div id="message-list" class="message-list" aria-live="polite" aria-relevant="additions"></div>
+    </section>
+
+    <section id="settings-panel" class="panel settings-panel" aria-labelledby="settings-title" hidden>
+      <div class="feed-toolbar">
+        <div class="feed-title-row">
+          <h2 id="settings-title">Application Settings</h2>
+        </div>
+        <div class="actions">
+          <button id="save-settings-btn" type="button">Save Settings</button>
+        </div>
+      </div>
+      <p class="feed-note">Configure database engines, migration, storage quotas, reminders, and environment variables.</p>
+
+      <!-- Database Engine Selection -->
+      <div class="settings-section">
+        <h3>Database Engine</h3>
+        <p class="subtitle">Choose database provider for storing team memory, commitments, decisions, and messages.</p>
+        <div class="engine-picker">
+          <label class="radio-card">
+            <input type="radio" name="db-engine" value="supabase" id="engine-supabase" checked>
+            <div class="radio-card-content">
+              <span class="engine-title">Supabase (PostgreSQL)</span>
+              <span class="engine-desc">Remote PostgreSQL database with pgvector, real-time sync, and multi-tenant policies.</span>
+            </div>
+          </label>
+          <label class="radio-card">
+            <input type="radio" name="db-engine" value="sqlite" id="engine-sqlite">
+            <div class="radio-card-content">
+              <span class="engine-title">SQLite (Local Embedded)</span>
+              <span class="engine-desc">Embedded file-based storage. Zero cloud latency, isolated on disk, and private.</span>
+            </div>
+          </label>
+        </div>
+
+        <!-- SQLite Directory Selection -->
+        <div id="sqlite-config-box" class="config-subbox" hidden>
+          <label for="sqlite-dir-path">SQLite Database File / Directory Path</label>
+          <div class="input-row">
+            <input id="sqlite-dir-path" type="text" value="backend/.local/team_memory.db" spellcheck="false" placeholder="e.g. backend/.local/team_memory.db">
+            <button id="sqlite-reset-path-btn" class="secondary" type="button">Default</button>
+          </div>
+          <p class="field-hint">Database file stored in local ignored directory to prevent committing binary data to Git.</p>
+        </div>
+
+        <!-- Migration Tool -->
+        <div class="migration-card">
+          <div class="migration-header">
+            <div>
+              <h4 class="migration-title">Database Migration (Supabase → SQLite)</h4>
+              <p class="subtitle">Export all tenants, rooms, messages, commitments, decisions, and memories into SQLite schema.</p>
+            </div>
+            <button id="start-migration-btn" class="secondary migration-btn" type="button">Migrate to SQLite</button>
+          </div>
+          <div id="migration-log-box" class="migration-log-box" hidden>
+            <div class="migration-progress-bar-wrap">
+              <div id="migration-progress-bar" class="migration-progress-bar" style="width: 0%"></div>
+            </div>
+            <pre id="migration-log" class="migration-log"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reminders Configuration -->
+      <div class="settings-section">
+        <div class="section-title-row">
+          <div>
+            <h3>Task &amp; Commitment Reminders</h3>
+            <p class="subtitle">Enable automated reminders for extracted commitments and deadlines.</p>
+          </div>
+          <label class="switch">
+            <input id="reminders-toggle" type="checkbox" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div id="reminders-lead-time-box" class="lead-time-box">
+          <label for="reminder-lead-time">Advance Notice Time (Kitna time pehla de)</label>
+          <div class="input-group-row">
+            <input id="reminder-lead-time" type="number" min="1" max="1000" value="30" style="max-width: 120px;">
+            <select id="reminder-lead-unit" class="select-input">
+              <option value="minutes" selected>Minutes before</option>
+              <option value="hours">Hours before</option>
+              <option value="days">Days before</option>
+            </select>
+            <span class="field-hint inline-hint">Reminders trigger before commitment due dates.</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Storage & Retention Management -->
+      <div class="settings-section">
+        <h3>Storage &amp; Retention Quota</h3>
+        <p class="subtitle">Control message and memory retention thresholds and disk usage quotas.</p>
+
+        <div class="settings-grid">
+          <div>
+            <label for="storage-retention-time">Time for Old Storage (Retention Period)</label>
+            <div class="input-group-row">
+              <input id="storage-retention-time" type="number" min="1" max="3650" value="90" style="max-width: 120px;">
+              <select id="storage-retention-unit" class="select-input">
+                <option value="days" selected>Days</option>
+                <option value="months">Months</option>
+                <option value="years">Years</option>
+                <option value="indefinite">Keep Forever (Indefinite)</option>
+              </select>
+            </div>
+            <p class="field-hint">Records older than this time are pruned or archived.</p>
+          </div>
+
+          <div>
+            <label for="storage-max-space">Total Space for Storage (Quota)</label>
+            <div class="input-group-row">
+              <input id="storage-max-space" type="number" min="1" max="10000" value="500" style="max-width: 120px;">
+              <select id="storage-max-unit" class="select-input">
+                <option value="MB" selected>MB</option>
+                <option value="GB">GB</option>
+              </select>
+            </div>
+            <p class="field-hint">Maximum disk space allocated for local database and vectors.</p>
+          </div>
+        </div>
+
+        <div class="storage-path-box" style="margin-top: 18px;">
+          <label for="storage-location-path">SQLite Database Storage Location (Local Computer Path)</label>
+          <div class="input-row">
+            <input id="storage-location-path" type="text" value="backend/.local/team_memory.db" spellcheck="false" placeholder="Select or type folder/file path on computer">
+            <button id="browse-dir-btn" class="secondary" type="button">📁 Browse Computer</button>
+            <input id="dir-picker-input" type="file" webkitdirectory directory hidden>
+          </div>
+          <p class="field-hint">Supports local vectors via <code>sqlite-vec</code>. Choose fast SSD or custom disk path.</p>
+        </div>
+
+        <div class="storage-usage-box">
+          <div class="storage-usage-header">
+            <span>Storage Usage</span>
+            <span id="storage-usage-text">14.2 MB / 500 MB (2.8%)</span>
+          </div>
+          <div class="storage-bar-track">
+            <div id="storage-bar-fill" class="storage-bar-fill" style="width: 2.8%"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- .env Manager Section -->
+      <div class="settings-section">
+        <div class="feed-title-row">
+          <div>
+            <h3>Environment Configuration (.env)</h3>
+            <p class="subtitle">Stored variables from your local environment. Keys are fixed and all values are masked by default.</p>
+          </div>
+        </div>
+
+        <div id="env-var-list" class="env-var-list"></div>
+
+        <div class="env-actions-row">
+          <button id="reload-env-btn" class="secondary" type="button">🔄 Reload from backend/.env</button>
+          <button id="save-env-btn" class="secondary" type="button">💾 Save to backend/.env</button>
+          <button id="copy-env-btn" class="secondary" type="button">Copy .env Content</button>
+          <button id="download-env-btn" class="secondary" type="button">Download .env</button>
+        </div>
+        <p id="env-status-msg" class="feed-note" role="status" style="padding: 10px 0 0;"></p>
+      </div>
     </section>
 
     <footer><span class="footer-dot" aria-hidden="true"></span> Local message viewer <span class="footer-separator">·</span> Credentials are masked <span class="footer-separator">·</span> Latest 100 messages, cleared on API restart</footer>

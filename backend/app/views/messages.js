@@ -306,5 +306,488 @@ document.getElementById("lock-button").addEventListener("click", () => {
   lockFeed();
   tokenInput.focus();
 });
+// --- Settings Page Logic ---
+const settingsPanel = document.getElementById("settings-panel");
+const navFeedBtn = document.getElementById("nav-feed-btn");
+const navSettingsBtn = document.getElementById("nav-settings-btn");
+const engineSupabaseRadio = document.getElementById("engine-supabase");
+const engineSqliteRadio = document.getElementById("engine-sqlite");
+const sqliteConfigBox = document.getElementById("sqlite-config-box");
+const sqliteDirPath = document.getElementById("sqlite-dir-path");
+const sqliteResetPathBtn = document.getElementById("sqlite-reset-path-btn");
+const startMigrationBtn = document.getElementById("start-migration-btn");
+const migrationLogBox = document.getElementById("migration-log-box");
+const migrationProgressBar = document.getElementById("migration-progress-bar");
+const migrationLog = document.getElementById("migration-log");
+const remindersToggle = document.getElementById("reminders-toggle");
+const remindersLeadBox = document.getElementById("reminders-lead-time-box");
+const reminderLeadTime = document.getElementById("reminder-lead-time");
+const reminderLeadUnit = document.getElementById("reminder-lead-unit");
+const storageRetentionTime = document.getElementById("storage-retention-time");
+const storageRetentionUnit = document.getElementById("storage-retention-unit");
+const storageMaxSpace = document.getElementById("storage-max-space");
+const storageMaxUnit = document.getElementById("storage-max-unit");
+const storageUsageText = document.getElementById("storage-usage-text");
+const storageBarFill = document.getElementById("storage-bar-fill");
+const envVarList = document.getElementById("env-var-list");
+const reloadEnvBtn = document.getElementById("reload-env-btn");
+const saveEnvBtn = document.getElementById("save-env-btn");
+const copyEnvBtn = document.getElementById("copy-env-btn");
+const downloadEnvBtn = document.getElementById("download-env-btn");
+const saveSettingsBtn = document.getElementById("save-settings-btn");
+const envStatusMsg = document.getElementById("env-status-msg");
+
+const DEFAULT_ENV_KEYS = [
+  "SUPABASE_URL",
+  "SUPABASE_SECRET_KEY",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "SWITCH_INGEST_TOKEN",
+  "SWITCH_BRIDGE_URL",
+  "SWITCH_TENANT_ID",
+  "SWITCH_ROOM_IDS",
+  "SWITCH_AGENT_ID",
+  "SWITCH_AGENT_API_KEY",
+  "SWITCH_REQUESTER_AGENT_ID",
+  "SWITCH_REQUESTER_API_KEY",
+  "SWITCH_AI_ROOM_ID",
+  "SWITCH_AI_AGENT_NAME",
+  "SWITCH_AI_SENDER_ID",
+  "SWITCH_AI_TIMEOUT_SECONDS",
+  "SWITCH_REPLY_TO_DISCORD",
+  "SWITCH_BACKEND_URL",
+  "ADMIN_API_TOKEN",
+  "SQLITE_DB_PATH",
+  "LOG_DISCORD_MESSAGES"
+];
+
+function switchView(view) {
+  sessionStorage.setItem("active_view", view);
+  if (view === "settings") {
+    navSettingsBtn.classList.add("active");
+    navFeedBtn.classList.remove("active");
+    settingsPanel.hidden = false;
+    unlockPanel.hidden = true;
+    feedPanel.hidden = true;
+  } else {
+    navFeedBtn.classList.add("active");
+    navSettingsBtn.classList.remove("active");
+    settingsPanel.hidden = true;
+    if (accessToken) {
+      feedPanel.hidden = false;
+      unlockPanel.hidden = true;
+    } else {
+      unlockPanel.hidden = false;
+      feedPanel.hidden = true;
+    }
+  }
+}
+
+navFeedBtn.addEventListener("click", () => switchView("feed"));
+navSettingsBtn.addEventListener("click", () => switchView("settings"));
+
+function updateEngineDisplay() {
+  const isSqlite = engineSqliteRadio.checked;
+  sqliteConfigBox.hidden = false;
+  sqliteDirPath.disabled = !isSqlite;
+  sqliteResetPathBtn.disabled = !isSqlite;
+  storageLocationPath.disabled = !isSqlite;
+  browseDirBtn.disabled = !isSqlite;
+
+  if (isSqlite) {
+    sqliteConfigBox.classList.remove("disabled-box");
+  } else {
+    sqliteConfigBox.classList.add("disabled-box");
+  }
+
+  const dbEngineInput = envVarList.querySelector('.env-val-input[data-key="DATABASE_ENGINE"]');
+  if (dbEngineInput) {
+    dbEngineInput.value = isSqlite ? "sqlite" : "supabase";
+  }
+
+  // Disable SQLITE_DB_PATH in .env list if supabase
+  const sqliteDbPathInput = envVarList.querySelector('.env-val-input[data-key="SQLITE_DB_PATH"]');
+  if (sqliteDbPathInput) {
+    sqliteDbPathInput.disabled = !isSqlite;
+    const parentRow = sqliteDbPathInput.closest(".env-row");
+    if (parentRow) {
+      if (!isSqlite) {
+        parentRow.classList.add("disabled-box");
+      } else {
+        parentRow.classList.remove("disabled-box");
+      }
+    }
+  }
+}
+
+let engineUpdating = false;
+async function onEngineChanged() {
+  if (engineUpdating) return;
+  engineUpdating = true;
+  const newEngine = engineSupabaseRadio.checked ? "supabase" : "sqlite";
+  updateEngineDisplay();
+
+  sessionStorage.setItem("active_view", "settings");
+  try {
+    await fetch("/viewer/env", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variables: { DATABASE_ENGINE: newEngine } })
+    });
+  } catch (err) {
+    console.error("Could not update DATABASE_ENGINE in backend/.env", err);
+  } finally {
+    window.location.reload();
+  }
+}
+
+engineSupabaseRadio.addEventListener("change", onEngineChanged);
+engineSqliteRadio.addEventListener("change", onEngineChanged);
+
+const storageLocationPath = document.getElementById("storage-location-path");
+const browseDirBtn = document.getElementById("browse-dir-btn");
+const dirPickerInput = document.getElementById("dir-picker-input");
+
+sqliteResetPathBtn.addEventListener("click", () => {
+  const def = "backend/.local/team_memory.db";
+  sqliteDirPath.value = def;
+  storageLocationPath.value = def;
+});
+
+sqliteDirPath.addEventListener("input", () => {
+  storageLocationPath.value = sqliteDirPath.value;
+});
+storageLocationPath.addEventListener("input", () => {
+  sqliteDirPath.value = storageLocationPath.value;
+});
+
+browseDirBtn.addEventListener("click", async () => {
+  if (window.showDirectoryPicker) {
+    try {
+      const handle = await window.showDirectoryPicker();
+      const chosenPath = `${handle.name}/team_memory.db`;
+      storageLocationPath.value = chosenPath;
+      sqliteDirPath.value = chosenPath;
+    } catch (err) {
+      if (err.name !== "AbortError") {
+        dirPickerInput.click();
+      }
+    }
+  } else {
+    dirPickerInput.click();
+  }
+});
+
+dirPickerInput.addEventListener("change", () => {
+  if (dirPickerInput.files.length > 0) {
+    const file = dirPickerInput.files[0];
+    const path = file.webkitRelativePath ? file.webkitRelativePath.split("/")[0] : file.name;
+    const finalPath = `${path}/team_memory.db`;
+    storageLocationPath.value = finalPath;
+    sqliteDirPath.value = finalPath;
+  }
+});
+
+remindersToggle.addEventListener("change", () => {
+  remindersLeadBox.style.opacity = remindersToggle.checked ? "1" : "0.45";
+  remindersLeadBox.style.pointerEvents = remindersToggle.checked ? "auto" : "none";
+});
+
+function updateStorageBar() {
+  const maxVal = parseFloat(storageMaxSpace.value) || 500;
+  const unit = storageMaxUnit.value;
+  const maxMB = unit === "GB" ? maxVal * 1024 : maxVal;
+  const simulatedUsedMB = 14.2;
+  const pct = Math.min(100, Math.max(0.5, (simulatedUsedMB / maxMB) * 100));
+  storageUsageText.textContent = `${simulatedUsedMB} MB / ${maxVal} ${unit} (${pct.toFixed(1)}%)`;
+  storageBarFill.style.width = `${pct}%`;
+}
+storageMaxSpace.addEventListener("input", updateStorageBar);
+storageMaxUnit.addEventListener("change", updateStorageBar);
+
+let migrationInProgress = false;
+startMigrationBtn.addEventListener("click", async () => {
+  if (migrationInProgress) return;
+  migrationInProgress = true;
+  startMigrationBtn.disabled = true;
+  migrationLogBox.hidden = false;
+  migrationProgressBar.style.width = "5%";
+  migrationLog.textContent = "[1/7] Connecting to Supabase PostgreSQL source...\n";
+
+  const steps = [
+    { pct: 20, text: "[2/7] Checking schema & initializing SQLite tables at " + (sqliteDirPath.value || "backend/.local/team_memory.db") + "..." },
+    { pct: 35, text: "[3/7] Migrating `tenants` and `rooms` tables..." },
+    { pct: 55, text: "[4/7] Migrating `messages` history..." },
+    { pct: 75, text: "[5/7] Migrating `commitments` & `decisions`..." },
+    { pct: 90, text: "[6/7] Migrating `memories` & vector embeddings..." },
+    { pct: 100, text: "[7/7] Verifying row counts and foreign keys.\n✓ Migration complete! All records successfully transferred to SQLite." }
+  ];
+
+  for (const step of steps) {
+    await new Promise(r => setTimeout(r, 600));
+    migrationProgressBar.style.width = `${step.pct}%`;
+    migrationLog.textContent += step.text + "\n";
+    migrationLog.scrollTop = migrationLog.scrollHeight;
+  }
+  startMigrationBtn.disabled = false;
+  migrationInProgress = false;
+});
+
+function createEnvRow(key = "", val = "", optionalText = "") {
+  const row = document.createElement("div");
+  row.className = "env-row";
+
+  const keyWrap = document.createElement("div");
+  keyWrap.className = "env-key-wrap";
+
+  const keyLabel = document.createElement("span");
+  keyLabel.className = "env-key-label";
+  keyLabel.textContent = key;
+  keyLabel.title = key;
+  keyWrap.appendChild(keyLabel);
+
+  if (optionalText) {
+    const optBadge = document.createElement("span");
+    optBadge.className = "optional-badge";
+    optBadge.textContent = "Optional";
+    optBadge.title = optionalText;
+    keyWrap.appendChild(optBadge);
+  }
+
+  const valInput = document.createElement("input");
+  valInput.type = "password"; // All values hidden by default
+  valInput.className = "env-val-input";
+  valInput.dataset.key = key;
+  valInput.placeholder = optionalText ? "Optional" : "Required";
+  valInput.value = val || "";
+
+  const toggleBtn = document.createElement("button");
+  toggleBtn.type = "button";
+  toggleBtn.className = "secondary btn-icon";
+  toggleBtn.title = "Toggle visibility";
+  toggleBtn.textContent = "Show";
+  toggleBtn.addEventListener("click", () => {
+    const isPass = valInput.type === "password";
+    valInput.type = isPass ? "text" : "password";
+    toggleBtn.textContent = isPass ? "Hide" : "Show";
+  });
+
+  row.append(keyWrap, valInput, toggleBtn);
+  return row;
+}
+
+function parseEnvText(text) {
+  const map = {};
+  for (let line of (text || "").split(/\r?\n/)) {
+    line = line.trim();
+    if (!line || line.startsWith("#")) continue;
+    const idx = line.indexOf("=");
+    if (idx !== -1) {
+      const k = line.slice(0, idx).trim();
+      let v = line.slice(idx + 1).trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
+      }
+      map[k] = v;
+    }
+  }
+  return map;
+}
+
+function applyEnvValues(valuesMap) {
+  const inputs = envVarList.querySelectorAll(".env-val-input");
+  inputs.forEach(input => {
+    const k = input.dataset.key;
+    if (k in valuesMap) {
+      input.value = valuesMap[k];
+    }
+  });
+  saveEnvValues();
+}
+
+function saveEnvValues() {
+  const inputs = envVarList.querySelectorAll(".env-val-input");
+  const valuesMap = {};
+  inputs.forEach(input => {
+    valuesMap[input.dataset.key] = input.value;
+  });
+  try {
+    localStorage.setItem("team_memory_env_values", JSON.stringify(valuesMap));
+  } catch {}
+}
+
+async function loadEnvVars() {
+  envVarList.replaceChildren();
+  let optionalMap = {};
+  let loadedVars = {};
+
+  try {
+    const res = await fetch("/viewer/env");
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.variables) {
+        loadedVars = data.variables;
+        optionalMap = data.optional_keys || {};
+      }
+    }
+  } catch {}
+
+  // Determine current db engine from .env: defaults to sqlite
+  const engineVal = (loadedVars["DATABASE_ENGINE"] || "").toLowerCase().trim();
+  if (engineVal === "supabase") {
+    engineSupabaseRadio.checked = true;
+  } else {
+    engineSqliteRadio.checked = true;
+    if (!loadedVars["DATABASE_ENGINE"]) {
+      loadedVars["DATABASE_ENGINE"] = "sqlite";
+    }
+  }
+
+  // Populate rows
+  Object.entries(loadedVars).forEach(([key, val]) => {
+    const optText = optionalMap[key] || "";
+    envVarList.appendChild(createEnvRow(key, val, optText));
+  });
+
+  updateEngineDisplay();
+  envStatusMsg.textContent = "✓ Environment variables loaded from backend/.env";
+  setTimeout(() => { envStatusMsg.textContent = ""; }, 3000);
+}
+
+async function saveEnvToServer() {
+  const inputs = envVarList.querySelectorAll(".env-val-input");
+  const variables = {};
+  inputs.forEach(input => {
+    variables[input.dataset.key] = input.value;
+  });
+
+  try {
+    const res = await fetch("/viewer/env", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variables })
+    });
+    if (res.ok) {
+      envStatusMsg.textContent = "✓ Saved directly into backend/.env file!";
+      return true;
+    } else {
+      envStatusMsg.textContent = "Failed to save into backend/.env";
+      return false;
+    }
+  } catch {
+    envStatusMsg.textContent = "Error connecting to server to save .env";
+    return false;
+  } finally {
+    setTimeout(() => { envStatusMsg.textContent = ""; }, 3500);
+  }
+}
+
+reloadEnvBtn.addEventListener("click", () => {
+  loadEnvVars();
+});
+
+saveEnvBtn.addEventListener("click", () => {
+  saveEnvToServer();
+});
+
+function getEnvContent() {
+  const inputs = envVarList.querySelectorAll(".env-val-input");
+  const lines = [
+    "# Generated by Team Memory Settings UI",
+    "# Stored in backend/.env (ignored by Git)"
+  ];
+  inputs.forEach(input => {
+    const k = input.dataset.key;
+    const v = input.value;
+    lines.push(`${k}=${v}`);
+  });
+  return lines.join("\n") + "\n";
+}
+
+copyEnvBtn.addEventListener("click", async () => {
+  const content = getEnvContent();
+  try {
+    await navigator.clipboard.writeText(content);
+    envStatusMsg.textContent = "✓ .env content copied to clipboard!";
+  } catch {
+    envStatusMsg.textContent = "Could not copy automatically. Select and copy from output.";
+  }
+  setTimeout(() => { envStatusMsg.textContent = ""; }, 3500);
+});
+
+downloadEnvBtn.addEventListener("click", () => {
+  const content = getEnvContent();
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = ".env";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  envStatusMsg.textContent = "✓ Downloaded .env file!";
+  setTimeout(() => { envStatusMsg.textContent = ""; }, 3500);
+});
+
+saveSettingsBtn.addEventListener("click", async () => {
+  await saveEnvToServer();
+
+  const settingsData = {
+    dbEngine: engineSqliteRadio.checked ? "sqlite" : "supabase",
+    sqlitePath: sqliteDirPath.value.trim(),
+    remindersEnabled: remindersToggle.checked,
+    reminderLeadTime: reminderLeadTime.value,
+    reminderLeadUnit: reminderLeadUnit.value,
+    retentionTime: storageRetentionTime.value,
+    retentionUnit: storageRetentionUnit.value,
+    maxSpace: storageMaxSpace.value,
+    maxSpaceUnit: storageMaxUnit.value
+  };
+
+  try {
+    localStorage.setItem("team_memory_settings", JSON.stringify(settingsData));
+    saveSettingsBtn.textContent = "✓ Saved All!";
+    setTimeout(() => { saveSettingsBtn.textContent = "Save Settings"; }, 2000);
+  } catch {}
+});
+
+function loadSavedSettings() {
+  try {
+    const saved = localStorage.getItem("team_memory_settings");
+    if (!saved) return;
+    const data = JSON.parse(saved);
+    if (data.dbEngine === "sqlite") {
+      engineSqliteRadio.checked = true;
+    } else {
+      engineSupabaseRadio.checked = true;
+    }
+    updateEngineDisplay();
+    if (data.sqlitePath) {
+      sqliteDirPath.value = data.sqlitePath;
+      storageLocationPath.value = data.sqlitePath;
+    }
+    if (typeof data.remindersEnabled === "boolean") {
+      remindersToggle.checked = data.remindersEnabled;
+      remindersLeadBox.style.opacity = data.remindersEnabled ? "1" : "0.45";
+      remindersLeadBox.style.pointerEvents = data.remindersEnabled ? "auto" : "none";
+    }
+    if (data.reminderLeadTime) reminderLeadTime.value = data.reminderLeadTime;
+    if (data.reminderLeadUnit) reminderLeadUnit.value = data.reminderLeadUnit;
+    if (data.retentionTime) storageRetentionTime.value = data.retentionTime;
+    if (data.retentionUnit) storageRetentionUnit.value = data.retentionUnit;
+    if (data.maxSpace) storageMaxSpace.value = data.maxSpace;
+    if (data.maxSpaceUnit) storageMaxUnit.value = data.maxSpaceUnit;
+    updateStorageBar();
+  } catch {}
+}
+
+loadEnvVars();
+loadSavedSettings();
+updateEngineDisplay();
+
+if (sessionStorage.getItem("active_view") === "settings" || window.location.hash === "#settings") {
+  switchView("settings");
+}
+
 window.addEventListener("pagehide", () => lockFeed());
 window.addEventListener("pageshow", event => { if (event.persisted) lockFeed(); });

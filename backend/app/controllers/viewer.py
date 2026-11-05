@@ -2,7 +2,9 @@ from pathlib import Path
 import re
 
 from fastapi import APIRouter, Request, WebSocket
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from app.models.viewer import EnvVariablesPayload
+from app.services.env_service import OPTIONAL_KEYS, read_env_variables, write_env_variables
 from app.services.viewer_service import serve_viewer
 
 router = APIRouter(include_in_schema=False)
@@ -50,3 +52,19 @@ def viewer_script(request: Request) -> FileResponse:
 @router.websocket("/viewer/ws")
 async def viewer_socket(websocket: WebSocket):
     await serve_viewer(websocket)
+
+
+@router.get("/viewer/env")
+def get_env_variables(request: Request) -> JSONResponse:
+    vars_dict = read_env_variables()
+    headers = viewer_headers(request)
+    headers["Cache-Control"] = "no-store, private"
+    return JSONResponse(content={"variables": vars_dict, "optional_keys": OPTIONAL_KEYS}, headers=headers)
+
+
+@router.post("/viewer/env")
+def update_env_variables(payload: EnvVariablesPayload, request: Request) -> JSONResponse:
+    write_env_variables(payload.variables)
+    headers = viewer_headers(request)
+    headers["Cache-Control"] = "no-store, private"
+    return JSONResponse(content={"status": "ok"}, headers=headers)
