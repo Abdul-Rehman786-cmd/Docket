@@ -411,9 +411,12 @@ The system supports seamless switching between remote Supabase (PostgreSQL with 
 
 ### Storage Retention & SQLite Space Quota Management
 - `services/storage_service.py` and `controllers/viewer.py` expose:
-  - `GET /viewer/storage/status`: returns active engine, timeline retention settings, SQLite maximum space quota, and live SQLite storage usage metrics.
+  - `GET /viewer/storage/status`: returns active engine, timeline retention settings, SQLite maximum space quota, and live SQLite storage usage metrics (`used_bytes`, `file_bytes`, `payload_bytes`, and row counts).
   - `POST /viewer/storage/prune-timeline`: deletes all records older than the user-selected timeline (`hours`, `days`, `weeks`, `months`, `years`, or explicit ISO cutoff) in either **Supabase** (`delete_records_older_than_supabase`) or **SQLite** (`delete_records_older_than_sqlite`) following ATOM principles (child records deleted before parent messages in a single transaction, followed by `VACUUM` in SQLite).
-  - `POST /viewer/storage/enforce-space`: when using **SQLite**, allows the user to enable and set a maximum storage space (`KB`, `MB`, or `GB`). If usage exceeds the specified space, `enforce_sqlite_max_space` atomically deletes the oldest messages and their dependent commitments, decisions, memories, and documents until the space requirement is met. Also runs automatically after new SQLite extractions and embeddings when `SQLITE_MAX_SPACE_ENABLED=true`.
+  - `POST /viewer/storage/enforce-space`: when using **SQLite**, allows the user to enable and set a maximum storage space (`KB`, `MB`, or `GB`).
+    - **Targeted-Table Eviction**: When new records are added (in `persist_extraction` or `finish_embedding`), `enforce_sqlite_max_space` receives `target_tables` (e.g. `['messages']` or `['memories']`) and prioritizes deleting the oldest records specifically from the table that received new data before touching other tables, preserving newly added message IDs (`preserve_message_ids`).
+    - **Effective Size & Schema Overhead Protection**: SQLite requires ~172 KB base disk allocation for 10 tables and 30 indexes even when empty. When maximum space is configured below 256 KB, the enforcer and UI evaluate user payload data (`payload_bytes`) rather than empty schema page overhead to prevent accidental data deletion.
+    - **Dual UI Metric Display**: Storage usage bar dynamically displays `Payload: X KB / Y KB (%) • Disk: Z KB` when small quotas are active, or total disk usage for standard megabyte/gigabyte quotas.
 
 ## 9. Multiple servers (later)
 
