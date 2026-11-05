@@ -135,7 +135,7 @@ async def test_ai_service_replies_and_updates_watermark_for_newer_message(monkey
         return {"event_id": "test-reply"}
 
     monkeypatch.setattr(ai_service.SwitchAPI, "post_room_message", mock_post_room_message)
-    async def mock_query_team_memory(settings, search_query=None):
+    async def mock_query_team_memory(settings, search_query=None, **kwargs):
         return {"memories": []}
 
     monkeypatch.setattr(ai_service, "query_team_memory", mock_query_team_memory)

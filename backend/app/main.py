@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import os
 from time import perf_counter
 
 from fastapi import FastAPI
@@ -14,6 +15,7 @@ from app.services.ai_service import AIService
 from app.core.http_clients import HTTPClients, use_http_clients
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.repositories.record_repository import ensure_tenant_and_rooms_provisioned
 from app.services.viewer_service import ViewerHub
 from app.services.embedding_service import EmbeddingWorker
 
@@ -28,6 +30,11 @@ async def lifespan(application):
     application.state.ai_service.repository.on_change = application.state.viewer_hub.publish
     application.state.embedding_worker = EmbeddingWorker()
     with use_http_clients(application.state.http_clients):
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                await ensure_tenant_and_rooms_provisioned()
+            except Exception as exc:
+                logging.getLogger("uvicorn.error").warning("Startup auto-provision warning: %s", exc)
         application.state.ai_service.start_recovery()
         application.state.embedding_worker.start()
     try:

@@ -36,6 +36,7 @@ from app.services.switch_api import (
 JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
 logger = logging.getLogger("uvicorn.error")
 MAX_PENDING_JOBS = 4
+DEFAULT_REPLY_STATE_PATH = BACKEND_DIR / ".local" / "last_replied_message.txt"
 
 
 def response_scope(settings: Settings) -> tuple:
@@ -246,6 +247,32 @@ class AIService:
         self.recovery = None
         self.active_refs: set[str] = set()
         self.admission_lock = asyncio.Lock()
+        self.reply_state_path = reply_state_path or DEFAULT_REPLY_STATE_PATH
+        self.reply_state = ReplyState.load(self.reply_state_path)
+
+    def is_message_older_than_last_reply(self, message_timestamp_ms: int | None) -> bool:
+        """Return True if message was sent at or before the latest message already responded to."""
+        if message_timestamp_ms is None or self.reply_state.timestamp_ms is None:
+            return False
+        return message_timestamp_ms <= self.reply_state.timestamp_ms
+
+    def record_reply(
+        self,
+        timestamp_ms: int | None,
+        message_id: str | None = None,
+        room_id: str | None = None,
+    ) -> None:
+        """Persist the highest replied message timestamp watermark to the .txt file."""
+        if timestamp_ms is None:
+            return
+        current_watermark = self.reply_state.timestamp_ms or 0
+        if timestamp_ms >= current_watermark:
+            self.reply_state = ReplyState(
+                timestamp_ms=timestamp_ms,
+                message_id=message_id,
+                room_id=room_id,
+            )
+            self.reply_state.save(self.reply_state_path)
 
     def start_recovery(self):
         self.recovery = asyncio.create_task(self._recover())
@@ -458,6 +485,7 @@ class AIService:
                 "switch_author_id": redact_source_identifier(message.sender,settings),
                 "occurred_at": datetime.fromtimestamp(message.timestamp_ms / 1000, timezone.utc).isoformat()
                 if message.timestamp_ms is not None else datetime.now(timezone.utc).isoformat(),
+                "timestamp_ms": message.timestamp_ms,
                 "thread_id": redact_source_identifier(message.thread_id,settings), "addressed": message.addressed,
                 "origin": "discord", "durable": True,
             }
@@ -578,6 +606,7 @@ class AIService:
                         db_context = await query_team_memory(
                             settings,
                             search_query=decision.search_query or row.question,
+                            switch_room_id=source_meta.get("room_id") if source_meta else None,
                         )
                         logger.info(
                             "AI database query complete ref=%s request_id=%s action=%s matched=%s",
@@ -589,7 +618,7 @@ class AIService:
                         synthesis_prompt = build_context_synthesis_prompt(
                             row.question, db_context, stored_counts=stored_counts
                         )
-                        synthesized = await ask_switch(settings, synthesis_prompt)
+                        synthesized = await ask_switch(settings, synthesis_prompt, synthesis=True)
                         final_answer = _extract_plain_answer(synthesized)
                 else:
                     final_answer = (decision.answer or "").strip()
@@ -712,17 +741,19 @@ class AIService:
             )
             self.repository.update(scope, row.request_id, status="failed", error="switch_unavailable")
         except HTTPException as error:
+            detail_str = str(error.detail) if getattr(error, "detail", None) else "database_or_scope_failure"
             logger.warning(
-                "AI evaluation failed ref=%s request_id=%s reason=%s",
+                "AI evaluation failed ref=%s request_id=%s reason=%s detail=%s",
                 msg_ref,
                 row.request_id,
                 "database_or_scope_failure",
+                detail_str,
             )
             self.repository.update(
                 scope,
                 row.request_id,
                 status="failed",
-                error="database_or_scope_failure",
+                error=detail_str,
             )
         except Exception:
             logger.warning(

@@ -16,7 +16,8 @@ logger = logging.getLogger("uvicorn.error")
 
 
 def _supabase_headers(settings: Settings, *, prefer: str | None = None) -> dict[str, str]:
-    headers = backend_headers(settings.supabase_service_role_key)
+    key = settings.supabase_secret_key.strip() or settings.supabase_service_role_key.strip()
+    headers = backend_headers(key)
     if prefer:
         headers["Prefer"] = prefer
     return headers
@@ -27,8 +28,9 @@ def _rest_url(settings: Settings, table: str) -> str:
         missing = []
         if not settings.supabase_url.strip():
             missing.append("SUPABASE_URL")
-        if not settings.supabase_service_role_key.strip():
-            missing.append("SUPABASE_SERVICE_ROLE_KEY")
+        key = settings.supabase_secret_key.strip() or settings.supabase_service_role_key.strip()
+        if not key:
+            missing.append("SUPABASE_SECRET_KEY")
         logger.warning(
             "Supabase is not configured; set %s in backend/.env",
             " and ".join(missing),
@@ -113,6 +115,44 @@ async def list_records(table: str, *, client) -> list[dict]:
         raise HTTPException(503, "Database request failed") from exc
 
 
+@database_client
+async def ensure_tenant_and_rooms_provisioned(
+    settings: Settings | None = None, *, client
+) -> None:
+    """Auto-provision configured tenant and rooms in Supabase if missing."""
+    active = settings or get_settings()
+    if not active.supabase_configured or not active.switch_tenant_id or not active.allowed_switch_rooms:
+        return
+    tenant_str = str(active.switch_tenant_id)
+    headers = _supabase_headers(active, prefer="resolution=merge-duplicates")
+    try:
+        await client.post(
+            _rest_url(active, "tenants"),
+            headers=headers,
+            json={"id": tenant_str, "name": "Team Tenant"},
+            timeout=10,
+        )
+    except Exception as exc:
+        logger.warning("Supabase auto-provision tenant warning: %s", exc)
+
+    for room in sorted(active.allowed_switch_rooms):
+        try:
+            await client.post(
+                _rest_url(active, "rooms"),
+                headers=headers,
+                json={
+                    "tenant_id": tenant_str,
+                    "switch_room_id": room,
+                    "name": f"Room {room[:8]}",
+                    "platform": "discord",
+                    "enabled": True,
+                },
+                timeout=10,
+            )
+        except Exception as exc:
+            logger.warning("Supabase auto-provision room warning room=%s: %s", room, exc)
+
+
 async def _authorized_room(
     settings: Settings, tenant_id: UUID, switch_room_id: str, *, client
 ) -> str:
@@ -135,6 +175,37 @@ async def _authorized_room(
         raise ValueError("Unexpected database response")
 
     if not rooms:
+        if (
+            not os.environ.get("PYTEST_CURRENT_TEST")
+            and switch_room_id in settings.allowed_switch_rooms
+            and str(tenant_id) == str(settings.switch_tenant_id)
+        ):
+            headers = _supabase_headers(settings, prefer="resolution=merge-duplicates")
+            try:
+                await client.post(
+                    _rest_url(settings, "tenants"),
+                    headers=headers,
+                    json={"id": tenant_id_str, "name": "Team Tenant"},
+                    timeout=10,
+                )
+            except Exception:
+                pass
+            create_resp = await client.post(
+                rooms_url,
+                headers={**_supabase_headers(settings), "Prefer": "return=representation"},
+                json={
+                    "tenant_id": tenant_id_str,
+                    "switch_room_id": switch_room_id,
+                    "name": f"Room {switch_room_id[:8]}",
+                    "platform": "discord",
+                    "enabled": True,
+                },
+                timeout=10,
+            )
+            create_resp.raise_for_status()
+            created = create_resp.json()
+            if isinstance(created, list) and created:
+                return str(created[0]["id"])
         raise HTTPException(403, "Room mapping is not provisioned")
 
     room = rooms[0]
@@ -186,8 +257,11 @@ async def persist_extraction(
         if any(type(v) is not int or v < 0 for v in counts.values()) or counts["messages"] != 1:
             raise ValueError("Invalid storage acknowledgement")
         return counts
-    except (httpx.HTTPError, ValueError, TypeError):
-        logger.warning("Supabase store reason=database_write_failed")
+    except (httpx.HTTPError, ValueError, TypeError) as err:
+        detail = f"{type(err).__name__}: {err}"
+        if isinstance(err, httpx.HTTPStatusError):
+            detail = f"status={err.response.status_code} body={err.response.text[:200]}"
+        logger.warning("Supabase store reason=database_write_failed detail=%s", detail)
         raise HTTPException(503, "database_write_failed") from None
 
 

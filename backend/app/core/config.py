@@ -2,7 +2,7 @@ from functools import lru_cache
 import os
 from pathlib import Path
 from uuid import UUID
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -22,17 +22,34 @@ class Settings(BaseSettings):
             "SUPABASE_PROJECT_URL",
         ),
     )
+    supabase_secret_key: str = Field(
+        default="",
+        repr=False,
+        validation_alias=AliasChoices("SUPABASE_SECRET_KEY"),
+    )
     supabase_service_role_key: str = Field(
         default="",
         repr=False,
         validation_alias=AliasChoices(
+            "SUPABASE_SECRET_KEY",
             "SUPABASE_SERVICE_ROLE_KEY",
             "SUPABASE_SERVICE_KEY",
-            "SUPABASE_SECRET_KEY",
             "SUPABASE_KEY",
             "SERVICE_ROLE_KEY",
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_supabase_keys(cls, data):
+        if isinstance(data, dict):
+            secret_key = (data.get("SUPABASE_SECRET_KEY") or "").strip()
+            service_key = (data.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+            effective = secret_key or service_key or (data.get("SUPABASE_SERVICE_KEY") or "").strip()
+            if effective:
+                data["supabase_secret_key"] = effective
+                data["supabase_service_role_key"] = effective
+        return data
     switch_bridge_url: str = Field(default="", repr=False)
     switch_agent_id: str = Field(default="", repr=False)
     switch_agent_api_key: SecretStr = SecretStr("")
@@ -56,7 +73,8 @@ class Settings(BaseSettings):
 
     @property
     def supabase_configured(self) -> bool:
-        return bool(self.supabase_url.strip() and self.supabase_service_role_key.strip())
+        key = self.supabase_secret_key.strip() or self.supabase_service_role_key.strip()
+        return bool(self.supabase_url.strip() and key)
 
     @property
     def listener_agent_id(self) -> str:

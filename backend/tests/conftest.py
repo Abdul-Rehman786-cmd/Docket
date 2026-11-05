@@ -15,6 +15,7 @@ def isolate_local_configuration(monkeypatch, tmp_path):
         raise AssertionError("External HTTP requires an explicit test transport")
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", blocked_network)
     monkeypatch.setattr("app.repositories.ingestion_jobs.JOURNAL_PATH", tmp_path / "ingestion.sqlite3")
+    monkeypatch.setattr("app.services.ai_service.DEFAULT_REPLY_STATE_PATH", tmp_path / "last_replied_message.txt")
     for name, value in {
         "LOG_LEVEL": "INFO",
         "ADMIN_API_TOKEN": "",
