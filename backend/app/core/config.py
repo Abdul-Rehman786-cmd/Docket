@@ -71,6 +71,22 @@ class Settings(BaseSettings):
     log_discord_messages: bool = False
     local_embeddings_enabled: bool = True
     document_ingestion_enabled: bool = False
+    switch_document_attachments_enabled: bool = False
+    switch_document_adapter_token: SecretStr = SecretStr("")
+    switch_document_discord_bridge_ids: str = Field(default="",repr=False)
+    switch_document_bot_sender_id: str = Field(default="",repr=False)
+    switch_document_confirmation_seconds: int = Field(default=900,ge=60,le=86400)
+    switch_document_max_files: int = Field(default=4,ge=1,le=8)
+    switch_document_max_bytes: int = Field(default=262144,ge=1,le=262144)
+    switch_document_max_text_chars: int = Field(default=262144,ge=1,le=262144)
+    switch_document_download_seconds: int = Field(default=20,ge=1,le=60)
+    switch_document_processing_seconds: int = Field(default=900,ge=30,le=7200)
+    switch_document_max_pending: int = Field(default=200,ge=1,le=1000)
+    switch_document_max_records: int = Field(default=10000,ge=10,le=100000)
+
+    @property
+    def document_discord_bridges(self) -> frozenset[str]:
+        return frozenset(v.strip() for v in self.switch_document_discord_bridge_ids.split(",") if v.strip())
 
     @property
     def supabase_configured(self) -> bool:
@@ -99,6 +115,8 @@ class Settings(BaseSettings):
     def switch_ai_senders(self) -> frozenset[str]:
         # Participant IDs are opaque: use exact matches, never names or ID prefixes.
         senders = {sender.strip() for sender in self.switch_ai_sender_ids.split(",") if sender.strip()}
+        if self.switch_document_bot_sender_id:
+            senders.add(self.switch_document_bot_sender_id)
         if self.switch_ai_sender_id:
             senders.add(self.switch_ai_sender_id)
         if self.switch_agent_id:

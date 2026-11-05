@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
@@ -13,6 +14,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketExce
 
 from app.core.config import BACKEND_DIR, Settings
 from app.models.messages import IncomingMessage, MessageReceipt, MessageStatus
+from app.models.document_attachments import AttachmentMessage
 from app.repositories.listener_state import ListenerState
 from app.services.message_service import message_reference
 
@@ -196,7 +198,22 @@ class SwitchListener:
                 if not isinstance(payload, dict):
                     raise ListenerStopped("Switch sent an invalid message payload.")
                 try:
-                    message = IncomingMessage(
+                    body=payload.get("body", "")
+                    document_event=self.settings.switch_document_attachments_enabled and bool(
+                        payload.get("attachments") or (isinstance(body,str) and
+                        re.fullmatch(r"\s*(?:save|skip) [0-9a-fA-F]{12}\s*",body,re.IGNORECASE)))
+                    extras={}
+                    if document_event:
+                        if (not self.settings.switch_document_adapter_token.get_secret_value()
+                            or not self.settings.document_discord_bridges or not self.settings.switch_document_bot_sender_id):
+                            raise ListenerStopped("Configure the document adapter token, Discord bridge IDs and exact bot participant ID before enabling attachment ingestion.")
+                        content=payload.get("content")
+                        marker=payload.get("com.switch.attachment_group")
+                        if marker is None and isinstance(content,dict):
+                            marker=content.get("com.switch.attachment_group")
+                        extras=dict(attachments=payload.get("attachments") or [],attachment_group=marker,
+                            sender_kind=payload.get("sender_kind"),bridge_id=data.get("bridge_id"))
+                    message = (AttachmentMessage if document_event else IncomingMessage)(
                         tenant_id=self.settings.switch_tenant_id, room_id=data["room_id"],
                         message_id=payload.get("message_id"), sender=payload.get("sender"),
                         sender_name=payload.get("sender_name"),
@@ -205,11 +222,16 @@ class SwitchListener:
                         workspace_id=payload.get("workspace_id"), channel_id=payload.get("channel_id"),
                         external_message_id=payload.get("external_message_id"),
                         external_author_id=payload.get("external_author_id"),
+                        **extras,
                     )
                 except ValidationError:
                     raise ListenerStopped("Switch sent an invalid message; cursor was not advanced.") from None
                 try:
-                    response = await client.post("messages", json=message.model_dump(mode="json"))
+                    if document_event:
+                        response=await client.post("messages/document-attachments",json=message.model_dump(mode="json"),
+                            headers={"X-Document-Adapter-Token":self.settings.switch_document_adapter_token.get_secret_value()})
+                    else:
+                        response=await client.post("messages",json=message.model_dump(mode="json"))
                 except httpx.HTTPError:
                     raise RetryConnection() from None
                 if response.status_code >= 500 or response.status_code == 429:

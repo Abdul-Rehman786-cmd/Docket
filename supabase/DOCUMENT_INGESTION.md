@@ -1,5 +1,9 @@
 # Versioned document ingestion
 
+The optional consent-based Discord collection adapter is now implemented locally
+and disabled pending trusted setup/live approval. It reuses this deployed document
+module; see [Discord attachment setup and verification](DISCORD_DOCUMENT_INGESTION.md).
+
 Implemented and deployed, 2026-11-05. Hosted upload, actual vectors, automatic
 publication, semantic citations and failure safety passed isolated verification.
 The backend feature is enabled; its source-code default remains disabled for new

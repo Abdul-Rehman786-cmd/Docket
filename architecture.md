@@ -19,6 +19,28 @@ authorization, API, retention, verification distinctions and remaining limits.
 See [hosted deployment evidence](supabase/DOCUMENT_DEPLOYMENT_VERIFICATION.md) for
 the genuine migration version, cloud results and safe restart checks.
 
+### Optional Switch/Discord attachment consent
+
+The existing listener now forwards attachment references/group metadata and exact
+`save|skip REF` commands to a separate FastAPI adapter route, gated by both the
+existing ingest token and a distinct listener-only credential. Positive per-person origin checks, Discord-bridge allow-lists and enabled room mappings establish
+scope; names, captions, file contents and model output cannot authorize imports.
+The posting client's exact participant ID joins the existing self-sender filter
+so its prompts/statuses cannot re-enter normal AI ingestion.
+FastAPI owns atomic consent, expiry and request state in a separate full-sync
+SQLite metadata ledger, with a bounded durable reply outbox. No file contents
+are downloaded or persisted before consent. Independent bounded importer/sender
+loops keep prompt delivery responsive during downloads. Confirmed files reuse
+DocumentService, the current Supabase schema and the shared local embedding worker.
+Only completed active publication queues a success reply through Switch.
+Document source keys bind immutable upload identities, not matching filenames.
+The new workflow is disabled because the exact bot participant ID is unresolved.
+Human-versus-agent classification is not required; known bots remain excluded. No personal
+uploader registration is required. Unsupported identities fail closed. No approved
+live Discord fixture has run. No remote schema/configuration or existing message journal is changed.
+Environment read/write viewer routes are disabled to protect backend credentials.
+See [attachment contracts and setup](supabase/DISCORD_DOCUMENT_INGESTION.md).
+
 This document describes the system architecture, component boundaries, Switch agent integration, and database schema for the Team Memory backend.
 
 ## Current implementation: FastAPI and Switch message delivery

@@ -14,6 +14,20 @@ their own approved migration and verification. See
 [document contracts, API and deployment](supabase/DOCUMENT_INGESTION.md).
 Current results are in [hosted document verification](supabase/DOCUMENT_DEPLOYMENT_VERIFICATION.md).
 
+Optional Discord attachment ingestion is implemented behind
+`SWITCH_DOCUMENT_ATTACHMENTS_ENABLED=false`: any sender except known bots in an enabled room receives a
+filename/ref prompt and confirms with `save REF` or declines with `skip REF`.
+Only confirmed files reach the existing automatic document pipeline. Durable
+consent/outbox state survives retries and restarts. No personal registration or
+uploader allowlist is required. Local adapter credentials and Discord bridge IDs
+are configured. Activation is blocked by the missing exact bot participant ID. Human-versus-agent
+classification is not required; uploader consent uses the authenticated sender ID. Live verification
+is still required.
+No attachment migration or live Discord test was performed. See
+[setup, conversation and limitations](supabase/DISCORD_DOCUMENT_INGESTION.md).
+The former browser environment editor now returns `410`; edit ignored backend
+configuration locally so privileged credentials never reach that viewer.
+
 - `architecture.md`: design and boundaries.
 - `AGENTS.md`: mandatory AI development and security rules.
 - `backend/`: FastAPI MVC-inspired layers and tests.

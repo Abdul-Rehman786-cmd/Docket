@@ -19,6 +19,8 @@ from app.services.embedding_service import EmbeddingWorker
 from app.controllers.documents import router as documents_router
 from app.repositories.document_repository import SupabaseDocumentRepository
 from app.services.document_worker import DocumentWorker
+from app.controllers.document_attachments import router as document_attachments_router
+from app.services.document_attachments import DocumentAttachments
 
 
 @asynccontextmanager
@@ -31,11 +33,14 @@ async def lifespan(application):
     application.state.ai_service.repository.on_change = application.state.viewer_hub.publish
     application.state.embedding_worker = EmbeddingWorker()
     application.state.document_worker = DocumentWorker(SupabaseDocumentRepository())
+    application.state.document_attachments = DocumentAttachments()
     with use_http_clients(application.state.http_clients):
         application.state.ai_service.start_recovery()
         application.state.embedding_worker.start()
         if get_settings().document_ingestion_enabled:
             application.state.document_worker.start()
+        if get_settings().switch_document_attachments_enabled:
+            application.state.document_attachments.start()
     try:
         yield
     finally:
@@ -44,6 +49,7 @@ async def lifespan(application):
         finally:
             await application.state.embedding_worker.close()
             await application.state.document_worker.close()
+            await application.state.document_attachments.close()
             application.state.viewer_hub.close()
             application.state.message_receipts.on_change = None
             await application.state.http_clients.close()
@@ -53,11 +59,13 @@ async def lifespan(application):
 app = FastAPI(title="Team Memory API", version="0.1.0", lifespan=lifespan)
 app.state.message_receipts = MessageReceiptRepository()
 app.state.ai_service = AIService()
+app.state.document_attachments = DocumentAttachments()
 app.include_router(records_router)
 app.include_router(messages_router)
 app.include_router(viewer_router)
 app.include_router(ai_router)
 app.include_router(documents_router)
+app.include_router(document_attachments_router)
 
 
 @app.middleware("http")
@@ -65,7 +73,7 @@ async def prevent_message_caching(request, call_next):
     started = perf_counter()
     with use_http_clients(getattr(request.app.state, "http_clients", None)):
         response = await call_next(request)
-    if request.url.path.startswith(("/messages", "/ai", "/api/v1/documents")):
+    if request.url.path.startswith(("/messages", "/ai", "/api/v1/documents", "/api/v1/document-attachments")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
     route = request.scope.get("route")
