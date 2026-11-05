@@ -132,6 +132,17 @@ together. Only then is extraction marked completed. Failures roll back the whole
 write. Replays of completed sources return counts without mutating existing data.
 Commitments retain database defaults `pending` / `not_started`; decisions remain
 `pending` approval. The model cannot assign approvals, task status or record scope.
+Storage eligibility is the validated useful-information decision, separate from
+human approval. There is no implemented human-approval gate before persistence;
+new records must not be described as human-approved.
+
+Cloud connection and schema readiness are checked separately. New opaque backend
+secrets use the `apikey` header; legacy service-role JWTs also use bearer auth.
+Public client keys are not accepted as privileged credentials. The protected
+status route requires its own admin token, never the ingest or database key.
+The current missing atomic RPC can be deployed independently using the reviewed
+`schema_upgrade --storage-only` proposal. It changes no tables or embedding state.
+See `supabase/CLOUD_STORAGE_STATUS.md` for live checks and pending approvals.
 
 The deployed foundation already has tenant/room composite foreign keys,
 source identifiers, extraction tracking and item uniqueness constraints. The

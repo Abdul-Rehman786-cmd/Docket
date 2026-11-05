@@ -8,17 +8,15 @@ from fastapi import HTTPException
 
 from app.core.config import Settings, get_settings
 from app.core.http_clients import database_client
-from app.core.message_logging import message_text_for_log
+from app.core.message_logging import message_text_for_log,redact_source_identifier
+from app.core.supabase_auth import backend_headers
 
 ALLOWED_TABLES = ("commitments", "decisions", "messages", "memories")
 logger = logging.getLogger("uvicorn.error")
 
 
 def _supabase_headers(settings: Settings, *, prefer: str | None = None) -> dict[str, str]:
-    headers = {
-        "apikey": settings.supabase_service_role_key,
-        "Authorization": f"Bearer {settings.supabase_service_role_key}",
-    }
+    headers = backend_headers(settings.supabase_service_role_key)
     if prefer:
         headers["Prefer"] = prefer
     return headers
@@ -73,6 +71,18 @@ async def check_database_connection(settings: Settings | None = None, *, client)
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("Supabase connection check failed reason=%s", type(exc).__name__)
         raise HTTPException(503, "Database request failed") from exc
+
+
+@database_client
+async def storage_rpc_available(settings: Settings, *, client) -> bool:
+    """Read-only PostgREST schema preflight; never attempts a speculative write."""
+    try:
+        response = await client.get(_rest_url(settings,""),
+            headers={**_supabase_headers(settings),"Accept":"application/openapi+json"},timeout=10)
+        response.raise_for_status()
+        return "/rpc/store_message_extraction" in response.json().get("paths",{})
+    except (httpx.HTTPError,ValueError,TypeError,AttributeError):
+        raise HTTPException(503,"Storage schema verification unavailable") from None
 
 
 @database_client
@@ -145,6 +155,11 @@ async def persist_extraction(
     """One backend-only RPC: source and items commit together, or all roll back."""
     if tenant_id != settings.switch_tenant_id or switch_room_id not in settings.allowed_switch_rooms:
         raise HTTPException(403, "Message tenant or room is not authorized")
+    safe_source_id=redact_source_identifier(switch_message_id,settings)
+    if safe_source_id is None:
+        raise HTTPException(503,"Source metadata redaction unavailable; retry delivery")
+    if safe_source_id != switch_message_id:
+        raise HTTPException(422,"Invalid source identifier")
     meta = source_metadata or {}
     source = {
         "switch_message_id": switch_message_id,
@@ -155,7 +170,7 @@ async def persist_extraction(
     }
     for field in ("switch_author_id", "thread_id", "workspace_id", "channel_id",
                   "external_message_id", "external_author_id"):
-        source[field] = _redact(meta.get(field), settings)
+        source[field] = redact_source_identifier(meta.get(field), settings)
     try:
         response = await client.post(
             _rest_url(settings, "rpc/store_message_extraction"),

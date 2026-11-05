@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 
 from app.core.config import Settings
-from app.core.message_logging import message_text_for_log
+from app.core.message_logging import message_text_for_log,redact_source_identifier
 from app.models.messages import IncomingMessage, MessagePreview, MessageReceipt, MessageStatus
 from app.repositories.message_receipts import MessageReceiptRepository
 
@@ -33,11 +33,12 @@ def receive_message(
         thread_ref=message_reference(message.model_copy(update={"message_id": message.thread_id}))
         if message.thread_id else None,
         source_metadata={
-            "switch_message_id": message.message_id, "switch_author_id": message.sender,
-            "thread_id": message.thread_id,
+            "switch_message_id": redact_source_identifier(message.message_id,settings),
+            "switch_author_id": redact_source_identifier(message.sender,settings),
+            "thread_id": redact_source_identifier(message.thread_id,settings),
             "occurred_at": datetime.fromtimestamp(message.timestamp_ms / 1000, timezone.utc)
             if message.timestamp_ms is not None else datetime.now(timezone.utc),
-            **{field: getattr(message, field) for field in (
+            **{field: redact_source_identifier(getattr(message, field),settings) for field in (
                 "workspace_id", "channel_id", "external_message_id", "external_author_id")},
         },
     )

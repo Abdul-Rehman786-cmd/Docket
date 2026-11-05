@@ -1,5 +1,11 @@
 # Hosted storage/embedding upgrade proposal — approval required
 
+For the current **cloud text-storage** task, the smaller proposal in
+[CLOUD_STORAGE_STATUS.md](CLOUD_STORAGE_STATUS.md) supersedes this full upgrade.
+`python -m app.schema_upgrade --storage-only` installs only the missing atomic
+storage function and its backend grants. The table/embedding backfill below is
+not a prerequisite for saving useful text and has not been authorized.
+
 The sole local core migration is `migrations/20261104000100_initial_schema.sql`.
 It is a destructive **fresh development baseline**, never a hosted upgrade.
 The user authorized local consolidation only. No remote DDL or migration-history

@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
-from app.core.message_logging import message_text_for_log
+from app.core.message_logging import message_text_for_log,redact_source_identifier
 from app.models.ai import AskRequest, LLMDecision
 from app.models.messages import IncomingMessage, MessageReceipt
 from app.repositories.ai_requests import AIRequestRepository
@@ -379,6 +379,11 @@ class AIService:
 
     async def _ingest(self, message, settings, receipts):
         validate_message_scope(message, settings)
+        safe_source_id=redact_source_identifier(message.message_id,settings)
+        if safe_source_id is None:
+            raise HTTPException(503,"Source metadata redaction unavailable; retry delivery")
+        if safe_source_id != message.message_id:
+            raise HTTPException(422,"Invalid source identifier")
         try:
             own_echo = await self.journal.is_reply(self._reply_fingerprint(message.room_id, message.body))
         except (OSError, sqlite3.Error):
@@ -404,14 +409,14 @@ class AIService:
             meta = {
                 "room_id": message.room_id, "switch_message_id": message.message_id,
                 "author_name": json.loads(message_text_for_log(message.sender_name, settings)) or "Unknown sender",
-                "switch_author_id": message.sender,
+                "switch_author_id": redact_source_identifier(message.sender,settings),
                 "occurred_at": datetime.fromtimestamp(message.timestamp_ms / 1000, timezone.utc).isoformat()
                 if message.timestamp_ms is not None else datetime.now(timezone.utc).isoformat(),
-                "thread_id": message.thread_id, "addressed": message.addressed,
+                "thread_id": redact_source_identifier(message.thread_id,settings), "addressed": message.addressed,
                 "origin": "discord", "durable": True,
             }
             for field in ("workspace_id", "channel_id", "external_message_id", "external_author_id"):
-                meta[field] = getattr(message, field)
+                meta[field] = redact_source_identifier(getattr(message, field),settings)
             payload = {"question": json.loads(message_text_for_log(message.body, settings, max_length=64000)), "meta": meta}
             try:
                 job, _ = await self.journal.accept(ref, ingestion_scope(settings), payload)

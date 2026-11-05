@@ -198,6 +198,30 @@ Database storage is a single backend-only transaction: source evidence and all e
 Offline regressions mock Codex and database transports and use real disposable SQLite journals. See [storage verification](supabase/USEFUL_STORAGE_VERIFICATION.md) for live evidence, remaining gates and the exact integration test.
 
 ## 2. Supabase
+
+Cloud connectivity has been checked through FastAPI's protected status route:
+unauthenticated access and the ingest token are rejected; the separate admin
+token returns `connected`. Connection success does not prove writes work. The
+hosted atomic storage function is still missing, and one of two configured rooms
+has no database mapping. See [current cloud storage findings](supabase/CLOUD_STORAGE_STATUS.md).
+
+`SUPABASE_SERVICE_ROLE_KEY` accepts a backend `sb_secret_...` key or a legacy
+service-role JWT. New secrets are sent in `apikey`; legacy JWTs also use bearer
+authentication. `SUPABASE_SECRET_KEY` remains a supported compatibility alias;
+`SUPABASE_ANON_KEY` is not a backend-secret alias. Keep the database credential,
+`ADMIN_API_TOKEN`, and `SWITCH_INGEST_TOKEN` separate in ignored `backend/.env`.
+The missing admin token and canonical database variable were configured locally
+without exposing values or rotating the existing cloud/ingest credentials.
+
+The smallest storage-only proposal is printed by `python -m app.schema_upgrade
+--storage-only` from `backend/`. It installs only the missing atomic function and
+backend execution grants, leaving tables, RLS, embeddings and existing data
+unchanged. It still requires approval before remote application. After approval,
+`python -m app.verify_cloud_storage --run-approved-fixture` exercises the real
+authenticated FastAPI storage path and cloud writes with a clearly simulated
+extraction, replay checks and exact-scope cleanup. It sends no Discord messages.
+Useful-text storage does not require the larger embedding upgrade below.
+
 The initial migration is a **destructive development reset**, not an incremental
 upgrade. It recreates eight tables, including vector memories, and deletes their
 existing rows. Do not rerun it against the database already configured through

@@ -1,5 +1,9 @@
 # Useful storage and local embeddings — verification record
 
+Latest cloud-connection/storage-only findings and tests are recorded separately
+in [CLOUD_STORAGE_STATUS.md](CLOUD_STORAGE_STATUS.md). The full embedding deployment
+below remains pending; it is not required to install the atomic text-storage RPC.
+
 Updated 2026-11-05. Implementation is local; hosted schema deployment and full
 Discord verification are pending approval. Fresh disposable database execution
 is blocked by the declined PGlite test-tool installation. No hosted reset or

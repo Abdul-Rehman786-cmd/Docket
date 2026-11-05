@@ -5,7 +5,15 @@ The destructive baseline is NEVER used as the hosted upgrade.
 """
 
 import re
+import argparse
 from app.core.config import ROOT_DIR
+
+
+def build_storage_upgrade_sql():
+    """Smallest hosted change needed for useful text; embeddings stay independent."""
+    core = (ROOT_DIR / "supabase/migrations/20261104000100_initial_schema.sql").read_text(encoding="utf-8")
+    block = core.split("-- ATOMIC_STORAGE_BEGIN",1)[1].split("-- ATOMIC_STORAGE_END",1)[0]
+    return "BEGIN;\n" + block.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION") + "\nNOTIFY pgrst, 'reload schema';\nCOMMIT;"
 
 
 def build_upgrade_sql():
@@ -59,4 +67,7 @@ END IF; END $upgrade$;""")
 
 
 if __name__ == "__main__":
-    print(build_upgrade_sql())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--storage-only",action="store_true",help="Only the missing atomic storage RPC and its backend grants")
+    args = parser.parse_args()
+    print(build_storage_upgrade_sql() if args.storage_only else build_upgrade_sql())

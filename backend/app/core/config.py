@@ -30,7 +30,6 @@ class Settings(BaseSettings):
             "SUPABASE_SERVICE_KEY",
             "SUPABASE_SECRET_KEY",
             "SUPABASE_KEY",
-            "SUPABASE_ANON_KEY",
             "SERVICE_ROLE_KEY",
         ),
     )
