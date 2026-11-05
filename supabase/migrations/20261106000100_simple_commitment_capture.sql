@@ -2,7 +2,7 @@
 -- Requires the reviewed four-argument atomic storage RPC and existing owner columns.
 -- Lifecycle/chat/reminder migrations are NOT prerequisites for simple capture.
 BEGIN;
-CREATE FUNCTION public.store_message_extraction(
+CREATE OR REPLACE FUNCTION public.store_message_extraction(
     p_tenant_id uuid,p_switch_room_id text,p_source jsonb,p_items jsonb,p_capture boolean
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path='' AS $$
 DECLARE

@@ -1,6 +1,7 @@
 from datetime import datetime
 import json
 import logging
+import os
 from uuid import UUID
 
 import httpx
@@ -289,7 +290,10 @@ async def persist_extraction(
             raise ValueError("Invalid storage acknowledgement")
         return counts
     except (httpx.HTTPError, ValueError, TypeError) as err:
-        logger.warning("Supabase store reason=database_write_failed")
+        err_detail = str(err)
+        if isinstance(err, httpx.HTTPStatusError):
+            err_detail = f"{err} - body: {err.response.text}"
+        logger.warning("Supabase store reason=database_write_failed detail=%s", err_detail)
         raise HTTPException(503, "database_write_failed") from None
 
 

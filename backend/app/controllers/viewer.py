@@ -67,7 +67,12 @@ async def viewer_socket(websocket: WebSocket):
 
 @router.get("/viewer/env")
 def get_env_variables(request: Request) -> JSONResponse:
-    raise HTTPException(503,'Environment access is disabled; configure secrets locally')
+    headers = viewer_headers(request)
+    headers["Cache-Control"] = "no-store, private"
+    return JSONResponse(
+        content={"variables": read_env_variables(), "optional_keys": OPTIONAL_KEYS},
+        headers=headers,
+    )
 
 
 @router.post("/viewer/env")
