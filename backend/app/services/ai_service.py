@@ -130,7 +130,7 @@ def parse_llm_decision(raw_text: str) -> LLMDecision:
             continue
         category = "invalid_fields"
         if isinstance(parsed, dict):
-            if parsed.get("action") not in ("store_only", "query_only", "none", "store_and_query"):
+            if parsed.get("action") not in ("store_only", "query_only", "none", "store_and_query", "clarify"):
                 category = "invalid_action" if "action" in parsed else "missing_action"
                 continue
             try:
@@ -626,7 +626,7 @@ class AIService:
                 and source_meta.get("room_id")
                 and bool(final_answer and final_answer.strip())
                 and (
-                    decision.action in ("store_only", "query_only", "store_and_query")
+                    decision.action in ("store_only", "query_only", "store_and_query", "clarify")
                     or source_meta.get("addressed")
                     or (decision.action == "none" and bool(decision.answer and decision.answer.strip()))
                 )

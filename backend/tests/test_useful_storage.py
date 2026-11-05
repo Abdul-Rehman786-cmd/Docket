@@ -42,6 +42,9 @@ def message(settings, body="Planning is Friday", **updates):
     ('{"action":"store_only","commitments":[{"description":"report","due_at":"2026-11-06T09:00:00"}]}', "invalid_fields"),
     ('{"action":"none","tenant_id":"attacker"}', "invalid_fields"),
     ('{"action":"store_only","decisions":[{"summary":"FastAPI","approval_status":"approved"}]}', "invalid_fields"),
+    ('{"action":"clarify"}', "invalid_fields"),
+    ('{"action":"clarify","answer":""}', "invalid_fields"),
+    ('{"action":"clarify","answer":"Please clarify","memories":[{"content":"fact"}]}', "invalid_fields"),
 ])
 def test_invalid_model_output_is_never_none(text, category):
     with pytest.raises(ExtractionFailure, match=category):
@@ -107,6 +110,48 @@ def test_automatic_extraction_source_and_acknowledgement(monkeypatch, caplog, bo
             else:
                 assert saved == [] and result.stored_counts is None
             assert body not in caplog.text
+        finally:
+            await service.close()
+    asyncio.run(run())
+
+
+def test_unclear_message_triggers_clarification_reply_and_no_storage(monkeypatch):
+    async def run():
+        settings, service, receipts = config(), AIService(), MessageReceiptRepository()
+        saved, posted = [], []
+
+        async def ask(settings, question):
+            return json.dumps({
+                "action": "clarify",
+                "answer": "Please clarify what topic or date you would like to set up the meeting for.",
+            })
+
+        async def store(settings, **kwargs):
+            saved.append(kwargs)
+            return {"messages": 1}
+
+        async def post(*args, **kwargs):
+            posted.append(kwargs)
+
+        monkeypatch.setattr(ai_service, "ask_switch", ask)
+        monkeypatch.setattr(ai_service, "store_ai_memory", store)
+        monkeypatch.setattr(ai_service.SwitchAPI, "post_room_message", post)
+
+        try:
+            msg = message(settings, "set up a meeting")
+            receipt = await service.ingest(msg, settings, receipts)
+            await service.queue.join()
+            result = service.repository.recent(response_scope(settings))[0]
+            assert result.status == "answered"
+            assert result.db_action == "clarify"
+            assert result.stored_counts is None
+            # Zero database writes occurred
+            assert saved == []
+            # Reply sent to Discord thread with clarification question
+            assert len(posted) == 1
+            assert posted[0]["body"] == "Please clarify what topic or date you would like to set up the meeting for."
+            assert posted[0]["room_id"] == "test-room"
+            assert posted[0]["thread_id"] == "thread-1"
         finally:
             await service.close()
     asyncio.run(run())

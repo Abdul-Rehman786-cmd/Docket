@@ -276,6 +276,7 @@ Every message is ingested into the authenticated preview feed (`POST /messages`)
 | Event / LLM Decision | FastAPI Database Action | Discord Reply Behavior |
 |-----------------------|-------------------------|------------------------|
 | `store_only` (new commitment, decision, or team fact) | Stores message and extracts commitments, decisions, and memories into Supabase. | **Replies in Discord.** Sends verification: "Data has been saved into the database." |
+| `clarify` (unclear intent to store/record) | Neither stores nor reads from Supabase. | **Replies in Discord.** Posts clarification question from `answer` asking user to specify missing details. |
 | `query_only` (question requiring team memory) | Queries Supabase (`memories`, `commitments`, `decisions`, `messages`) for relevant team records. | **Replies in Discord.** Codex synthesizes a plain-text answer from Supabase records; FastAPI posts to origin room & thread via `SwitchAPI.post_room_message()`. |
 | `store_and_query` (new information + question) | Stores extracted records in Supabase, then queries Supabase records. | **Replies in Discord.** Codex synthesizes an answer incorporating newly stored and historical records; FastAPI posts to origin room & thread. |
 | `none` (casual chatter, greetings, or off-topic) | Neither stores nor reads from Supabase. | **Silent in Discord** unless the message was explicitly addressed to the bot. |
