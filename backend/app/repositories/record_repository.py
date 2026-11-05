@@ -370,3 +370,184 @@ async def query_team_memory(
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         logger.warning("Supabase REST store failed reason=%s", type(exc).__name__)
         raise HTTPException(503, "Database request failed") from exc
+
+
+@database_client
+async def delete_records_older_than_supabase(
+    cutoff: datetime | str,
+    settings: Settings | None = None,
+    *,
+    client,
+) -> dict[str, int]:
+    """Delete all data older than cutoff in Supabase across child and parent tables."""
+    active = settings or get_settings()
+    if not active.supabase_configured:
+        raise HTTPException(503, "Supabase is not configured")
+
+    cutoff_iso = cutoff.isoformat() if isinstance(cutoff, datetime) else str(cutoff)
+    headers = _supabase_headers(active, prefer="return=representation")
+    tenant_param = {"tenant_id": f"eq.{active.switch_tenant_id}"} if active.switch_tenant_id else {}
+
+    deleted_counts = {
+        "memories": 0,
+        "commitments": 0,
+        "decisions": 0,
+        "messages": 0,
+        "documents": 0,
+    }
+
+    try:
+        # 1. Find old message IDs first (occurred_at < cutoff or created_at < cutoff)
+        msg_resp = await client.get(
+            _rest_url(active, "messages"),
+            params={
+                **tenant_param,
+                "select": "id",
+                "or": f"(occurred_at.lt.{cutoff_iso},created_at.lt.{cutoff_iso})",
+                "limit": "5000",
+            },
+            headers=_supabase_headers(active),
+            timeout=15,
+        )
+        msg_resp.raise_for_status()
+        old_messages = msg_resp.json()
+        old_msg_ids = [str(m["id"]) for m in old_messages if isinstance(m, dict) and "id" in m]
+
+        # 2. Delete dependent rows linked to old messages (ON DELETE RESTRICT in Postgres)
+        if old_msg_ids:
+            in_filter = f"in.({','.join(old_msg_ids)})"
+            # reminder_deliveries depends on commitments
+            comm_lookup = await client.get(
+                _rest_url(active, "commitments"),
+                params={**tenant_param, "select": "id", "message_id": in_filter, "limit": "5000"},
+                headers=_supabase_headers(active),
+                timeout=15,
+            )
+            if comm_lookup.status_code == 200:
+                comm_ids = [str(c["id"]) for c in comm_lookup.json() if isinstance(c, dict) and "id" in c]
+                if comm_ids:
+                    await client.delete(
+                        _rest_url(active, "reminder_deliveries"),
+                        params={**tenant_param, "commitment_id": f"in.({','.join(comm_ids)})"},
+                        headers=headers,
+                        timeout=15,
+                    )
+
+            for child_table in ("memories", "commitments", "decisions"):
+                del_resp = await client.delete(
+                    _rest_url(active, child_table),
+                    params={**tenant_param, "message_id": in_filter},
+                    headers=headers,
+                    timeout=15,
+                )
+                if del_resp.status_code in (200, 204):
+                    body = del_resp.json() if del_resp.text else []
+                    if isinstance(body, list):
+                        deleted_counts[child_table] += len(body)
+
+        # 3. Also delete any standalone child rows whose created_at < cutoff
+        for child_table in ("memories", "commitments", "decisions"):
+            if child_table == "commitments":
+                old_comm_resp = await client.get(
+                    _rest_url(active, "commitments"),
+                    params={**tenant_param, "select": "id", "created_at": f"lt.{cutoff_iso}", "limit": "5000"},
+                    headers=_supabase_headers(active),
+                    timeout=15,
+                )
+                if old_comm_resp.status_code == 200:
+                    c_ids = [str(c["id"]) for c in old_comm_resp.json() if isinstance(c, dict) and "id" in c]
+                    if c_ids:
+                        await client.delete(
+                            _rest_url(active, "reminder_deliveries"),
+                            params={**tenant_param, "commitment_id": f"in.({','.join(c_ids)})"},
+                            headers=headers,
+                            timeout=15,
+                        )
+            del_resp = await client.delete(
+                _rest_url(active, child_table),
+                params={**tenant_param, "created_at": f"lt.{cutoff_iso}"},
+                headers=headers,
+                timeout=15,
+            )
+            if del_resp.status_code in (200, 204):
+                body = del_resp.json() if del_resp.text else []
+                if isinstance(body, list):
+                    deleted_counts[child_table] += len(body)
+
+        # 4. Delete the old messages
+        if old_msg_ids:
+            in_filter = f"in.({','.join(old_msg_ids)})"
+            msg_del = await client.delete(
+                _rest_url(active, "messages"),
+                params={**tenant_param, "id": in_filter},
+                headers=headers,
+                timeout=15,
+            )
+            if msg_del.status_code in (200, 204):
+                body = msg_del.json() if msg_del.text else []
+                deleted_counts["messages"] += len(body) if isinstance(body, list) else len(old_msg_ids)
+
+        # 5. Delete old documents (and their imports, chunks, versions) if present
+        doc_resp = await client.get(
+            _rest_url(active, "documents"),
+            params={**tenant_param, "select": "id", "created_at": f"lt.{cutoff_iso}", "limit": "5000"},
+            headers=_supabase_headers(active),
+            timeout=15,
+        )
+        if doc_resp.status_code == 200:
+            old_docs = [str(d["id"]) for d in doc_resp.json() if isinstance(d, dict) and "id" in d]
+            if old_docs:
+                doc_in = f"in.({','.join(old_docs)})"
+                # Clear published_version_id FK before deleting versions
+                await client.patch(
+                    _rest_url(active, "documents"),
+                    params={**tenant_param, "id": doc_in},
+                    json={"published_version_id": None},
+                    headers=headers,
+                    timeout=15,
+                )
+                for doc_child in ("document_imports", "document_chunks", "document_versions"):
+                    await client.delete(
+                        _rest_url(active, doc_child),
+                        params={**tenant_param, "document_id": doc_in},
+                        headers=headers,
+                        timeout=15,
+                    )
+                doc_del = await client.delete(
+                    _rest_url(active, "documents"),
+                    params={**tenant_param, "id": doc_in},
+                    headers=headers,
+                    timeout=15,
+                )
+                if doc_del.status_code in (200, 204):
+                    body = doc_del.json() if doc_del.text else []
+                    deleted_counts["documents"] += len(body) if isinstance(body, list) else len(old_docs)
+
+        return deleted_counts
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as exc:
+        logger.warning("Supabase timeline delete failed status=%d", exc.response.status_code)
+        raise HTTPException(503, "Supabase timeline deletion failed") from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("Supabase timeline delete failed reason=%s", type(exc).__name__)
+        raise HTTPException(503, "Supabase timeline deletion failed") from exc
+
+
+@database_client
+async def delete_records_older_than(
+    cutoff: datetime | str,
+    *,
+    engine: str = "active",
+    settings: Settings | None = None,
+    client,
+) -> dict[str, int]:
+    """Dispatch timeline deletion to SQLite or Supabase."""
+    active = settings or get_settings()
+    target_engine = active.effective_database_engine if engine == "active" else engine
+    if target_engine == "sqlite":
+        return sqlite_records.delete_records_older_than_sqlite(cutoff, active)
+    if target_engine == "supabase":
+        return await delete_records_older_than_supabase(cutoff, active, client=client)
+    raise HTTPException(422, f"Unsupported database engine: {target_engine}")
+

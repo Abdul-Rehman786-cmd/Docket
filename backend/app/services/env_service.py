@@ -27,11 +27,21 @@ DEFAULT_KEYS = [
     "SWITCH_BACKEND_URL",
     "ADMIN_API_TOKEN",
     "LOG_DISCORD_MESSAGES",
+    "STORAGE_RETENTION_VALUE",
+    "STORAGE_RETENTION_UNIT",
+    "SQLITE_MAX_SPACE_ENABLED",
+    "SQLITE_MAX_SPACE_VALUE",
+    "SQLITE_MAX_SPACE_UNIT",
 ]
 
 OPTIONAL_KEYS = {
     "DATABASE_ENGINE": "Engine · 'sqlite' or 'supabase'",
     "SQLITE_DB_PATH": "Required for SQLite · user selected directory or file path (no default)",
+    "STORAGE_RETENTION_VALUE": "Optional · retention period number (e.g. 90)",
+    "STORAGE_RETENTION_UNIT": "Optional · 'hours', 'days', 'weeks', 'months', 'years', or 'indefinite'",
+    "SQLITE_MAX_SPACE_ENABLED": "Optional · 'true' or 'false' for SQLite auto-eviction",
+    "SQLITE_MAX_SPACE_VALUE": "Optional · max space limit for SQLite (e.g. 500)",
+    "SQLITE_MAX_SPACE_UNIT": "Optional · 'KB', 'MB', or 'GB'",
     "ADMIN_API_TOKEN": "Optional · for admin API endpoints",
     "SWITCH_AI_TIMEOUT_SECONDS": "Optional · defaults to 180s",
     "SWITCH_REPLY_TO_DISCORD": "Optional · defaults to true",

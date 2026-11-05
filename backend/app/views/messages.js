@@ -337,8 +337,15 @@ const reminderLeadTime = document.getElementById("reminder-lead-time");
 const reminderLeadUnit = document.getElementById("reminder-lead-unit");
 const storageRetentionTime = document.getElementById("storage-retention-time");
 const storageRetentionUnit = document.getElementById("storage-retention-unit");
+const pruneTargetEngine = document.getElementById("prune-target-engine");
+const pruneTimelineBtn = document.getElementById("prune-timeline-btn");
+const pruneTimelineStatus = document.getElementById("prune-timeline-status");
+const sqliteMaxSpaceBox = document.getElementById("sqlite-max-space-box");
+const sqliteMaxSpaceToggle = document.getElementById("sqlite-max-space-toggle");
 const storageMaxSpace = document.getElementById("storage-max-space");
 const storageMaxUnit = document.getElementById("storage-max-unit");
+const enforceSpaceBtn = document.getElementById("enforce-space-btn");
+const enforceSpaceStatus = document.getElementById("enforce-space-status");
 const storageUsageText = document.getElementById("storage-usage-text");
 const storageBarFill = document.getElementById("storage-bar-fill");
 const envVarList = document.getElementById("env-var-list");
@@ -407,9 +414,15 @@ function updateEngineDisplay() {
 
   if (isSqlite) {
     sqliteConfigBox.classList.remove("disabled-box");
+    if (sqliteMaxSpaceBox) sqliteMaxSpaceBox.classList.remove("disabled-box");
   } else {
     sqliteConfigBox.classList.add("disabled-box");
+    if (sqliteMaxSpaceBox) sqliteMaxSpaceBox.classList.add("disabled-box");
   }
+  if (sqliteMaxSpaceToggle) sqliteMaxSpaceToggle.disabled = !isSqlite;
+  if (storageMaxSpace) storageMaxSpace.disabled = !isSqlite;
+  if (storageMaxUnit) storageMaxUnit.disabled = !isSqlite;
+  if (enforceSpaceBtn) enforceSpaceBtn.disabled = !isSqlite;
 
   const dbEngineInput = envVarList.querySelector('.env-val-input[data-key="DATABASE_ENGINE"]');
   if (dbEngineInput) {
@@ -656,17 +669,148 @@ remindersToggle.addEventListener("change", () => {
   remindersLeadBox.style.pointerEvents = remindersToggle.checked ? "auto" : "none";
 });
 
+let currentSqliteUsedBytes = 0;
+
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return "0 KB";
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 function updateStorageBar() {
   const maxVal = parseFloat(storageMaxSpace.value) || 500;
-  const unit = storageMaxUnit.value;
-  const maxMB = unit === "GB" ? maxVal * 1024 : maxVal;
-  const simulatedUsedMB = 14.2;
-  const pct = Math.min(100, Math.max(0.5, (simulatedUsedMB / maxMB) * 100));
-  storageUsageText.textContent = `${simulatedUsedMB} MB / ${maxVal} ${unit} (${pct.toFixed(1)}%)`;
+  const unit = storageMaxUnit.value || "MB";
+  const multiplier = unit === "GB" ? 1024 * 1024 * 1024 : (unit === "KB" ? 1024 : 1024 * 1024);
+  const maxBytes = Math.max(1, maxVal * multiplier);
+  const pct = Math.min(100, Math.max(0.5, (currentSqliteUsedBytes / maxBytes) * 100));
+  storageUsageText.textContent = `${formatBytes(currentSqliteUsedBytes)} / ${maxVal} ${unit} (${((currentSqliteUsedBytes / maxBytes) * 100).toFixed(1)}%)`;
   storageBarFill.style.width = `${pct}%`;
 }
+
+async function refreshStorageStatus() {
+  try {
+    const res = await fetch("/viewer/storage/status");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.retention_value) storageRetentionTime.value = data.retention_value;
+    if (data.retention_unit) storageRetentionUnit.value = data.retention_unit;
+    if (typeof data.sqlite_max_space_enabled === "boolean" && sqliteMaxSpaceToggle) {
+      sqliteMaxSpaceToggle.checked = data.sqlite_max_space_enabled;
+    }
+    if (data.sqlite_max_space_value) storageMaxSpace.value = data.sqlite_max_space_value;
+    if (data.sqlite_max_space_unit) storageMaxUnit.value = data.sqlite_max_space_unit;
+    if (data.sqlite && typeof data.sqlite.used_bytes === "number") {
+      currentSqliteUsedBytes = data.sqlite.used_bytes;
+    }
+    updateStorageBar();
+  } catch {}
+}
+
 storageMaxSpace.addEventListener("input", updateStorageBar);
 storageMaxUnit.addEventListener("change", updateStorageBar);
+
+if (pruneTimelineBtn) {
+  pruneTimelineBtn.addEventListener("click", async () => {
+    const unit = storageRetentionUnit.value;
+    const val = parseInt(storageRetentionTime.value, 10) || 90;
+    const targetEngine = pruneTargetEngine ? pruneTargetEngine.value : "active";
+    if (unit === "indefinite") {
+      pruneTimelineStatus.textContent = "Retention is set to Indefinite (Keep Forever). Select a timeline unit to delete older data.";
+      return;
+    }
+    pruneTimelineBtn.disabled = true;
+    pruneTimelineStatus.textContent = "Deleting old records...";
+    try {
+      const resp = await fetch("/viewer/storage/prune-timeline", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          engine: targetEngine,
+          retention_value: val,
+          retention_unit: unit,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data.detail || "Failed to delete older records");
+      }
+      const del = data.deleted || {};
+      const total = Object.values(del).reduce((a, b) => a + (Number(b) || 0), 0);
+      pruneTimelineStatus.textContent = `✓ Pruned (${data.engine}): ${total} records removed (messages: ${del.messages || 0}, memories: ${del.memories || 0}, commitments: ${del.commitments || 0}, decisions: ${del.decisions || 0}).`;
+      if (data.sqlite && typeof data.sqlite.used_bytes === "number") {
+        currentSqliteUsedBytes = data.sqlite.used_bytes;
+        updateStorageBar();
+      }
+    } catch (err) {
+      pruneTimelineStatus.textContent = `❌ Error: ${err.message}`;
+    } finally {
+      pruneTimelineBtn.disabled = false;
+    }
+  });
+}
+
+async function applyAndEnforceSqliteSpace() {
+  if (!engineSqliteRadio.checked) return;
+  const maxVal = parseFloat(storageMaxSpace.value);
+  const unit = storageMaxUnit.value || "MB";
+  const enabled = sqliteMaxSpaceToggle ? sqliteMaxSpaceToggle.checked : true;
+  if (!maxVal || maxVal <= 0) {
+    enforceSpaceStatus.textContent = "❌ Please enter a valid maximum space greater than 0.";
+    return;
+  }
+  if (enforceSpaceBtn) enforceSpaceBtn.disabled = true;
+  enforceSpaceStatus.textContent = "Applying SQLite space limit and checking usage...";
+  try {
+    const resp = await fetch("/viewer/storage/enforce-space", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        max_space_value: maxVal,
+        max_space_unit: unit,
+        enabled: enabled,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(data.detail || "Failed to enforce SQLite space limit");
+    }
+    if (data.sqlite && typeof data.sqlite.used_bytes === "number") {
+      currentSqliteUsedBytes = data.sqlite.used_bytes;
+      updateStorageBar();
+    }
+    const r = data.result || {};
+    const evicted = (r.deleted_messages || 0) + (r.deleted_memories || 0) + (r.deleted_commitments || 0) + (r.deleted_decisions || 0) + (r.deleted_documents || 0);
+    if (!enabled) {
+      enforceSpaceStatus.textContent = "✓ SQLite max space auto-eviction disabled.";
+    } else if (evicted > 0) {
+      enforceSpaceStatus.textContent = `✓ Limit enforced! Deleted oldest data (${r.deleted_messages || 0} messages, ${r.deleted_memories || 0} memories) to meet ${maxVal} ${unit} limit.`;
+    } else {
+      enforceSpaceStatus.textContent = `✓ Limit active (${maxVal} ${unit}). Current SQLite usage is within limit.`;
+    }
+    loadEnvVars();
+  } catch (err) {
+    enforceSpaceStatus.textContent = `❌ Error: ${err.message}`;
+  } finally {
+    if (enforceSpaceBtn) enforceSpaceBtn.disabled = !engineSqliteRadio.checked;
+  }
+}
+
+if (enforceSpaceBtn) {
+  enforceSpaceBtn.addEventListener("click", () => {
+    if (sqliteMaxSpaceToggle && !sqliteMaxSpaceToggle.checked) {
+      sqliteMaxSpaceToggle.checked = true;
+    }
+    applyAndEnforceSqliteSpace();
+  });
+}
+if (sqliteMaxSpaceToggle) {
+  sqliteMaxSpaceToggle.addEventListener("change", applyAndEnforceSqliteSpace);
+}
 
 let migrationInProgress = false;
 startMigrationBtn.addEventListener("click", async () => {
@@ -921,7 +1065,24 @@ downloadEnvBtn.addEventListener("click", () => {
 });
 
 saveSettingsBtn.addEventListener("click", async () => {
+  const maxEnabled = sqliteMaxSpaceToggle ? sqliteMaxSpaceToggle.checked : false;
+  const maxVal = parseFloat(storageMaxSpace.value) || 500;
+  const maxUnit = storageMaxUnit.value || "MB";
+
+  const setEnvField = (k, v) => {
+    const inp = envVarList.querySelector(`.env-val-input[data-key="${k}"]`);
+    if (inp) inp.value = String(v);
+  };
+  setEnvField("STORAGE_RETENTION_VALUE", storageRetentionTime.value || "90");
+  setEnvField("STORAGE_RETENTION_UNIT", storageRetentionUnit.value || "days");
+  setEnvField("SQLITE_MAX_SPACE_ENABLED", maxEnabled ? "true" : "false");
+  setEnvField("SQLITE_MAX_SPACE_VALUE", String(maxVal));
+  setEnvField("SQLITE_MAX_SPACE_UNIT", maxUnit);
+
   await saveEnvToServer();
+  if (engineSqliteRadio.checked && maxEnabled) {
+    await applyAndEnforceSqliteSpace();
+  }
 
   const settingsData = {
     dbEngine: engineSqliteRadio.checked ? "sqlite" : "supabase",
@@ -931,6 +1092,7 @@ saveSettingsBtn.addEventListener("click", async () => {
     reminderLeadUnit: reminderLeadUnit.value,
     retentionTime: storageRetentionTime.value,
     retentionUnit: storageRetentionUnit.value,
+    sqliteMaxSpaceEnabled: maxEnabled,
     maxSpace: storageMaxSpace.value,
     maxSpaceUnit: storageMaxUnit.value
   };
@@ -966,6 +1128,9 @@ function loadSavedSettings() {
     if (data.reminderLeadUnit) reminderLeadUnit.value = data.reminderLeadUnit;
     if (data.retentionTime) storageRetentionTime.value = data.retentionTime;
     if (data.retentionUnit) storageRetentionUnit.value = data.retentionUnit;
+    if (typeof data.sqliteMaxSpaceEnabled === "boolean" && sqliteMaxSpaceToggle) {
+      sqliteMaxSpaceToggle.checked = data.sqliteMaxSpaceEnabled;
+    }
     if (data.maxSpace) storageMaxSpace.value = data.maxSpace;
     if (data.maxSpaceUnit) storageMaxUnit.value = data.maxSpaceUnit;
     updateStorageBar();
@@ -974,6 +1139,7 @@ function loadSavedSettings() {
 
 loadEnvVars();
 loadSavedSettings();
+refreshStorageStatus();
 updateEngineDisplay();
 
 if (sessionStorage.getItem("active_view") === "settings" || window.location.hash === "#settings") {

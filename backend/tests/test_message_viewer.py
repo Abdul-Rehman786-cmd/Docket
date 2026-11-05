@@ -188,3 +188,37 @@ def test_viewer_env_endpoint_lifecycle(tmp_path, monkeypatch):
     re_read = client.get("/viewer/env")
     assert re_read.json()["variables"]["TEST_KEY"] == "updated_val"
     assert re_read.json()["variables"]["NEW_KEY"] == "abc"
+
+
+def test_viewer_storage_prune_and_space_endpoints(tmp_path, monkeypatch):
+    test_env = tmp_path / ".env"
+    db_file = tmp_path / "sqlite_test" / "team_memory.db"
+    test_env.write_text(
+        f"DATABASE_ENGINE=sqlite\nSQLITE_DB_PATH={db_file}\nSWITCH_TENANT_ID=00000000-0000-0000-0000-000000000001\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.services.env_service.ENV_PATH", test_env)
+    monkeypatch.setenv("DATABASE_ENGINE", "sqlite")
+    monkeypatch.setenv("SQLITE_DB_PATH", str(db_file))
+    get_settings.cache_clear()
+
+    status_resp = client.get("/viewer/storage/status")
+    assert status_resp.status_code == 200
+    assert status_resp.json()["active_engine"] == "sqlite"
+
+    prune_resp = client.post(
+        "/viewer/storage/prune-timeline",
+        json={"engine": "sqlite", "retention_value": 30, "retention_unit": "days"},
+    )
+    assert prune_resp.status_code == 200
+    assert prune_resp.json()["status"] == "ok"
+    assert prune_resp.json()["engine"] == "sqlite"
+
+    space_resp = client.post(
+        "/viewer/storage/enforce-space",
+        json={"max_space_value": 50, "max_space_unit": "MB", "enabled": True},
+    )
+    assert space_resp.status_code == 200
+    assert space_resp.json()["status"] == "ok"
+    assert space_resp.json()["enabled"] is True
+

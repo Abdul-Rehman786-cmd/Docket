@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     switch_reply_to_discord: bool = Field(default=True, validation_alias=AliasChoices("SWITCH_REPLY_TO_DISCORD"))
     database_engine: str = Field(default="", validation_alias=AliasChoices("DATABASE_ENGINE", "DB_ENGINE"))
     sqlite_db_path: str = Field(default="", validation_alias=AliasChoices("SQLITE_DB_PATH", "SQLITE_PATH"))
+    storage_retention_value: int = Field(default=90, validation_alias=AliasChoices("STORAGE_RETENTION_VALUE"))
+    storage_retention_unit: str = Field(default="days", validation_alias=AliasChoices("STORAGE_RETENTION_UNIT"))
+    sqlite_max_space_enabled: bool = Field(default=False, validation_alias=AliasChoices("SQLITE_MAX_SPACE_ENABLED"))
+    sqlite_max_space_value: float = Field(default=500.0, validation_alias=AliasChoices("SQLITE_MAX_SPACE_VALUE"))
+    sqlite_max_space_unit: str = Field(default="MB", validation_alias=AliasChoices("SQLITE_MAX_SPACE_UNIT"))
     log_discord_messages: bool = False
     local_embeddings_enabled: bool = True
 

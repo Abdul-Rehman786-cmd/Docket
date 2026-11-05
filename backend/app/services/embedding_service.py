@@ -41,7 +41,12 @@ class EmbeddingWorker:
         while True:
             settings = get_settings()
             delay = 2
-            if settings.local_embeddings_enabled and settings.supabase_configured and settings.switch_tenant_id and settings.allowed_switch_rooms:
+            db_ready = (
+                settings.sqlite_configured
+                if settings.effective_database_engine == "sqlite"
+                else settings.supabase_configured
+            )
+            if settings.local_embeddings_enabled and db_ready and settings.switch_tenant_id and settings.allowed_switch_rooms:
                 try:
                     await self.process_once(settings)
                 except (HTTPException, EmbeddingError):

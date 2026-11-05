@@ -14,3 +14,21 @@ class EnvVariablesPayload(BaseModel):
     model_config = ConfigDict(extra="ignore", hide_input_in_errors=True)
 
     variables: dict[str, str] = Field(default_factory=dict)
+
+
+class PruneByTimelinePayload(BaseModel):
+    model_config = ConfigDict(extra="ignore", hide_input_in_errors=True)
+
+    engine: Literal["supabase", "sqlite", "active"] = "active"
+    retention_value: int = Field(default=90, ge=0, le=36500)
+    retention_unit: Literal["minutes", "hours", "days", "weeks", "months", "years", "indefinite"] = "days"
+    cutoff_iso: str | None = None
+
+
+class EnforceSqliteSpacePayload(BaseModel):
+    model_config = ConfigDict(extra="ignore", hide_input_in_errors=True)
+
+    max_space_value: float = Field(gt=0, le=1000000)
+    max_space_unit: Literal["KB", "MB", "GB"] = "MB"
+    enabled: bool = True
+

@@ -3,9 +3,18 @@ import re
 
 from fastapi import APIRouter, Request, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
-from app.models.viewer import EnvVariablesPayload
+from app.models.viewer import (
+    EnforceSqliteSpacePayload,
+    EnvVariablesPayload,
+    PruneByTimelinePayload,
+)
 from app.services.env_service import OPTIONAL_KEYS, read_env_variables, write_env_variables
 from app.services.migration_service import migrate_supabase_to_sqlite
+from app.services.storage_service import (
+    configure_and_enforce_sqlite_space,
+    get_storage_status,
+    prune_data_by_timeline,
+)
 from app.services.viewer_service import serve_viewer
 
 router = APIRouter(include_in_schema=False)
@@ -77,3 +86,44 @@ async def migrate_database(request: Request) -> JSONResponse:
     headers = viewer_headers(request)
     headers["Cache-Control"] = "no-store, private"
     return JSONResponse(content=res, headers=headers)
+
+
+@router.get("/viewer/storage/status")
+def viewer_storage_status(request: Request) -> JSONResponse:
+    res = get_storage_status()
+    headers = viewer_headers(request)
+    headers["Cache-Control"] = "no-store, private"
+    return JSONResponse(content=res, headers=headers)
+
+
+@router.post("/viewer/storage/prune-timeline")
+async def viewer_prune_timeline(payload: PruneByTimelinePayload, request: Request) -> JSONResponse:
+    write_env_variables(
+        {
+            "STORAGE_RETENTION_VALUE": str(payload.retention_value),
+            "STORAGE_RETENTION_UNIT": payload.retention_unit,
+        }
+    )
+    res = await prune_data_by_timeline(
+        engine=payload.engine,
+        retention_value=payload.retention_value,
+        retention_unit=payload.retention_unit,
+        cutoff_iso=payload.cutoff_iso,
+    )
+    headers = viewer_headers(request)
+    headers["Cache-Control"] = "no-store, private"
+    return JSONResponse(content=res, headers=headers)
+
+
+@router.post("/viewer/storage/enforce-space")
+def viewer_enforce_sqlite_space(payload: EnforceSqliteSpacePayload, request: Request) -> JSONResponse:
+    res = configure_and_enforce_sqlite_space(
+        max_space_value=payload.max_space_value,
+        max_space_unit=payload.max_space_unit,
+        enabled=payload.enabled,
+        persist_env=True,
+    )
+    headers = viewer_headers(request)
+    headers["Cache-Control"] = "no-store, private"
+    return JSONResponse(content=res, headers=headers)
+

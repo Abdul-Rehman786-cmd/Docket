@@ -141,34 +141,56 @@
 
       <!-- Storage & Retention Management -->
       <div class="settings-section">
-        <h3>Storage &amp; Retention Quota</h3>
-        <p class="subtitle">Control message and memory retention thresholds and disk usage quotas.</p>
+        <h3>Storage &amp; Retention Management</h3>
+        <p class="subtitle">Delete old data by timeline in Supabase or SQLite, and enforce maximum storage space in SQLite.</p>
 
         <div class="settings-grid">
-          <div>
-            <label for="storage-retention-time">Time for Old Storage (Retention Period)</label>
-            <div class="input-group-row">
-              <input id="storage-retention-time" type="number" min="1" max="3650" value="90" style="max-width: 120px;">
+          <!-- Feature 1: Timeline Deletion for Supabase or SQLite -->
+          <div class="config-subbox" style="margin: 0;">
+            <label for="storage-retention-time">1. Delete Data Older Than Timeline</label>
+            <div class="input-group-row" style="margin-top: 8px;">
+              <select id="prune-target-engine" class="select-input" title="Database target">
+                <option value="active" selected>Active Engine</option>
+                <option value="sqlite">SQLite</option>
+                <option value="supabase">Supabase</option>
+              </select>
+              <input id="storage-retention-time" type="number" min="1" max="36500" value="90" style="max-width: 100px;">
               <select id="storage-retention-unit" class="select-input">
+                <option value="hours">Hours</option>
                 <option value="days" selected>Days</option>
+                <option value="weeks">Weeks</option>
                 <option value="months">Months</option>
                 <option value="years">Years</option>
                 <option value="indefinite">Keep Forever (Indefinite)</option>
               </select>
             </div>
-            <p class="field-hint">Records older than this time are pruned or archived.</p>
+            <div class="input-group-row" style="margin-top: 12px;">
+              <button id="prune-timeline-btn" class="secondary btn-delete" type="button">🗑️ Delete Older Data Now</button>
+            </div>
+            <p class="field-hint">Deletes all messages, memories, commitments, decisions, and docs older than the chosen timeline in Supabase or SQLite.</p>
+            <p id="prune-timeline-status" class="feed-note" role="status" style="padding: 6px 0 0; border: 0;"></p>
           </div>
 
-          <div>
-            <label for="storage-max-space">Total Space for Storage (Quota)</label>
+          <!-- Feature 2: SQLite Maximum Space Quota & Auto-Eviction -->
+          <div id="sqlite-max-space-box" class="config-subbox" style="margin: 0;">
+            <div class="section-title-row" style="margin-bottom: 8px;">
+              <label for="sqlite-max-space-toggle" style="margin: 0;">2. SQLite Maximum Space Limit (Auto-Delete Oldest)</label>
+              <label class="switch" title="Enable maximum space enforcement in SQLite">
+                <input id="sqlite-max-space-toggle" type="checkbox">
+                <span class="slider"></span>
+              </label>
+            </div>
             <div class="input-group-row">
-              <input id="storage-max-space" type="number" min="1" max="10000" value="500" style="max-width: 120px;">
+              <input id="storage-max-space" type="number" min="0.01" max="100000" step="any" value="500" style="max-width: 120px;">
               <select id="storage-max-unit" class="select-input">
+                <option value="KB">KB</option>
                 <option value="MB" selected>MB</option>
                 <option value="GB">GB</option>
               </select>
+              <button id="enforce-space-btn" class="secondary" type="button">⚡ Apply &amp; Enforce Limit</button>
             </div>
-            <p class="field-hint">Maximum disk space allocated for local database and vectors.</p>
+            <p class="field-hint">Available when using SQLite: if database exceeds this maximum space, oldest data is automatically deleted until the requirement is met.</p>
+            <p id="enforce-space-status" class="feed-note" role="status" style="padding: 6px 0 0; border: 0;"></p>
           </div>
         </div>
 
@@ -184,11 +206,11 @@
 
         <div class="storage-usage-box">
           <div class="storage-usage-header">
-            <span>Storage Usage</span>
-            <span id="storage-usage-text">14.2 MB / 500 MB (2.8%)</span>
+            <span>SQLite Storage Usage</span>
+            <span id="storage-usage-text">0 MB / 500 MB (0.0%)</span>
           </div>
           <div class="storage-bar-track">
-            <div id="storage-bar-fill" class="storage-bar-fill" style="width: 2.8%"></div>
+            <div id="storage-bar-fill" class="storage-bar-fill" style="width: 0.5%"></div>
           </div>
         </div>
       </div>

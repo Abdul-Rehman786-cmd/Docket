@@ -245,3 +245,184 @@ async def test_migration_service_copies_records(sqlite_settings: Settings, monke
     assert result["counts"]["commitments"] == 1
     assert result["counts"]["decisions"] == 1
 
+
+@pytest.mark.anyio
+async def test_sqlite_delete_records_older_than_timeline(sqlite_settings: Settings):
+    from datetime import timedelta
+    from app.services.storage_service import prune_data_by_timeline
+
+    sqlite_db.init_sqlite_db(sqlite_settings)
+    now = datetime.now(timezone.utc)
+    old_time = now - timedelta(days=100)
+    recent_time = now - timedelta(days=5)
+
+    # Insert old message + child records
+    await persist_extraction(
+        sqlite_settings,
+        tenant_id=sqlite_settings.switch_tenant_id,
+        switch_room_id="room-1",
+        switch_message_id="msg-old-1",
+        author_name="OldUser",
+        body="Old message from 100 days ago",
+        occurred_at=old_time,
+        items={
+            "commitments": [{"owner_name": "OldUser", "description": "Old commitment"}],
+            "decisions": [{"topic": "Old", "summary": "Old decision"}],
+            "memories": [{"content": "Old fact", "memory_type": "fact"}],
+        },
+    )
+
+    # Insert recent message + child records
+    await persist_extraction(
+        sqlite_settings,
+        tenant_id=sqlite_settings.switch_tenant_id,
+        switch_room_id="room-1",
+        switch_message_id="msg-recent-1",
+        author_name="NewUser",
+        body="Recent message from 5 days ago",
+        occurred_at=recent_time,
+        items={
+            "commitments": [{"owner_name": "NewUser", "description": "New commitment"}],
+            "decisions": [{"topic": "New", "summary": "New decision"}],
+            "memories": [{"content": "New fact", "memory_type": "fact"}],
+        },
+    )
+
+    # Prune records older than 30 days
+    res = await prune_data_by_timeline(
+        engine="sqlite",
+        retention_value=30,
+        retention_unit="days",
+        settings=sqlite_settings,
+    )
+    assert res["status"] == "ok"
+    assert res["deleted"]["messages"] == 1
+    assert res["deleted"]["commitments"] >= 1
+    assert res["deleted"]["decisions"] >= 1
+    assert res["deleted"]["memories"] >= 1
+
+    # Verify only recent message and its children survive
+    msgs = sqlite_records.list_records("messages", sqlite_settings)
+    assert len(msgs) == 1
+    assert msgs[0]["switch_message_id"] == "msg-recent-1"
+    comms = sqlite_records.list_records("commitments", sqlite_settings)
+    assert len(comms) == 1
+    assert comms[0]["description"] == "New commitment"
+
+
+@pytest.mark.anyio
+async def test_supabase_delete_records_older_than_timeline(monkeypatch):
+    import httpx
+    from app.services.storage_service import prune_data_by_timeline
+
+    supa_settings = Settings(
+        database_engine="supabase",
+        supabase_url="https://mock.supabase.co",
+        supabase_service_role_key="mock-service-key",
+        switch_tenant_id=uuid4(),
+        switch_room_ids="room-1",
+    )
+
+    old_msg_id = str(uuid4())
+    deleted_tables: list[str] = []
+
+    async def mock_transport(self, request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if request.method == "GET" and "/rest/v1/messages" in url:
+            return httpx.Response(200, json=[{"id": old_msg_id}])
+        if request.method == "GET" and "/rest/v1/commitments" in url:
+            return httpx.Response(200, json=[{"id": str(uuid4())}])
+        if request.method == "GET" and "/rest/v1/documents" in url:
+            return httpx.Response(200, json=[])
+        if request.method == "DELETE":
+            for tbl in ("reminder_deliveries", "memories", "commitments", "decisions", "messages"):
+                if f"/rest/v1/{tbl}" in url:
+                    deleted_tables.append(tbl)
+                    return httpx.Response(200, json=[{"id": old_msg_id}])
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", mock_transport)
+
+    res = await prune_data_by_timeline(
+        engine="supabase",
+        retention_value=30,
+        retention_unit="days",
+        settings=supa_settings,
+    )
+    assert res["status"] == "ok"
+    assert res["engine"] == "supabase"
+    assert "messages" in deleted_tables
+    assert "memories" in deleted_tables
+    assert "commitments" in deleted_tables
+    assert "decisions" in deleted_tables
+    assert res["deleted"]["messages"] == 1
+
+
+@pytest.mark.anyio
+async def test_sqlite_max_space_auto_evicts_oldest_data(sqlite_settings: Settings):
+    from datetime import timedelta
+
+    sqlite_db.init_sqlite_db(sqlite_settings)
+    base_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    # Insert 4 messages in chronological order (~1KB payload each, using spaces so not treated as opaque token)
+    for i in range(4):
+        await persist_extraction(
+            sqlite_settings,
+            tenant_id=sqlite_settings.switch_tenant_id,
+            switch_room_id="room-1",
+            switch_message_id=f"msg-seq-{i}",
+            author_name=f"User{i}",
+            body=f"Payload message {i} " + ("word " * 120),
+            occurred_at=base_time + timedelta(days=i),
+            items={
+                "commitments": [],
+                "decisions": [],
+                "memories": [{"content": f"Memory {i} " + ("fact " * 60), "memory_type": "fact"}],
+            },
+        )
+
+    # Enforce a tight max space limit of 2500 bytes (~2.5 KB) so only the newest 1-2 messages fit
+    res = sqlite_records.enforce_sqlite_max_space(2500, sqlite_settings)
+    assert res["enforced"] is True
+    assert res["deleted_messages"] >= 2
+    assert res["payload_bytes"] <= 2500
+
+    surviving = sqlite_records.list_records("messages", sqlite_settings)
+    surviving_ids = [m["switch_message_id"] for m in surviving]
+    # Newest message msg-seq-3 must survive; oldest msg-seq-0 must be deleted
+    assert "msg-seq-3" in surviving_ids
+    assert "msg-seq-0" not in surviving_ids
+
+
+@pytest.mark.anyio
+async def test_sqlite_max_space_enforced_automatically_on_persist(sqlite_settings: Settings):
+    from datetime import timedelta
+
+    sqlite_settings.sqlite_max_space_enabled = True
+    sqlite_settings.sqlite_max_space_value = 2.0  # 2 KB
+    sqlite_settings.sqlite_max_space_unit = "KB"
+
+    base_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for i in range(3):
+        await persist_extraction(
+            sqlite_settings,
+            tenant_id=sqlite_settings.switch_tenant_id,
+            switch_room_id="room-1",
+            switch_message_id=f"auto-msg-{i}",
+            author_name="Alice",
+            body=f"Auto message {i} " + ("note " * 150),
+            occurred_at=base_time + timedelta(hours=i),
+            items={
+                "commitments": [],
+                "decisions": [],
+                "memories": [{"content": f"Auto memory {i}", "memory_type": "fact"}],
+            },
+        )
+
+    surviving = sqlite_records.list_records("messages", sqlite_settings)
+    surviving_ids = [m["switch_message_id"] for m in surviving]
+    assert "auto-msg-2" in surviving_ids
+    assert "auto-msg-0" not in surviving_ids
+
+

@@ -211,6 +211,12 @@ async def persist_extraction(
                     ),
                 )
 
+    if settings.sqlite_max_space_enabled and settings.sqlite_max_space_value > 0:
+        unit = (settings.sqlite_max_space_unit or "MB").strip().upper()
+        multiplier = 1024 * 1024 * 1024 if unit == "GB" else (1024 if unit == "KB" else 1024 * 1024)
+        max_bytes = int(settings.sqlite_max_space_value * multiplier)
+        enforce_sqlite_max_space(max_bytes, settings, preserve_message_ids={message_uuid})
+
     return {
         "messages": 1,
         "commitments": len(commitments),
@@ -280,4 +286,315 @@ async def query_team_memory(
                 result[table] = rows[:10]
 
     return result
+
+
+def get_sqlite_storage_stats(settings: Settings | None = None) -> dict[str, int | float | str | bool]:
+    """Return actual SQLite database disk size and logical page usage in bytes."""
+    active = settings or get_settings()
+    if not active.sqlite_configured:
+        return {
+            "configured": False,
+            "engine": "sqlite",
+            "used_bytes": 0,
+            "file_bytes": 0,
+            "logical_bytes": 0,
+            "path": "",
+        }
+    init_sqlite_db(active)
+    db_file = get_sqlite_file_path(active)
+    file_bytes = 0
+    for suffix in ("", "-wal", "-shm"):
+        candidate = db_file.parent / f"{db_file.name}{suffix}"
+        if candidate.exists():
+            try:
+                file_bytes += candidate.stat().st_size
+            except OSError:
+                pass
+
+    logical_bytes = 0
+    payload_bytes = 0
+    row_counts: dict[str, int] = {}
+    with get_sqlite_connection(active) as conn:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA page_count;")
+        page_count = (cursor.fetchone() or [0])[0]
+        cursor.execute("PRAGMA freelist_count;")
+        freelist_count = (cursor.fetchone() or [0])[0]
+        cursor.execute("PRAGMA page_size;")
+        page_size = (cursor.fetchone() or [4096])[0]
+        logical_bytes = max(0, (page_count - freelist_count) * page_size)
+
+        for tbl in ("messages", "commitments", "decisions", "memories", "documents"):
+            try:
+                if active.switch_tenant_id is not None:
+                    cursor.execute(f"SELECT COUNT(*) FROM {tbl} WHERE tenant_id = ?", (str(active.switch_tenant_id),))
+                else:
+                    cursor.execute(f"SELECT COUNT(*) FROM {tbl}")
+                row_counts[tbl] = (cursor.fetchone() or [0])[0]
+            except Exception:
+                row_counts[tbl] = 0
+
+        try:
+            cursor.execute("SELECT COALESCE(SUM(LENGTH(body) + LENGTH(author_name) + 128), 0) FROM messages")
+            payload_bytes += int((cursor.fetchone() or [0])[0])
+            cursor.execute("SELECT COALESCE(SUM(LENGTH(description) + COALESCE(LENGTH(owner_name), 0) + 128), 0) FROM commitments")
+            payload_bytes += int((cursor.fetchone() or [0])[0])
+            cursor.execute("SELECT COALESCE(SUM(LENGTH(summary) + COALESCE(LENGTH(topic), 0) + 128), 0) FROM decisions")
+            payload_bytes += int((cursor.fetchone() or [0])[0])
+            cursor.execute("SELECT COALESCE(SUM(LENGTH(content) + COALESCE(LENGTH(embedding), 0) + 128), 0) FROM memories")
+            payload_bytes += int((cursor.fetchone() or [0])[0])
+            cursor.execute("SELECT COALESCE(SUM(LENGTH(source_text) + 256), 0) FROM document_versions")
+            payload_bytes += int((cursor.fetchone() or [0])[0])
+            cursor.execute("SELECT COALESCE(SUM(LENGTH(text) + COALESCE(LENGTH(embedding), 0) + 128), 0) FROM document_chunks")
+            payload_bytes += int((cursor.fetchone() or [0])[0])
+        except Exception:
+            pass
+
+    return {
+        "configured": True,
+        "engine": "sqlite",
+        "path": str(db_file),
+        "used_bytes": logical_bytes if logical_bytes > 0 else file_bytes,
+        "file_bytes": file_bytes,
+        "logical_bytes": logical_bytes,
+        "payload_bytes": payload_bytes,
+        "row_counts": row_counts,
+    }
+
+
+def delete_records_older_than_sqlite(
+    cutoff: datetime | str,
+    settings: Settings | None = None,
+) -> dict[str, int]:
+    """Atomically delete all records older than cutoff in SQLite following ATOM principles."""
+    active = settings or get_settings()
+    init_sqlite_db(active)
+    if isinstance(cutoff, datetime):
+        cutoff_iso = cutoff.isoformat()
+        cutoff_sqlite = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        cutoff_iso = str(cutoff)
+        cutoff_sqlite = str(cutoff).replace("T", " ")[:19]
+
+    tenant_clause = "AND tenant_id = ?" if active.switch_tenant_id is not None else ""
+    tenant_params = (str(active.switch_tenant_id),) if active.switch_tenant_id is not None else ()
+
+    deleted_counts = {
+        "memories": 0,
+        "commitments": 0,
+        "decisions": 0,
+        "messages": 0,
+        "documents": 0,
+    }
+
+    with get_sqlite_connection(active) as conn:
+        with conn:
+            cursor = conn.cursor()
+            # 1. Find old messages (by occurred_at or created_at)
+            cursor.execute(
+                f"""
+                SELECT id FROM messages
+                WHERE (occurred_at < ? OR occurred_at < ? OR created_at < ? OR created_at < ?)
+                {tenant_clause}
+                """,
+                (cutoff_iso, cutoff_sqlite, cutoff_iso, cutoff_sqlite, *tenant_params),
+            )
+            old_msg_ids = [r[0] for r in cursor.fetchall()]
+
+            # Delete child records explicitly as well as standalone old child rows
+            if old_msg_ids:
+                placeholders = ",".join("?" for _ in old_msg_ids)
+                for child_table in ("memories", "commitments", "decisions"):
+                    cursor.execute(
+                        f"DELETE FROM {child_table} WHERE message_id IN ({placeholders})",
+                        tuple(old_msg_ids),
+                    )
+                    deleted_counts[child_table] += max(0, cursor.rowcount)
+
+            for child_table in ("memories", "commitments", "decisions"):
+                cursor.execute(
+                    f"""
+                    DELETE FROM {child_table}
+                    WHERE (created_at < ? OR created_at < ?)
+                    {tenant_clause}
+                    """,
+                    (cutoff_iso, cutoff_sqlite, *tenant_params),
+                )
+                deleted_counts[child_table] += max(0, cursor.rowcount)
+
+            if old_msg_ids:
+                placeholders = ",".join("?" for _ in old_msg_ids)
+                cursor.execute(
+                    f"DELETE FROM messages WHERE id IN ({placeholders})",
+                    tuple(old_msg_ids),
+                )
+                deleted_counts["messages"] += max(0, cursor.rowcount)
+
+            # Old documents & chunks
+            cursor.execute(
+                f"""
+                SELECT id FROM documents
+                WHERE (created_at < ? OR created_at < ?)
+                {tenant_clause}
+                """,
+                (cutoff_iso, cutoff_sqlite, *tenant_params),
+            )
+            old_doc_ids = [r[0] for r in cursor.fetchall()]
+            if old_doc_ids:
+                doc_ph = ",".join("?" for _ in old_doc_ids)
+                cursor.execute(f"DELETE FROM document_imports WHERE document_id IN ({doc_ph})", tuple(old_doc_ids))
+                cursor.execute(f"DELETE FROM document_chunks WHERE document_id IN ({doc_ph})", tuple(old_doc_ids))
+                cursor.execute(f"DELETE FROM document_versions WHERE document_id IN ({doc_ph})", tuple(old_doc_ids))
+                cursor.execute(f"DELETE FROM documents WHERE id IN ({doc_ph})", tuple(old_doc_ids))
+                deleted_counts["documents"] += max(0, cursor.rowcount)
+
+        # Reclaim disk space after transaction commits
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            conn.execute("VACUUM;")
+        except Exception as exc:
+            logger.debug("SQLite vacuum after timeline delete skipped: %s", exc)
+
+    return deleted_counts
+
+
+def enforce_sqlite_max_space(
+    max_bytes: int,
+    settings: Settings | None = None,
+    *,
+    preserve_message_ids: set[str] | None = None,
+) -> dict[str, int | bool]:
+    """Delete oldest data in SQLite atomically until storage space is <= max_bytes."""
+    active = settings or get_settings()
+    if max_bytes <= 0 or not active.sqlite_configured:
+        return {
+            "enforced": False,
+            "deleted_messages": 0,
+            "deleted_memories": 0,
+            "deleted_commitments": 0,
+            "deleted_decisions": 0,
+            "deleted_documents": 0,
+            "used_bytes": 0,
+            "payload_bytes": 0,
+            "max_bytes": max_bytes,
+        }
+
+    init_sqlite_db(active)
+
+    def _effective_size(st: dict) -> int:
+        # SQLite empty schema with 10 tables & indexes occupies ~170KB in page allocation.
+        # Track actual stored user data (payload_bytes) to prevent deleting everything when quota is small.
+        # If payload_bytes > 0, compare against payload_bytes; otherwise logical bytes.
+        payload = int(st.get("payload_bytes", 0))
+        logical = int(st.get("used_bytes", 0))
+        if max_bytes < 262144 or payload > 0:
+            return payload
+        return logical
+
+    stats = get_sqlite_storage_stats(active)
+    current_size = _effective_size(stats)
+
+    deleted_totals = {
+        "deleted_messages": 0,
+        "deleted_memories": 0,
+        "deleted_commitments": 0,
+        "deleted_decisions": 0,
+        "deleted_documents": 0,
+    }
+
+    if current_size <= max_bytes:
+        return {
+            "enforced": True,
+            **deleted_totals,
+            "used_bytes": int(stats["used_bytes"]),
+            "payload_bytes": int(stats.get("payload_bytes", 0)),
+            "file_bytes": int(stats["file_bytes"]),
+            "max_bytes": max_bytes,
+        }
+
+    preserve = preserve_message_ids or set()
+
+    # Iteratively evict oldest messages (and their dependent commitments/decisions/memories) in atomic batches
+    max_iterations = 500
+    for _ in range(max_iterations):
+        stats = get_sqlite_storage_stats(active)
+        current_size = _effective_size(stats)
+        if current_size <= max_bytes:
+            break
+
+        progressed = False
+        with get_sqlite_connection(active) as conn:
+            with conn:
+                cursor = conn.cursor()
+                where_parts = []
+                params: list[str] = []
+                if active.switch_tenant_id is not None:
+                    where_parts.append("tenant_id = ?")
+                    params.append(str(active.switch_tenant_id))
+                if preserve:
+                    excl_ph = ",".join("?" for _ in preserve)
+                    where_parts.append(f"id NOT IN ({excl_ph})")
+                    params.extend(sorted(preserve))
+
+                where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+                cursor.execute(
+                    f"""
+                    SELECT id FROM messages
+                    {where_sql}
+                    ORDER BY occurred_at ASC, created_at ASC
+                    LIMIT 1
+                    """,
+                    tuple(params),
+                )
+                oldest_msg_ids = [r[0] for r in cursor.fetchall()]
+
+                if oldest_msg_ids:
+                    ph = ",".join("?" for _ in oldest_msg_ids)
+                    cursor.execute(f"DELETE FROM memories WHERE message_id IN ({ph})", tuple(oldest_msg_ids))
+                    deleted_totals["deleted_memories"] += max(0, cursor.rowcount)
+                    cursor.execute(f"DELETE FROM commitments WHERE message_id IN ({ph})", tuple(oldest_msg_ids))
+                    deleted_totals["deleted_commitments"] += max(0, cursor.rowcount)
+                    cursor.execute(f"DELETE FROM decisions WHERE message_id IN ({ph})", tuple(oldest_msg_ids))
+                    deleted_totals["deleted_decisions"] += max(0, cursor.rowcount)
+                    cursor.execute(f"DELETE FROM messages WHERE id IN ({ph})", tuple(oldest_msg_ids))
+                    deleted_totals["deleted_messages"] += max(0, cursor.rowcount)
+                    progressed = True
+                else:
+                    # Check if any old documents exist
+                    doc_where = "WHERE tenant_id = ?" if active.switch_tenant_id is not None else ""
+                    doc_params = (str(active.switch_tenant_id),) if active.switch_tenant_id is not None else ()
+                    cursor.execute(
+                        f"SELECT id FROM documents {doc_where} ORDER BY created_at ASC LIMIT 1",
+                        doc_params,
+                    )
+                    oldest_docs = [r[0] for r in cursor.fetchall()]
+                    if oldest_docs:
+                        dph = ",".join("?" for _ in oldest_docs)
+                        cursor.execute(f"DELETE FROM document_imports WHERE document_id IN ({dph})", tuple(oldest_docs))
+                        cursor.execute(f"DELETE FROM document_chunks WHERE document_id IN ({dph})", tuple(oldest_docs))
+                        cursor.execute(f"DELETE FROM document_versions WHERE document_id IN ({dph})", tuple(oldest_docs))
+                        cursor.execute(f"DELETE FROM documents WHERE id IN ({dph})", tuple(oldest_docs))
+                        deleted_totals["deleted_documents"] += max(0, cursor.rowcount)
+                        progressed = True
+
+            if progressed:
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                    conn.execute("VACUUM;")
+                except Exception:
+                    pass
+
+        if not progressed:
+            break
+
+    final_stats = get_sqlite_storage_stats(active)
+    return {
+        "enforced": True,
+        **deleted_totals,
+        "used_bytes": int(final_stats["used_bytes"]),
+        "payload_bytes": int(final_stats.get("payload_bytes", 0)),
+        "file_bytes": int(final_stats["file_bytes"]),
+        "max_bytes": max_bytes,
+    }
+
 

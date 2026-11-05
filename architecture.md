@@ -409,6 +409,12 @@ The system supports seamless switching between remote Supabase (PostgreSQL with 
      - **Switch without migrating**: saves path and switches engine immediately (starts clean SQLite database).
      - **Cancel**: closes modal and reverts radio button back to Supabase.
 
+### Storage Retention & SQLite Space Quota Management
+- `services/storage_service.py` and `controllers/viewer.py` expose:
+  - `GET /viewer/storage/status`: returns active engine, timeline retention settings, SQLite maximum space quota, and live SQLite storage usage metrics.
+  - `POST /viewer/storage/prune-timeline`: deletes all records older than the user-selected timeline (`hours`, `days`, `weeks`, `months`, `years`, or explicit ISO cutoff) in either **Supabase** (`delete_records_older_than_supabase`) or **SQLite** (`delete_records_older_than_sqlite`) following ATOM principles (child records deleted before parent messages in a single transaction, followed by `VACUUM` in SQLite).
+  - `POST /viewer/storage/enforce-space`: when using **SQLite**, allows the user to enable and set a maximum storage space (`KB`, `MB`, or `GB`). If usage exceeds the specified space, `enforce_sqlite_max_space` atomically deletes the oldest messages and their dependent commitments, decisions, memories, and documents until the space requirement is met. Also runs automatically after new SQLite extractions and embeddings when `SQLITE_MAX_SPACE_ENABLED=true`.
+
 ## 9. Multiple servers (later)
 
 - One agent, one WebSocket, many rooms.

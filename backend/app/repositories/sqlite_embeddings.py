@@ -92,7 +92,16 @@ async def finish_embedding(settings: Settings, job: dict, *, vector: list[float]
                 """,
                 (blob, error, job["id"], job["tenant_id"], job["room_id"]),
             )
-            return cursor.rowcount > 0
+            changed = cursor.rowcount > 0
+
+    if changed and settings.sqlite_max_space_enabled and settings.sqlite_max_space_value > 0:
+        from app.repositories.sqlite_records import enforce_sqlite_max_space
+        unit = (settings.sqlite_max_space_unit or "MB").strip().upper()
+        multiplier = 1024 * 1024 * 1024 if unit == "GB" else (1024 if unit == "KB" else 1024 * 1024)
+        max_bytes = int(settings.sqlite_max_space_value * multiplier)
+        enforce_sqlite_max_space(max_bytes, settings)
+
+    return changed
 
 
 async def search_embeddings(
