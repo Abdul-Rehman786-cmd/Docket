@@ -124,7 +124,7 @@ Incoming user messages supply their current body for redaction during admission.
 - **Dual Loop Guard**:
   1. *Sender-based*: `switch_ai_senders` automatically includes `SWITCH_REQUESTER_AGENT_ID`, `SWITCH_AGENT_ID`, and configured `SWITCH_AI_SENDER_IDS`.
   2. *Content-fingerprint based*: Switch sender IDs are opaque participant IDs that can differ from agent IDs. FastAPI maintains a bounded rolling cache (`posted_replies`) of SHA-256 fingerprints of recently posted replies keyed by `(room_id, body)`. When an echo of our own reply arrives via the WebSocket listener, FastAPI identifies the fingerprint and skips evaluation, completely preventing infinite response loops.
-- **Reply Policy Control**: Governed by `SWITCH_REPLY_TO_DISCORD=true` (default). `store_only` (extracting commitments into Supabase) sends a verification message ("Data has been saved into the database.") back to Discord; `none` (casual greetings) remains silent in chat; `query_only`, `store_and_query`, and addressed questions post answers back to Discord.
+- **Reply Policy Control**: Governed by `SWITCH_REPLY_TO_DISCORD=true` (default). The bot strictly replies only when tagged/addressed in Discord (or answering a two-turn confirmation prompt). Ambient channel chatter is ingested silently. When tagged, the bot sends an immediate `"Processing your request..."` acknowledgment to give the user closure, followed by the final synthesized answer or staged confirmation preview.
 
 ### Current runtime and message flow
 
@@ -271,18 +271,36 @@ Base URL: https://docs.switchagents.ai
 
 ## 5. Reply policy (`ai_service.py` & `message_service.py`)
 
-Every message is ingested into the authenticated preview feed (`POST /messages`). Each incoming message is automatically evaluated by the LLM (`AIService.evaluate_incoming_message`), deciding one of four database actions (`store_only`, `query_only`, `none`, or `store_and_query`). FastAPI executes database actions against Supabase and posts back to Discord only when the reply policy specifies:
+Every message is ingested into the authenticated preview feed (`POST /messages`). To prevent ambient chat clutter, the bot strictly replies only when tagged/addressed in Discord (or answering a two-turn confirmation prompt). When tagged, an immediate acknowledgment (`"Processing your request..."`) is dispatched before running LLM evaluation or database search. Each incoming message is evaluated by the LLM (`AIService.evaluate_incoming_message`), deciding one of five actions (`store_only`, `query_only`, `none`, `store_and_query`, or `clarify`). FastAPI executes database actions against Supabase and posts back to Discord according to the table below:
 
 | Event / LLM Decision | FastAPI Database Action | Discord Reply Behavior |
 |-----------------------|-------------------------|------------------------|
-| `store_only` (new commitment, decision, or team fact) | When `REQUIRE_SAVE_CONFIRMATION=true` (default), stages draft in SQLite and asks user to confirm in Discord. On "yes", commits to Supabase. When confirmation is disabled, commits immediately. | **Replies in Discord.** Sends preview asking confirmation ("Would you like to save this into the database?"). On "yes", replies "Data has been saved into the database." On "no", cancels. |
-| `clarify` (unclear intent to store/record) | Neither stores nor reads from Supabase. | **Replies in Discord.** Posts clarification question from `answer` asking user to specify missing details. |
-| `query_only` (question requiring team memory) | Queries Supabase (`memories`, `commitments`, `decisions`, `messages`) for relevant team records. | **Replies in Discord.** Codex synthesizes a plain-text answer from Supabase records; FastAPI posts to origin room & thread via `SwitchAPI.post_room_message()`. |
-| `store_and_query` (new information + question) | Stores extracted records in Supabase, then queries Supabase records. | **Replies in Discord.** Codex synthesizes an answer incorporating newly stored and historical records; FastAPI posts to origin room & thread. |
-| `none` (casual chatter, greetings, or off-topic) | Neither stores nor reads from Supabase. | **Silent in Discord** unless the message was explicitly addressed to the bot. |
+| `store_only` (new commitment, decision, or team fact) | Stages draft in SQLite (`PendingConfirmationRepository`). On user "yes", commits to Supabase. On "no", discards draft. | **Replies in Discord (when tagged).** Sends extraction preview asking confirmation ("Would you like to save this into the database?"). On "yes", commits and replies "Data has been saved into the database." On "no", replies "Cancelled. Data was not saved." |
+| `clarify` (unclear intent to store/record) | Neither stores nor reads from Supabase. | **Replies in Discord (when tagged).** Posts clarification question asking user to specify missing details. |
+| `query_only` (question requiring team memory) | Queries Supabase (`memories`, `commitments`, `decisions`, `messages`) via local ONNX vector embeddings (`gte-small`, 384d). | **Replies in Discord (when tagged).** Codex synthesizes a plain-text answer from Supabase records; FastAPI posts to origin room & thread via `SwitchAPI.post_room_message()`. |
+| `store_and_query` (new information + question) | Stages draft for confirmation if new items extracted, and queries Supabase records. | **Replies in Discord (when tagged).** Codex synthesizes an answer incorporating newly stored and historical records; FastAPI posts to origin room & thread. |
+| `none` (casual chatter, greetings, or off-topic) | Neither stores nor reads from Supabase. | **Silent in Discord.** Even when tagged, no answer is sent unless the model generated an explicit textual response. |
+| Ambient message (not tagged/addressed) | Silently ingested into message feed. | **Completely silent in Discord.** Prevents agent from answering unaddressed chatter in the channel. |
 | Message from the agent itself (`switch_ai_senders`) | Ignored by both listener and API. | **Loop Guard.** Ignored immediately to prevent infinite reply loops. |
 
 Outbound Discord posting is controlled by `SWITCH_REPLY_TO_DISCORD=true` in `backend/.env`.
+
+### Immediate Closure Acknowledgment
+When an incoming message is addressed to the bot, `AIService._run` immediately posts:
+```text
+Processing your request...
+```
+to the originating room and thread before executing the model evaluation or database queries.
+- **Watermark isolation**: The intermediate closure message passes `timestamp_ms=None`, preventing premature watermark progression so the subsequent final response is not skipped.
+- **Echo prevention**: The progress notification fingerprint is recorded in `AIService.posted_replies` and `IngestionJobs` before transmission, ensuring incoming Switch echoes are dropped cleanly.
+
+### Two-Turn Staged Confirmation (`PendingConfirmationRepository`)
+To ensure accuracy and prevent unwanted database writes from misinterpretations:
+- When the model extracts records under `store_only` or `store_and_query`, the extraction is staged in a local SQLite table (`.local/pending_confirmations.db`) keyed by `{room_id}:{thread_id}`.
+- The bot replies in Discord with a preview of extracted commitments/decisions and asks:
+  `Would you like to save this into the database? (Reply 'yes' to confirm or 'no' to cancel)`
+- When a teammate replies `yes` (or affirmative variations), the staged draft is committed to Supabase and the bot confirms: `"Data has been saved into the database."`
+- When a teammate replies `no` (or negative variations), the staged draft is purged and the bot confirms: `"Cancelled. Data was not saved."`
 
 ### Reply Watermark (`backend/.local/last_replied_message.txt`)
 To prevent replaying or re-answering historical questions when the backend is restarted after being offline, `AIService` tracks the highest message timestamp (`timestamp_ms`) that received an AI reply.
@@ -290,21 +308,21 @@ To prevent replaying or re-answering historical questions when the backend is re
 - When an incoming Discord message has `timestamp_ms <= last_replied_watermark`, it is identified as an older or replayed message.
 - For such older messages, expensive database query synthesis and Discord replies are skipped (`logger.info("AI skipped reply to older message...")`), preventing duplicate responses to past queries upon listener reconnection. Memory storage (`store_only` / `store_and_query`) continues to safely upsert into Supabase with conflict resolution.
 
-`reply_mode` values: `silent`, `mentions_only`, `proactive`. Set from the Preferences UI and read by `router.py`.
-
-Because follow-ups may mark an unaddressed message as addressed, the backend should also check the message body for an explicit mention before treating it as a question. This is not yet verified.
-
 ## 6. RAG and response flow (closed-loop)
 
-1. **User asks question in Discord**: Teammate asks a question in a Discord channel (or active thread).
-2. **Switch relays event**: The Switch Discord bridge delivers the message event into the Switch room.
+1. **User tags bot in Discord**: Teammate mentions `@team-memory-agent` with a question or fact in a Discord channel (or active thread).
+2. **Switch relays event**: The Switch Discord bridge delivers the message event into the Switch room with `addressed=true` or mention syntax (`<@...>` / `@team-memory-agent`).
 3. **Listener forwards to API**: `switch_listener.py` receives the WebSocket event and posts to `POST /messages` with `X-Ingest-Token`.
 4. **Loop Guard check**: FastAPI checks `message.sender in settings.switch_ai_senders`. If from the bot or an AI agent, it is dropped immediately.
-5. **Watermark & prompt evaluation**: FastAPI checks if the message timestamp is older than or equal to the watermark in `backend/.local/last_replied_message.txt`. If so, query synthesis and replies are skipped. Otherwise, FastAPI passes the clean, unescaped message body directly to Codex in the private internal room (`team-memory-server-responses`).
-6. **Supabase search**: If the decision is `query_only` or `store_and_query`, FastAPI searches Supabase using `search_query` or the user question.
-7. **Synthesis**: FastAPI feeds retrieved database records to Codex to write a grounded plain-text response without Discord or execution formatting.
-8. **Outbound posting to Switch & Watermark update**: FastAPI calls `SwitchAPI.post_room_message(room_id, body, thread_id)` using `team-memory-client` via `POST /agents/{agent_id}/ops/post_message` (with direct `/message` fallback). Once successfully posted, `AIService` updates `backend/.local/last_replied_message.txt` with the message timestamp watermark.
-9. **Relay to Discord**: The Switch Discord bridge delivers the message into the originating Discord channel or active thread.
+5. **Watermark & Mention check**: FastAPI verifies the message is addressed and not older than the watermark in `backend/.local/last_replied_message.txt`.
+6. **Immediate closure notice**: FastAPI immediately dispatches `"Processing your request..."` to the originating Discord channel/thread so the user knows their request was acknowledged.
+7. **Direct message prompt**: FastAPI passes the clean, unescaped message body directly to Codex in the private internal room (`team-memory-server-responses`).
+8. **Action execution**:
+   - If `query_only`: FastAPI generates query embeddings using local ONNX `Supabase/gte-small` (384d), runs vector search via `search_memories` RPC on Supabase, and feeds retrieved context to Codex to synthesize a plain-text answer.
+   - If `store_only`: FastAPI stages the extracted draft in `PendingConfirmationRepository` and asks the user to confirm with `yes` or `no`.
+   - If `clarify`: FastAPI posts a clarification question back to Discord.
+9. **Outbound posting to Switch & Watermark update**: FastAPI calls `SwitchAPI.post_room_message(room_id, body, thread_id)` using `team-memory-client` via `POST /agents/{agent_id}/ops/post_message`. Once successfully posted, `AIService` updates `backend/.local/last_replied_message.txt` with the message timestamp watermark.
+10. **Relay to Discord**: The Switch Discord bridge delivers the final response into the originating Discord channel or active thread.
 
 ## 7. Data model
 
