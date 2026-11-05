@@ -30,8 +30,8 @@ DEFAULT_KEYS = [
 ]
 
 OPTIONAL_KEYS = {
-    "DATABASE_ENGINE": "Optional · defaults to sqlite",
-    "SQLITE_DB_PATH": "Optional · defaults to backend/.local/team_memory.db",
+    "DATABASE_ENGINE": "Engine · 'sqlite' or 'supabase'",
+    "SQLITE_DB_PATH": "Required for SQLite · user selected directory or file path (no default)",
     "ADMIN_API_TOKEN": "Optional · for admin API endpoints",
     "SWITCH_AI_TIMEOUT_SECONDS": "Optional · defaults to 180s",
     "SWITCH_REPLY_TO_DISCORD": "Optional · defaults to true",

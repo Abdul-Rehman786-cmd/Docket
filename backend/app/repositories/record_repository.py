@@ -10,8 +10,9 @@ from app.core.config import Settings, get_settings
 from app.core.http_clients import database_client
 from app.core.message_logging import message_text_for_log,redact_source_identifier
 from app.core.supabase_auth import backend_headers
+from app.repositories import sqlite_records, sqlite_db
 
-ALLOWED_TABLES = ("commitments", "decisions", "messages", "memories")
+ALLOWED_TABLES = ("commitments", "decisions", "messages", "memories", "documents")
 logger = logging.getLogger("uvicorn.error")
 
 
@@ -50,8 +51,10 @@ def _redact(text: str | None, settings: Settings) -> str | None:
 
 @database_client
 async def check_database_connection(settings: Settings | None = None, *, client) -> dict[str, str]:
-    """Verify Supabase REST connectivity using configured service-role credentials."""
+    """Verify database connectivity using configured engine (SQLite or Supabase)."""
     active_settings = settings or get_settings()
+    if active_settings.effective_database_engine == "sqlite":
+        return sqlite_records.check_database_connection(active_settings)
     url = _rest_url(active_settings, "tenants")
     try:
         response = await client.get(
@@ -78,6 +81,9 @@ async def check_database_connection(settings: Settings | None = None, *, client)
 @database_client
 async def storage_rpc_available(settings: Settings, *, client) -> bool:
     """Read-only PostgREST schema preflight; never attempts a speculative write."""
+    if settings.effective_database_engine == "sqlite":
+        sqlite_records.check_database_connection(settings)
+        return True
     try:
         response = await client.get(_rest_url(settings,""),
             headers={**_supabase_headers(settings),"Accept":"application/openapi+json"},timeout=10)
@@ -89,10 +95,12 @@ async def storage_rpc_available(settings: Settings, *, client) -> bool:
 
 @database_client
 async def list_records(table: str, *, client) -> list[dict]:
-    """Read records via Supabase REST. Only invoked by protected backend endpoints."""
+    """Read records via configured engine (SQLite or Supabase REST)."""
     if table not in ALLOWED_TABLES:
         raise ValueError("Unknown table")
     settings = get_settings()
+    if settings.effective_database_engine == "sqlite":
+        return sqlite_records.list_records(table, settings)
     url = _rest_url(settings, table)
     params: dict[str, str] = {"select": "*", "order": "created_at.desc", "limit": "50"}
     if settings.switch_tenant_id is not None:
@@ -121,6 +129,10 @@ async def ensure_tenant_and_rooms_provisioned(
 ) -> None:
     """Auto-provision configured tenant and rooms in Supabase if missing."""
     active = settings or get_settings()
+    if active.effective_database_engine == "sqlite":
+        if active.sqlite_configured:
+            sqlite_db.init_sqlite_db(active)
+        return
     if not active.supabase_configured or not active.switch_tenant_id or not active.allowed_switch_rooms:
         return
     tenant_str = str(active.switch_tenant_id)
@@ -223,7 +235,19 @@ async def persist_extraction(
     occurred_at: datetime | str, items: dict, client,
     source_metadata: dict | None = None,
 ) -> dict[str, int]:
-    """One backend-only RPC: source and items commit together, or all roll back."""
+    """Store extraction atomically: SQLite native transaction or Supabase store_message_extraction RPC."""
+    if settings.effective_database_engine == "sqlite":
+        return await sqlite_records.persist_extraction(
+            settings,
+            tenant_id=tenant_id,
+            switch_room_id=switch_room_id,
+            switch_message_id=switch_message_id,
+            author_name=author_name,
+            body=body,
+            occurred_at=occurred_at,
+            items=items,
+            source_metadata=source_metadata,
+        )
     if tenant_id != settings.switch_tenant_id or switch_room_id not in settings.allowed_switch_rooms:
         raise HTTPException(403, "Message tenant or room is not authorized")
     safe_source_id=redact_source_identifier(switch_message_id,settings)
@@ -269,7 +293,11 @@ async def persist_extraction(
 async def query_team_memory(
     settings: Settings, *, search_query: str | None = None, switch_room_id: str | None = None, client
 ) -> dict[str, list[dict]]:
-    """Query Supabase for stored memories, commitments, decisions, and messages for the response."""
+    """Query stored memories, commitments, decisions, and messages for the response."""
+    if settings.effective_database_engine == "sqlite":
+        return await sqlite_records.query_team_memory(
+            settings, search_query=search_query, switch_room_id=switch_room_id
+        )
     if settings.switch_tenant_id is None:
         raise HTTPException(503, "Message scope is not configured")
     tenant_filter = f"eq.{settings.switch_tenant_id}"

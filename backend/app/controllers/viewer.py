@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
 from app.models.viewer import EnvVariablesPayload
 from app.services.env_service import OPTIONAL_KEYS, read_env_variables, write_env_variables
+from app.services.migration_service import migrate_supabase_to_sqlite
 from app.services.viewer_service import serve_viewer
 
 router = APIRouter(include_in_schema=False)
@@ -68,3 +69,11 @@ def update_env_variables(payload: EnvVariablesPayload, request: Request) -> JSON
     headers = viewer_headers(request)
     headers["Cache-Control"] = "no-store, private"
     return JSONResponse(content={"status": "ok"}, headers=headers)
+
+
+@router.post("/viewer/migrate-db")
+async def migrate_database(request: Request) -> JSONResponse:
+    res = await migrate_supabase_to_sqlite()
+    headers = viewer_headers(request)
+    headers["Cache-Control"] = "no-store, private"
+    return JSONResponse(content=res, headers=headers)

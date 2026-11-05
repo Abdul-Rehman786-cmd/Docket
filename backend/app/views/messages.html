@@ -85,12 +85,13 @@
 
         <!-- SQLite Directory Selection -->
         <div id="sqlite-config-box" class="config-subbox" hidden>
-          <label for="sqlite-dir-path">SQLite Database File / Directory Path</label>
+          <label for="sqlite-dir-path">SQLite Database File / Directory Path (Required)</label>
           <div class="input-row">
-            <input id="sqlite-dir-path" type="text" value="backend/.local/team_memory.db" spellcheck="false" placeholder="e.g. backend/.local/team_memory.db">
-            <button id="sqlite-reset-path-btn" class="secondary" type="button">Default</button>
+            <input id="sqlite-dir-path" type="text" value="" spellcheck="false" placeholder="Select or type local computer directory/file path (e.g. /home/user/team_data)">
+            <button id="browse-sqlite-dir-btn" class="secondary" type="button">📁 Browse</button>
+            <button id="sqlite-quick-local-btn" class="secondary" type="button" title="Use default project local folder">⚡ Use local folder</button>
           </div>
-          <p class="field-hint">Database file stored in local ignored directory to prevent committing binary data to Git.</p>
+          <p class="field-hint">No default directory is used. You must select or enter a valid directory path from UI.</p>
         </div>
 
         <!-- Migration Tool -->
@@ -174,11 +175,11 @@
         <div class="storage-path-box" style="margin-top: 18px;">
           <label for="storage-location-path">SQLite Database Storage Location (Local Computer Path)</label>
           <div class="input-row">
-            <input id="storage-location-path" type="text" value="backend/.local/team_memory.db" spellcheck="false" placeholder="Select or type folder/file path on computer">
+            <input id="storage-location-path" type="text" value="" spellcheck="false" placeholder="Select or type folder/file path on computer">
             <button id="browse-dir-btn" class="secondary" type="button">📁 Browse Computer</button>
             <input id="dir-picker-input" type="file" webkitdirectory directory hidden>
           </div>
-          <p class="field-hint">Supports local vectors via <code>sqlite-vec</code>. Choose fast SSD or custom disk path.</p>
+          <p class="field-hint">Must be explicitly configured by the user. No default directory is assumed.</p>
         </div>
 
         <div class="storage-usage-box">
@@ -212,6 +213,45 @@
         <p id="env-status-msg" class="feed-note" role="status" style="padding: 10px 0 0;"></p>
       </div>
     </section>
+
+    <!-- Migration Confirmation Popup Modal -->
+    <div id="migration-modal" class="modal-overlay" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div class="modal-header">
+          <h3 id="modal-title" class="modal-title">Switch Database to SQLite</h3>
+        </div>
+        <p class="modal-desc">
+          You are switching storage from <strong>Supabase</strong> to local <strong>SQLite</strong>. Select where to store your database on your computer:
+        </p>
+
+        <div class="modal-path-box" style="margin-bottom: 12px;">
+          <label for="modal-dir-input" class="modal-path-label">SQLite Storage Directory / File Path (Required):</label>
+          <div class="input-row" style="margin-top: 6px;">
+            <input id="modal-dir-input" type="text" placeholder="Select or type directory path (e.g. /home/user/my_db)" spellcheck="false" style="background: #ffffff;">
+            <button id="modal-browse-btn" class="secondary" type="button">📁 Browse</button>
+            <button id="modal-quick-local-btn" class="secondary" type="button" title="Use default project local folder">⚡ Use local folder</button>
+          </div>
+          <p class="field-hint" style="margin: 4px 0 0;">No default directory is used. Data will only be saved in this location.</p>
+        </div>
+
+        <p class="modal-desc" style="margin: 12px 0 6px;">
+          Do you want to migrate existing records (messages, commitments, decisions, memories, documents) from Supabase into this SQLite database?
+        </p>
+
+        <p id="modal-error-msg" class="error" hidden></p>
+        <div id="modal-progress-wrap" class="modal-progress-wrap" hidden>
+          <div class="modal-progress-bar-wrap">
+            <div id="modal-progress-bar" class="modal-progress-bar" style="width: 0%"></div>
+          </div>
+          <span id="modal-progress-text" class="modal-progress-text">Preparing migration...</span>
+        </div>
+        <div class="modal-actions">
+          <button id="modal-cancel-btn" class="secondary" type="button">Cancel</button>
+          <button id="modal-skip-btn" class="secondary" type="button">Switch without migrating</button>
+          <button id="modal-migrate-btn" type="button">Migrate data &amp; Switch</button>
+        </div>
+      </div>
+    </div>
 
     <footer><span class="footer-dot" aria-hidden="true"></span> Local message viewer <span class="footer-separator">·</span> Credentials are masked <span class="footer-separator">·</span> Latest 100 messages, cleared on API restart</footer>
     <noscript><p class="error">Enable JavaScript to unlock and view incoming messages.</p></noscript>

@@ -199,7 +199,7 @@ Switch provides the chat bridge and agent protocol identity, while the Python Fa
 | # | Decision | Reason |
 |---|----------|--------|
 | 1 | Switch is the chat layer (Discord via Switch's built-in bridge). No custom Discord bot. | Standardized agent protocol and reduced bot maintenance. |
-| 2 | Backend is Python: FastAPI, Postgres (Supabase) with pgvector, APScheduler, one LLM gateway. | Best library support for RAG and extraction. Standard stack. |
+| 2 | Backend is Python: FastAPI, Dual-Storage (Supabase Postgres + pgvector or local embedded SQLite with NumPy vector search), APScheduler, one LLM gateway. | Flexibility for cloud sync or offline local-first storage. Strictly follows ATOM principles with atomic multi-table transactions. SQLite storage path must be explicitly chosen by the user from UI (no default directory). |
 | 3 | Reuse one existing Codex AI plus one shared non-AI server client; no agent per server. Register the client once and preserve its credentials. | The user authorized the client so server requests have a different sender from the existing AI and do not take over its runtime. |
 | 4 | A small custom agent client ("router client") with no LLM sits on the Switch WebSocket. | Lets our code decide when to reply, instead of an LLM answering everything. |
 | 5 | The backend owns the reply decision (`router.py`). | Switch has no "reply only if needed" setting. |

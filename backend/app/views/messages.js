@@ -314,11 +314,23 @@ const engineSupabaseRadio = document.getElementById("engine-supabase");
 const engineSqliteRadio = document.getElementById("engine-sqlite");
 const sqliteConfigBox = document.getElementById("sqlite-config-box");
 const sqliteDirPath = document.getElementById("sqlite-dir-path");
-const sqliteResetPathBtn = document.getElementById("sqlite-reset-path-btn");
+const browseSqliteDirBtn = document.getElementById("browse-sqlite-dir-btn");
+const sqliteQuickLocalBtn = document.getElementById("sqlite-quick-local-btn");
 const startMigrationBtn = document.getElementById("start-migration-btn");
 const migrationLogBox = document.getElementById("migration-log-box");
 const migrationProgressBar = document.getElementById("migration-progress-bar");
 const migrationLog = document.getElementById("migration-log");
+const migrationModal = document.getElementById("migration-modal");
+const modalDirInput = document.getElementById("modal-dir-input");
+const modalBrowseBtn = document.getElementById("modal-browse-btn");
+const modalQuickLocalBtn = document.getElementById("modal-quick-local-btn");
+const modalErrorMsg = document.getElementById("modal-error-msg");
+const modalProgressWrap = document.getElementById("modal-progress-wrap");
+const modalProgressBar = document.getElementById("modal-progress-bar");
+const modalProgressText = document.getElementById("modal-progress-text");
+const modalCancelBtn = document.getElementById("modal-cancel-btn");
+const modalSkipBtn = document.getElementById("modal-skip-btn");
+const modalMigrateBtn = document.getElementById("modal-migrate-btn");
 const remindersToggle = document.getElementById("reminders-toggle");
 const remindersLeadBox = document.getElementById("reminders-lead-time-box");
 const reminderLeadTime = document.getElementById("reminder-lead-time");
@@ -389,7 +401,7 @@ function updateEngineDisplay() {
   const isSqlite = engineSqliteRadio.checked;
   sqliteConfigBox.hidden = false;
   sqliteDirPath.disabled = !isSqlite;
-  sqliteResetPathBtn.disabled = !isSqlite;
+  if (browseSqliteDirBtn) browseSqliteDirBtn.disabled = !isSqlite;
   storageLocationPath.disabled = !isSqlite;
   browseDirBtn.disabled = !isSqlite;
 
@@ -404,7 +416,6 @@ function updateEngineDisplay() {
     dbEngineInput.value = isSqlite ? "sqlite" : "supabase";
   }
 
-  // Disable SQLITE_DB_PATH in .env list if supabase
   const sqliteDbPathInput = envVarList.querySelector('.env-val-input[data-key="SQLITE_DB_PATH"]');
   if (sqliteDbPathInput) {
     sqliteDbPathInput.disabled = !isSqlite;
@@ -422,16 +433,34 @@ function updateEngineDisplay() {
 let engineUpdating = false;
 async function onEngineChanged() {
   if (engineUpdating) return;
-  engineUpdating = true;
-  const newEngine = engineSupabaseRadio.checked ? "supabase" : "sqlite";
-  updateEngineDisplay();
 
+  if (engineSqliteRadio.checked) {
+    // Open modal directly to ask user for directory path & migration choice
+    const currentPath = (sqliteDirPath.value || storageLocationPath.value || "").trim();
+    if (modalDirInput) {
+      modalDirInput.value = currentPath;
+    }
+    modalErrorMsg.hidden = true;
+    modalProgressWrap.hidden = true;
+    modalMigrateBtn.disabled = false;
+    modalSkipBtn.disabled = false;
+    modalCancelBtn.disabled = false;
+    migrationModal.hidden = false;
+    if (modalDirInput) {
+      setTimeout(() => modalDirInput.focus(), 50);
+    }
+    return;
+  }
+
+  // Switched back to Supabase
+  engineUpdating = true;
+  updateEngineDisplay();
   sessionStorage.setItem("active_view", "settings");
   try {
     await fetch("/viewer/env", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ variables: { DATABASE_ENGINE: newEngine } })
+      body: JSON.stringify({ variables: { DATABASE_ENGINE: "supabase" } }),
     });
   } catch (err) {
     console.error("Could not update DATABASE_ENGINE in backend/.env", err);
@@ -443,49 +472,184 @@ async function onEngineChanged() {
 engineSupabaseRadio.addEventListener("change", onEngineChanged);
 engineSqliteRadio.addEventListener("change", onEngineChanged);
 
+modalCancelBtn.addEventListener("click", () => {
+  migrationModal.hidden = true;
+  engineSupabaseRadio.checked = true;
+  updateEngineDisplay();
+});
+
+modalSkipBtn.addEventListener("click", async () => {
+  if (engineUpdating) return;
+  const chosenPath = (modalDirInput ? modalDirInput.value : sqliteDirPath.value).trim();
+  if (!chosenPath) {
+    modalErrorMsg.textContent = "Please enter or browse a folder path for SQLite storage.";
+    modalErrorMsg.hidden = false;
+    if (modalDirInput) modalDirInput.focus();
+    return;
+  }
+
+  engineUpdating = true;
+  modalSkipBtn.disabled = true;
+  modalMigrateBtn.disabled = true;
+  modalCancelBtn.disabled = true;
+
+  sessionStorage.setItem("active_view", "settings");
+  try {
+    await fetch("/viewer/env", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        variables: {
+          DATABASE_ENGINE: "sqlite",
+          SQLITE_DB_PATH: chosenPath,
+        },
+      }),
+    });
+    window.location.reload();
+  } catch (err) {
+    modalErrorMsg.textContent = "Failed to update configuration: " + err.message;
+    modalErrorMsg.hidden = false;
+    modalSkipBtn.disabled = false;
+    modalMigrateBtn.disabled = false;
+    modalCancelBtn.disabled = false;
+    engineUpdating = false;
+  }
+});
+
+modalMigrateBtn.addEventListener("click", async () => {
+  if (engineUpdating) return;
+  const chosenPath = (modalDirInput ? modalDirInput.value : sqliteDirPath.value).trim();
+  if (!chosenPath) {
+    modalErrorMsg.textContent = "Please enter or browse a folder path before migrating data.";
+    modalErrorMsg.hidden = false;
+    if (modalDirInput) modalDirInput.focus();
+    return;
+  }
+
+  engineUpdating = true;
+  modalMigrateBtn.disabled = true;
+  modalSkipBtn.disabled = true;
+  modalCancelBtn.disabled = true;
+  modalErrorMsg.hidden = true;
+  modalProgressWrap.hidden = false;
+  modalProgressBar.style.width = "20%";
+  modalProgressText.textContent = "Saving directory path and connecting to Supabase...";
+
+  try {
+    // 1. Save SQLITE_DB_PATH first so backend migration knows the user-selected path
+    await fetch("/viewer/env", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variables: { SQLITE_DB_PATH: chosenPath } }),
+    });
+
+    modalProgressBar.style.width = "50%";
+    modalProgressText.textContent = "Migrating database records & embeddings...";
+
+    // 2. Run backend migration
+    const resp = await fetch("/viewer/migrate-db", { method: "POST" });
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      throw new Error(errData.detail || "Database migration failed on server");
+    }
+    const res = await resp.json();
+
+    modalProgressBar.style.width = "90%";
+    modalProgressText.textContent = "Switching active engine to SQLite...";
+
+    // 3. Switch engine to sqlite
+    await fetch("/viewer/env", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variables: { DATABASE_ENGINE: "sqlite" } }),
+    });
+
+    modalProgressBar.style.width = "100%";
+    modalProgressText.textContent = "Migration complete! Reloading...";
+    sessionStorage.setItem("active_view", "settings");
+    setTimeout(() => { window.location.reload(); }, 600);
+  } catch (err) {
+    modalProgressWrap.hidden = true;
+    modalErrorMsg.textContent = err.message || "Failed to migrate database";
+    modalErrorMsg.hidden = false;
+    modalMigrateBtn.disabled = false;
+    modalSkipBtn.disabled = false;
+    modalCancelBtn.disabled = false;
+    engineUpdating = false;
+  }
+});
+
 const storageLocationPath = document.getElementById("storage-location-path");
 const browseDirBtn = document.getElementById("browse-dir-btn");
 const dirPickerInput = document.getElementById("dir-picker-input");
 
-sqliteResetPathBtn.addEventListener("click", () => {
-  const def = "backend/.local/team_memory.db";
-  sqliteDirPath.value = def;
-  storageLocationPath.value = def;
-});
+function applyChosenPath(chosenPath) {
+  if (!chosenPath) return;
+  const pathStr = String(chosenPath).trim();
+  if (modalDirInput) {
+    modalDirInput.value = pathStr;
+  }
+  if (sqliteDirPath) {
+    sqliteDirPath.value = pathStr;
+  }
+  if (storageLocationPath) {
+    storageLocationPath.value = pathStr;
+  }
+  const envInput = envVarList.querySelector('.env-val-input[data-key="SQLITE_DB_PATH"]');
+  if (envInput) envInput.value = pathStr;
+}
 
 sqliteDirPath.addEventListener("input", () => {
   storageLocationPath.value = sqliteDirPath.value;
+  if (modalDirInput) modalDirInput.value = sqliteDirPath.value;
+  const envInput = envVarList.querySelector('.env-val-input[data-key="SQLITE_DB_PATH"]');
+  if (envInput) envInput.value = sqliteDirPath.value;
 });
 storageLocationPath.addEventListener("input", () => {
   sqliteDirPath.value = storageLocationPath.value;
+  if (modalDirInput) modalDirInput.value = storageLocationPath.value;
+  const envInput = envVarList.querySelector('.env-val-input[data-key="SQLITE_DB_PATH"]');
+  if (envInput) envInput.value = storageLocationPath.value;
 });
+if (modalDirInput) {
+  modalDirInput.addEventListener("input", () => {
+    sqliteDirPath.value = modalDirInput.value;
+    storageLocationPath.value = modalDirInput.value;
+    const envInput = envVarList.querySelector('.env-val-input[data-key="SQLITE_DB_PATH"]');
+    if (envInput) envInput.value = modalDirInput.value;
+  });
+}
 
-browseDirBtn.addEventListener("click", async () => {
+async function pickDirectory() {
   if (window.showDirectoryPicker) {
     try {
       const handle = await window.showDirectoryPicker();
-      const chosenPath = `${handle.name}/team_memory.db`;
-      storageLocationPath.value = chosenPath;
-      sqliteDirPath.value = chosenPath;
-    } catch (err) {
-      if (err.name !== "AbortError") {
-        dirPickerInput.click();
+      if (handle && handle.name) {
+        applyChosenPath(`${handle.name}/team_memory.db`);
+        return;
       }
+    } catch (err) {
+      if (err.name === "AbortError") return;
     }
-  } else {
-    dirPickerInput.click();
   }
-});
 
-dirPickerInput.addEventListener("change", () => {
-  if (dirPickerInput.files.length > 0) {
-    const file = dirPickerInput.files[0];
-    const path = file.webkitRelativePath ? file.webkitRelativePath.split("/")[0] : file.name;
-    const finalPath = `${path}/team_memory.db`;
-    storageLocationPath.value = finalPath;
-    sqliteDirPath.value = finalPath;
+  // Fallback: prompt user for folder or database file path
+  const current = (modalDirInput ? modalDirInput.value : "") || (sqliteDirPath ? sqliteDirPath.value : "") || "backend/.local/team_memory.db";
+  const userEntered = prompt("Enter local SQLite storage folder or file path:", current);
+  if (userEntered && userEntered.trim()) {
+    applyChosenPath(userEntered.trim());
   }
-});
+}
+
+browseDirBtn.addEventListener("click", pickDirectory);
+if (browseSqliteDirBtn) browseSqliteDirBtn.addEventListener("click", pickDirectory);
+if (modalBrowseBtn) modalBrowseBtn.addEventListener("click", pickDirectory);
+if (sqliteQuickLocalBtn) {
+  sqliteQuickLocalBtn.addEventListener("click", () => applyChosenPath("backend/.local/team_memory.db"));
+}
+if (modalQuickLocalBtn) {
+  modalQuickLocalBtn.addEventListener("click", () => applyChosenPath("backend/.local/team_memory.db"));
+}
 
 remindersToggle.addEventListener("change", () => {
   remindersLeadBox.style.opacity = remindersToggle.checked ? "1" : "0.45";
@@ -507,29 +671,52 @@ storageMaxUnit.addEventListener("change", updateStorageBar);
 let migrationInProgress = false;
 startMigrationBtn.addEventListener("click", async () => {
   if (migrationInProgress) return;
+  const chosenPath = (sqliteDirPath.value || storageLocationPath.value || "").trim();
+  if (!chosenPath) {
+    alert("Please select or enter a SQLite storage directory path first.");
+    sqliteDirPath.focus();
+    return;
+  }
+
   migrationInProgress = true;
   startMigrationBtn.disabled = true;
   migrationLogBox.hidden = false;
-  migrationProgressBar.style.width = "5%";
-  migrationLog.textContent = "[1/7] Connecting to Supabase PostgreSQL source...\n";
+  migrationProgressBar.style.width = "10%";
+  migrationLog.textContent = `[1/4] Preparing SQLite database at ${chosenPath}...\n`;
 
-  const steps = [
-    { pct: 20, text: "[2/7] Checking schema & initializing SQLite tables at " + (sqliteDirPath.value || "backend/.local/team_memory.db") + "..." },
-    { pct: 35, text: "[3/7] Migrating `tenants` and `rooms` tables..." },
-    { pct: 55, text: "[4/7] Migrating `messages` history..." },
-    { pct: 75, text: "[5/7] Migrating `commitments` & `decisions`..." },
-    { pct: 90, text: "[6/7] Migrating `memories` & vector embeddings..." },
-    { pct: 100, text: "[7/7] Verifying row counts and foreign keys.\n✓ Migration complete! All records successfully transferred to SQLite." }
-  ];
+  try {
+    await fetch("/viewer/env", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variables: { SQLITE_DB_PATH: chosenPath } }),
+    });
 
-  for (const step of steps) {
-    await new Promise(r => setTimeout(r, 600));
-    migrationProgressBar.style.width = `${step.pct}%`;
-    migrationLog.textContent += step.text + "\n";
-    migrationLog.scrollTop = migrationLog.scrollHeight;
+    migrationProgressBar.style.width = "40%";
+    migrationLog.textContent += "[2/4] Connecting to Supabase and reading tables...\n";
+
+    const resp = await fetch("/viewer/migrate-db", { method: "POST" });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || "Server migration error");
+    }
+    const res = await resp.json();
+
+    migrationProgressBar.style.width = "80%";
+    migrationLog.textContent += "[3/4] Migrating records into SQLite schema:\n";
+    if (res.counts) {
+      Object.entries(res.counts).forEach(([tbl, cnt]) => {
+        migrationLog.textContent += `  • ${tbl}: ${cnt} rows\n`;
+      });
+    }
+
+    migrationProgressBar.style.width = "100%";
+    migrationLog.textContent += `[4/4] ✓ Migration complete! Data saved at ${res.target_path || chosenPath}\n`;
+  } catch (err) {
+    migrationLog.textContent += `\n❌ Migration failed: ${err.message}\n`;
+  } finally {
+    startMigrationBtn.disabled = false;
+    migrationInProgress = false;
   }
-  startMigrationBtn.disabled = false;
-  migrationInProgress = false;
 });
 
 function createEnvRow(key = "", val = "", optionalText = "") {
@@ -641,6 +828,10 @@ async function loadEnvVars() {
       loadedVars["DATABASE_ENGINE"] = "sqlite";
     }
   }
+
+  const pathVal = loadedVars["SQLITE_DB_PATH"] || "";
+  sqliteDirPath.value = pathVal;
+  storageLocationPath.value = pathVal;
 
   // Populate rows
   Object.entries(loadedVars).forEach(([key, val]) => {
