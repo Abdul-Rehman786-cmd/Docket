@@ -5,6 +5,15 @@ A project scaffold for **FastAPI + Supabase + React Native (Expo)** with a Switc
 The implemented flow receives Discord messages through Switch, journals human input durably, displays bounded redacted previews, and evaluates useful information through the existing private Codex runtime. Atomic storage and versioned embedding jobs are defined in the single consolidated development baseline. The hosted non-destructive upgrade is prepared for review and approval; never replay the baseline reset on the hosted database. FastAPI and the Switch listener run as separate processes. See [architecture.md](architecture.md) for runtime boundaries, recovery, storage, retrieval and reply behavior.
 
 ## Structure
+
+Versioned Markdown/text document ingestion is deployed and enabled in the configured
+backend. It adds restricted admin imports, durable version/chunk jobs, automatic
+publication and document search/citations. Hosted API/vector/failure checks passed
+and isolated fixtures were cleaned. New installations default to disabled until
+their own approved migration and verification. See
+[document contracts, API and deployment](supabase/DOCUMENT_INGESTION.md).
+Current results are in [hosted document verification](supabase/DOCUMENT_DEPLOYMENT_VERIFICATION.md).
+
 - `architecture.md`: design and boundaries.
 - `AGENTS.md`: mandatory AI development and security rules.
 - `backend/`: FastAPI MVC-inspired layers and tests.

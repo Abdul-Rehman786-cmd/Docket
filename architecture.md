@@ -1,5 +1,24 @@
 # Team Memory Agent: Architecture and Implementation Plan
 
+## Versioned document module
+
+Document-specific controllers/models/services/repositories implement restricted
+development-admin UTF-8 Markdown/text imports. Scope comes from backend tenant
+configuration and enabled room mappings. Imports commit source, versions, chunks
+and idempotency together. Separate durable chunk leases reuse the existing local
+model/tokenizer/executor; all chunks complete before atomic publication. Previous
+published evidence remains searchable during replacement. Document search returns
+typed `document:document_id:version_id:chunk_id` references with exact source slices.
+It remains independently callable, without changing commitment/message workflows.
+The feature defaults to disabled for new installations. The configured backend
+has the approved additive schema deployed and the feature enabled; real hosted
+upload, automatic processing, citations and failure-safety fixtures passed.
+Document scope resolution is read-only; startup no longer upserts mappings. See
+[document contracts and deployment](supabase/DOCUMENT_INGESTION.md) for interfaces,
+authorization, API, retention, verification distinctions and remaining limits.
+See [hosted deployment evidence](supabase/DOCUMENT_DEPLOYMENT_VERIFICATION.md) for
+the genuine migration version, cloud results and safe restart checks.
+
 This document describes the system architecture, component boundaries, Switch agent integration, and database schema for the Team Memory backend.
 
 ## Current implementation: FastAPI and Switch message delivery

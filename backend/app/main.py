@@ -1,6 +1,5 @@
 from contextlib import asynccontextmanager
 import logging
-import os
 from time import perf_counter
 
 from fastapi import FastAPI
@@ -15,9 +14,11 @@ from app.services.ai_service import AIService
 from app.core.http_clients import HTTPClients, use_http_clients
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.repositories.record_repository import ensure_tenant_and_rooms_provisioned
 from app.services.viewer_service import ViewerHub
 from app.services.embedding_service import EmbeddingWorker
+from app.controllers.documents import router as documents_router
+from app.repositories.document_repository import SupabaseDocumentRepository
+from app.services.document_worker import DocumentWorker
 
 
 @asynccontextmanager
@@ -29,14 +30,12 @@ async def lifespan(application):
     application.state.message_receipts.on_change = application.state.viewer_hub.publish
     application.state.ai_service.repository.on_change = application.state.viewer_hub.publish
     application.state.embedding_worker = EmbeddingWorker()
+    application.state.document_worker = DocumentWorker(SupabaseDocumentRepository())
     with use_http_clients(application.state.http_clients):
-        if not os.environ.get("PYTEST_CURRENT_TEST"):
-            try:
-                await ensure_tenant_and_rooms_provisioned()
-            except Exception as exc:
-                logging.getLogger("uvicorn.error").warning("Startup auto-provision warning: %s", exc)
         application.state.ai_service.start_recovery()
         application.state.embedding_worker.start()
+        if get_settings().document_ingestion_enabled:
+            application.state.document_worker.start()
     try:
         yield
     finally:
@@ -44,6 +43,7 @@ async def lifespan(application):
             await application.state.ai_service.close()
         finally:
             await application.state.embedding_worker.close()
+            await application.state.document_worker.close()
             application.state.viewer_hub.close()
             application.state.message_receipts.on_change = None
             await application.state.http_clients.close()
@@ -57,6 +57,7 @@ app.include_router(records_router)
 app.include_router(messages_router)
 app.include_router(viewer_router)
 app.include_router(ai_router)
+app.include_router(documents_router)
 
 
 @app.middleware("http")
@@ -64,7 +65,7 @@ async def prevent_message_caching(request, call_next):
     started = perf_counter()
     with use_http_clients(getattr(request.app.state, "http_clients", None)):
         response = await call_next(request)
-    if request.url.path.startswith(("/messages", "/ai")):
+    if request.url.path.startswith(("/messages", "/ai", "/api/v1/documents")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
     route = request.scope.get("route")

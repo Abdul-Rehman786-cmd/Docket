@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     sqlite_db_path: str = Field(default="backend/.local/team_memory.db", validation_alias=AliasChoices("SQLITE_DB_PATH", "SQLITE_PATH"))
     log_discord_messages: bool = False
     local_embeddings_enabled: bool = True
+    document_ingestion_enabled: bool = False
 
     @property
     def supabase_configured(self) -> bool:
