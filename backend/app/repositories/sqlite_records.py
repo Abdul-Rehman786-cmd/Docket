@@ -215,7 +215,20 @@ async def persist_extraction(
         unit = (settings.sqlite_max_space_unit or "MB").strip().upper()
         multiplier = 1024 * 1024 * 1024 if unit == "GB" else (1024 if unit == "KB" else 1024 * 1024)
         max_bytes = int(settings.sqlite_max_space_value * multiplier)
-        enforce_sqlite_max_space(max_bytes, settings, preserve_message_ids={message_uuid})
+        # When new messages/commitments/decisions/memories are added, target those tables
+        added_tables = ["messages"]
+        if commitments:
+            added_tables.append("commitments")
+        if decisions:
+            added_tables.append("decisions")
+        if memories:
+            added_tables.append("memories")
+        enforce_sqlite_max_space(
+            max_bytes,
+            settings,
+            preserve_message_ids={message_uuid},
+            target_tables=added_tables,
+        )
 
     return {
         "messages": 1,
@@ -463,8 +476,13 @@ def enforce_sqlite_max_space(
     settings: Settings | None = None,
     *,
     preserve_message_ids: set[str] | None = None,
+    target_tables: list[str] | None = None,
 ) -> dict[str, int | bool]:
-    """Delete oldest data in SQLite atomically until storage space is <= max_bytes."""
+    """Delete oldest data in SQLite atomically until storage space is <= max_bytes.
+    
+    If target_tables is provided (e.g. ['memories'] or ['messages']), eviction prioritizes
+    the specific table(s) where new data was added.
+    """
     active = settings or get_settings()
     if max_bytes <= 0 or not active.sqlite_configured:
         return {
@@ -482,9 +500,6 @@ def enforce_sqlite_max_space(
     init_sqlite_db(active)
 
     def _effective_size(st: dict) -> int:
-        # SQLite empty schema with 10 tables & indexes occupies ~170KB in page allocation.
-        # Track actual stored user data (payload_bytes) to prevent deleting everything when quota is small.
-        # If payload_bytes > 0, compare against payload_bytes; otherwise logical bytes.
         payload = int(st.get("payload_bytes", 0))
         logical = int(st.get("used_bytes", 0))
         if max_bytes < 262144 or payload > 0:
@@ -513,8 +528,11 @@ def enforce_sqlite_max_space(
         }
 
     preserve = preserve_message_ids or set()
+    tenant_clause = "WHERE tenant_id = ?" if active.switch_tenant_id is not None else ""
+    tenant_params = (str(active.switch_tenant_id),) if active.switch_tenant_id is not None else ()
+    tables_to_evict = target_tables or ["messages", "memories", "commitments", "decisions", "documents"]
 
-    # Iteratively evict oldest messages (and their dependent commitments/decisions/memories) in atomic batches
+    # Iteratively evict oldest records from the targeted table first in atomic batches
     max_iterations = 500
     for _ in range(max_iterations):
         stats = get_sqlite_storage_stats(active)
@@ -526,55 +544,120 @@ def enforce_sqlite_max_space(
         with get_sqlite_connection(active) as conn:
             with conn:
                 cursor = conn.cursor()
-                where_parts = []
-                params: list[str] = []
-                if active.switch_tenant_id is not None:
-                    where_parts.append("tenant_id = ?")
-                    params.append(str(active.switch_tenant_id))
-                if preserve:
-                    excl_ph = ",".join("?" for _ in preserve)
-                    where_parts.append(f"id NOT IN ({excl_ph})")
-                    params.extend(sorted(preserve))
 
-                where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
-                cursor.execute(
-                    f"""
-                    SELECT id FROM messages
-                    {where_sql}
-                    ORDER BY occurred_at ASC, created_at ASC
-                    LIMIT 1
-                    """,
-                    tuple(params),
-                )
-                oldest_msg_ids = [r[0] for r in cursor.fetchall()]
+                for tbl in tables_to_evict:
+                    if tbl == "memories":
+                        cursor.execute(
+                            f"SELECT id FROM memories {tenant_clause} ORDER BY created_at ASC LIMIT 1",
+                            tenant_params,
+                        )
+                        row = cursor.fetchone()
+                        if row:
+                            cursor.execute("DELETE FROM memories WHERE id = ?", (row[0],))
+                            deleted_totals["deleted_memories"] += max(0, cursor.rowcount)
+                            progressed = True
+                            break
 
-                if oldest_msg_ids:
-                    ph = ",".join("?" for _ in oldest_msg_ids)
-                    cursor.execute(f"DELETE FROM memories WHERE message_id IN ({ph})", tuple(oldest_msg_ids))
-                    deleted_totals["deleted_memories"] += max(0, cursor.rowcount)
-                    cursor.execute(f"DELETE FROM commitments WHERE message_id IN ({ph})", tuple(oldest_msg_ids))
-                    deleted_totals["deleted_commitments"] += max(0, cursor.rowcount)
-                    cursor.execute(f"DELETE FROM decisions WHERE message_id IN ({ph})", tuple(oldest_msg_ids))
-                    deleted_totals["deleted_decisions"] += max(0, cursor.rowcount)
-                    cursor.execute(f"DELETE FROM messages WHERE id IN ({ph})", tuple(oldest_msg_ids))
-                    deleted_totals["deleted_messages"] += max(0, cursor.rowcount)
-                    progressed = True
-                else:
-                    # Check if any old documents exist
-                    doc_where = "WHERE tenant_id = ?" if active.switch_tenant_id is not None else ""
-                    doc_params = (str(active.switch_tenant_id),) if active.switch_tenant_id is not None else ()
+                    elif tbl == "commitments":
+                        cursor.execute(
+                            f"SELECT id FROM commitments {tenant_clause} ORDER BY created_at ASC LIMIT 1",
+                            tenant_params,
+                        )
+                        row = cursor.fetchone()
+                        if row:
+                            cursor.execute("DELETE FROM commitments WHERE id = ?", (row[0],))
+                            deleted_totals["deleted_commitments"] += max(0, cursor.rowcount)
+                            progressed = True
+                            break
+
+                    elif tbl == "decisions":
+                        cursor.execute(
+                            f"SELECT id FROM decisions {tenant_clause} ORDER BY created_at ASC LIMIT 1",
+                            tenant_params,
+                        )
+                        row = cursor.fetchone()
+                        if row:
+                            cursor.execute("DELETE FROM decisions WHERE id = ?", (row[0],))
+                            deleted_totals["deleted_decisions"] += max(0, cursor.rowcount)
+                            progressed = True
+                            break
+
+                    elif tbl == "messages":
+                        where_parts = []
+                        params: list[str] = []
+                        if active.switch_tenant_id is not None:
+                            where_parts.append("tenant_id = ?")
+                            params.append(str(active.switch_tenant_id))
+                        if preserve:
+                            excl_ph = ",".join("?" for _ in preserve)
+                            where_parts.append(f"id NOT IN ({excl_ph})")
+                            params.extend(sorted(preserve))
+
+                        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+                        cursor.execute(
+                            f"""
+                            SELECT id FROM messages
+                            {where_sql}
+                            ORDER BY occurred_at ASC, created_at ASC
+                            LIMIT 1
+                            """,
+                            tuple(params),
+                        )
+                        oldest_msg_ids = [r[0] for r in cursor.fetchall()]
+
+                        if oldest_msg_ids:
+                            ph = ",".join("?" for _ in oldest_msg_ids)
+                            cursor.execute(f"DELETE FROM memories WHERE message_id IN ({ph})", tuple(oldest_msg_ids))
+                            deleted_totals["deleted_memories"] += max(0, cursor.rowcount)
+                            cursor.execute(f"DELETE FROM commitments WHERE message_id IN ({ph})", tuple(oldest_msg_ids))
+                            deleted_totals["deleted_commitments"] += max(0, cursor.rowcount)
+                            cursor.execute(f"DELETE FROM decisions WHERE message_id IN ({ph})", tuple(oldest_msg_ids))
+                            deleted_totals["deleted_decisions"] += max(0, cursor.rowcount)
+                            cursor.execute(f"DELETE FROM messages WHERE id IN ({ph})", tuple(oldest_msg_ids))
+                            deleted_totals["deleted_messages"] += max(0, cursor.rowcount)
+                            progressed = True
+                            break
+
+                    elif tbl == "documents":
+                        doc_where = "WHERE tenant_id = ?" if active.switch_tenant_id is not None else ""
+                        doc_params = (str(active.switch_tenant_id),) if active.switch_tenant_id is not None else ()
+                        cursor.execute(
+                            f"SELECT id FROM documents {doc_where} ORDER BY created_at ASC LIMIT 1",
+                            doc_params,
+                        )
+                        oldest_docs = [r[0] for r in cursor.fetchall()]
+                        if oldest_docs:
+                            dph = ",".join("?" for _ in oldest_docs)
+                            cursor.execute(f"DELETE FROM document_imports WHERE document_id IN ({dph})", tuple(oldest_docs))
+                            cursor.execute(f"DELETE FROM document_chunks WHERE document_id IN ({dph})", tuple(oldest_docs))
+                            cursor.execute(f"DELETE FROM document_versions WHERE document_id IN ({dph})", tuple(oldest_docs))
+                            cursor.execute(f"DELETE FROM documents WHERE id IN ({dph})", tuple(oldest_docs))
+                            deleted_totals["deleted_documents"] += max(0, cursor.rowcount)
+                            progressed = True
+                            break
+
+                # If the targeted table had nothing to delete, fallback to any oldest message
+                if not progressed and target_tables:
                     cursor.execute(
-                        f"SELECT id FROM documents {doc_where} ORDER BY created_at ASC LIMIT 1",
-                        doc_params,
+                        f"""
+                        SELECT id FROM messages
+                        {tenant_clause}
+                        ORDER BY occurred_at ASC, created_at ASC
+                        LIMIT 1
+                        """,
+                        tenant_params,
                     )
-                    oldest_docs = [r[0] for r in cursor.fetchall()]
-                    if oldest_docs:
-                        dph = ",".join("?" for _ in oldest_docs)
-                        cursor.execute(f"DELETE FROM document_imports WHERE document_id IN ({dph})", tuple(oldest_docs))
-                        cursor.execute(f"DELETE FROM document_chunks WHERE document_id IN ({dph})", tuple(oldest_docs))
-                        cursor.execute(f"DELETE FROM document_versions WHERE document_id IN ({dph})", tuple(oldest_docs))
-                        cursor.execute(f"DELETE FROM documents WHERE id IN ({dph})", tuple(oldest_docs))
-                        deleted_totals["deleted_documents"] += max(0, cursor.rowcount)
+                    old_msg = cursor.fetchone()
+                    if old_msg:
+                        mid = old_msg[0]
+                        cursor.execute("DELETE FROM memories WHERE message_id = ?", (mid,))
+                        deleted_totals["deleted_memories"] += max(0, cursor.rowcount)
+                        cursor.execute("DELETE FROM commitments WHERE message_id = ?", (mid,))
+                        deleted_totals["deleted_commitments"] += max(0, cursor.rowcount)
+                        cursor.execute("DELETE FROM decisions WHERE message_id = ?", (mid,))
+                        deleted_totals["deleted_decisions"] += max(0, cursor.rowcount)
+                        cursor.execute("DELETE FROM messages WHERE id = ?", (mid,))
+                        deleted_totals["deleted_messages"] += max(0, cursor.rowcount)
                         progressed = True
 
             if progressed:

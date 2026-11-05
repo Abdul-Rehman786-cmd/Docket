@@ -670,6 +670,8 @@ remindersToggle.addEventListener("change", () => {
 });
 
 let currentSqliteUsedBytes = 0;
+let currentSqlitePayloadBytes = 0;
+let currentSqliteFileBytes = 0;
 
 function formatBytes(bytes) {
   if (!bytes || bytes <= 0) return "0 KB";
@@ -687,8 +689,17 @@ function updateStorageBar() {
   const unit = storageMaxUnit.value || "MB";
   const multiplier = unit === "GB" ? 1024 * 1024 * 1024 : (unit === "KB" ? 1024 : 1024 * 1024);
   const maxBytes = Math.max(1, maxVal * multiplier);
-  const pct = Math.min(100, Math.max(0.5, (currentSqliteUsedBytes / maxBytes) * 100));
-  storageUsageText.textContent = `${formatBytes(currentSqliteUsedBytes)} / ${maxVal} ${unit} (${((currentSqliteUsedBytes / maxBytes) * 100).toFixed(1)}%)`;
+
+  // If user sets quota < 256KB, measure against data payload so empty schema/indexes don't overflow
+  const isPayloadMode = maxBytes < 262144 && currentSqlitePayloadBytes > 0;
+  const activeBytes = isPayloadMode ? currentSqlitePayloadBytes : (currentSqliteUsedBytes || currentSqliteFileBytes);
+  const pct = Math.min(100, Math.max(0.5, (activeBytes / maxBytes) * 100));
+
+  if (isPayloadMode) {
+    storageUsageText.textContent = `Payload: ${formatBytes(activeBytes)} / ${maxVal} ${unit} (${((activeBytes / maxBytes) * 100).toFixed(1)}%) • Disk: ${formatBytes(currentSqliteFileBytes)}`;
+  } else {
+    storageUsageText.textContent = `${formatBytes(activeBytes)} / ${maxVal} ${unit} (${((activeBytes / maxBytes) * 100).toFixed(1)}%)`;
+  }
   storageBarFill.style.width = `${pct}%`;
 }
 
@@ -706,6 +717,8 @@ async function refreshStorageStatus() {
     if (data.sqlite_max_space_unit) storageMaxUnit.value = data.sqlite_max_space_unit;
     if (data.sqlite && typeof data.sqlite.used_bytes === "number") {
       currentSqliteUsedBytes = data.sqlite.used_bytes;
+      currentSqliteFileBytes = data.sqlite.file_bytes || data.sqlite.used_bytes;
+      currentSqlitePayloadBytes = data.sqlite.payload_bytes || 0;
     }
     updateStorageBar();
   } catch {}
@@ -781,6 +794,8 @@ async function applyAndEnforceSqliteSpace() {
     }
     if (data.sqlite && typeof data.sqlite.used_bytes === "number") {
       currentSqliteUsedBytes = data.sqlite.used_bytes;
+      currentSqliteFileBytes = data.sqlite.file_bytes || data.sqlite.used_bytes;
+      currentSqlitePayloadBytes = data.sqlite.payload_bytes || 0;
       updateStorageBar();
     }
     const r = data.result || {};

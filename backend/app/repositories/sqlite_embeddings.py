@@ -99,7 +99,7 @@ async def finish_embedding(settings: Settings, job: dict, *, vector: list[float]
         unit = (settings.sqlite_max_space_unit or "MB").strip().upper()
         multiplier = 1024 * 1024 * 1024 if unit == "GB" else (1024 if unit == "KB" else 1024 * 1024)
         max_bytes = int(settings.sqlite_max_space_value * multiplier)
-        enforce_sqlite_max_space(max_bytes, settings)
+        enforce_sqlite_max_space(max_bytes, settings, target_tables=["memories"])
 
     return changed
 
