@@ -19,6 +19,7 @@ from app.models.ai import AskRequest, LLMDecision
 from app.models.messages import IncomingMessage, MessageReceipt
 from app.repositories.ai_requests import AIRequestRepository
 from app.repositories.ingestion_jobs import IngestionJobs
+from app.repositories.pending_confirmation import PendingConfirmationRepository
 from app.services.retrieval_service import query_team_memory
 from app.services.extraction_service import redact_decision, store_ai_memory
 from app.repositories.reply_state import ReplyState
@@ -37,6 +38,43 @@ JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
 logger = logging.getLogger("uvicorn.error")
 MAX_PENDING_JOBS = 4
 DEFAULT_REPLY_STATE_PATH = BACKEND_DIR / ".local" / "last_replied_message.txt"
+
+CONFIRMATION_YES_WORDS = {
+    "yes", "y", "confirm", "save", "save it", "approve", "lgtm", "looks good", "sure", "ok", "okay", "proceed"
+}
+CONFIRMATION_NO_WORDS = {
+    "no", "n", "cancel", "discard", "abort", "don't save", "dont save", "stop"
+}
+
+
+def clean_confirmation_text(body: str) -> str:
+    cleaned = (body or "").strip().lower()
+    cleaned = re.sub(r"^<@!?\w+>\s*", "", cleaned)
+    cleaned = re.sub(r"^@[\w\-]+\s*", "", cleaned)
+    return cleaned.strip(" .,!?:;")
+
+
+def format_draft_preview(decision: LLMDecision) -> str:
+    lines = ["I extracted the following data to save:"]
+    for c in decision.commitments:
+        detail = f"• Commitment: {c.description}"
+        extra = []
+        if c.owner_name:
+            extra.append(f"Owner: {c.owner_name}")
+        if c.due_at:
+            extra.append(f"Due: {c.due_at}")
+        if extra:
+            detail += f" ({', '.join(extra)})"
+        lines.append(detail)
+    for d in decision.decisions:
+        detail = f"• Decision: {d.summary}"
+        if d.topic:
+            detail += f" (Topic: {d.topic})"
+        lines.append(detail)
+    for m in decision.memories:
+        lines.append(f"• Fact: {m.content}")
+    lines.append("\nWould you like to save this into the database? (Reply 'yes' to confirm or 'no' to cancel)")
+    return "\n".join(lines)
 
 
 def response_scope(settings: Settings) -> tuple:
@@ -221,6 +259,7 @@ class AIService:
         # differ from agent IDs, so also recognise our own posts by room + content.
         self.posted_replies: deque[str] = deque(maxlen=100)
         self.journal = IngestionJobs()
+        self.pending_confirmations = PendingConfirmationRepository()
         self.recovery = None
         self.active_refs: set[str] = set()
         self.admission_lock = asyncio.Lock()
@@ -250,6 +289,38 @@ class AIService:
                 room_id=room_id,
             )
             self.reply_state.save(self.reply_state_path)
+
+    async def _send_discord_reply(
+        self,
+        settings: Settings,
+        room_id: str,
+        body: str,
+        thread_id: str | None = None,
+        timestamp_ms: int | None = None,
+        switch_message_id: str | None = None,
+    ) -> None:
+        try:
+            requester_api = SwitchAPI(
+                settings.switch_bridge_url,
+                settings.switch_requester_agent_id,
+                settings.switch_requester_api_key.get_secret_value(),
+            )
+            # Record before posting: the echo can arrive before the HTTP call returns.
+            self.posted_replies.append(self._reply_fingerprint(room_id, body))
+            await self.journal.remember_reply(self._reply_fingerprint(room_id, body))
+            await requester_api.post_room_message(
+                room_id=room_id,
+                body=body,
+                thread_id=thread_id,
+            )
+            self.record_reply(
+                timestamp_ms=timestamp_ms,
+                message_id=switch_message_id,
+                room_id=room_id,
+            )
+            logger.info("AI reply posted to Switch room=%s watermark=%s", room_id, self.reply_state.timestamp_ms)
+        except Exception:
+            logger.warning("Failed to post AI reply to Switch room=%s", room_id)
 
     def start_recovery(self):
         self.recovery = asyncio.create_task(self._recover())
@@ -444,6 +515,54 @@ class AIService:
             and self._reply_fingerprint(message.room_id, message.body) not in self.posted_replies
         )
         ref = message_reference(message)
+        if eligible and settings.require_save_confirmation:
+            draft_key = f"{message.room_id}:{message.thread_id or 'main'}"
+            staged = await self.pending_confirmations.get(draft_key)
+            if staged:
+                cleaned = clean_confirmation_text(message.body)
+                if cleaned in CONFIRMATION_YES_WORDS:
+                    try:
+                        stored_counts = await store_ai_memory(
+                            settings,
+                            tenant_id=settings.switch_tenant_id,
+                            switch_room_id=staged["room_id"],
+                            switch_message_id=staged["switch_message_id"],
+                            author_name=staged["author_name"],
+                            body=staged["body"],
+                            occurred_at=staged["occurred_at"],
+                            decision=staged["decision"],
+                            source_metadata=staged["source_metadata"],
+                        )
+                        reply_text = "Data has been saved into the database."
+                        logger.info("Pending extraction confirmed room=%s stored=%s", message.room_id, stored_counts)
+                    except Exception as e:
+                        logger.exception("Failed to store confirmed extraction: %s", e)
+                        reply_text = "Failed to save data into the database. Please try again."
+                    await self.pending_confirmations.remove(draft_key)
+                    if settings.switch_reply_to_discord:
+                        await self._send_discord_reply(
+                            settings,
+                            message.room_id,
+                            reply_text,
+                            message.thread_id,
+                            message.timestamp_ms,
+                            message.message_id,
+                        )
+                    return receive_message(message, settings, receipts)
+                elif cleaned in CONFIRMATION_NO_WORDS:
+                    await self.pending_confirmations.remove(draft_key)
+                    reply_text = "Cancelled. Data was not saved."
+                    logger.info("Pending extraction cancelled room=%s", message.room_id)
+                    if settings.switch_reply_to_discord:
+                        await self._send_discord_reply(
+                            settings,
+                            message.room_id,
+                            reply_text,
+                            message.thread_id,
+                            message.timestamp_ms,
+                            message.message_id,
+                        )
+                    return receive_message(message, settings, receipts)
         job = None
         if eligible:
             try:
@@ -531,6 +650,7 @@ class AIService:
                     len(decision.memories),
                 )
                 stored_counts = json.loads(job["counts"]) if job and job["counts"] else None
+                staged_for_confirmation = False
 
                 if decision.action in ("store_only", "store_and_query") and stored_counts is None:
                     if source_meta is None and len(settings.allowed_switch_rooms) != 1:
@@ -544,26 +664,46 @@ class AIService:
                     }
                     if not meta.get("switch_message_id"):
                         raise HTTPException(422, "Source evidence is no longer available")
-                    stored_counts = await store_ai_memory(
-                        settings,
-                        tenant_id=settings.switch_tenant_id,
-                        switch_room_id=meta["room_id"],
-                        switch_message_id=meta["switch_message_id"],
-                        author_name=meta["author_name"],
-                        body=row.question,
-                        occurred_at=meta["occurred_at"],
-                        decision=decision,
-                        source_metadata=meta,
-                    )
-                    if job:
-                        await self.journal.stored(msg_ref, stored_counts)
-                    logger.info(
-                        "AI database store complete ref=%s request_id=%s action=%s stored=%s",
-                        msg_ref,
-                        row.request_id,
-                        decision.action,
-                        json.dumps(stored_counts, sort_keys=True),
-                    )
+
+                    if settings.require_save_confirmation and source_meta and source_meta.get("origin") == "discord":
+                        draft_key = f"{meta['room_id']}:{meta.get('thread_id') or 'main'}"
+                        occurred = meta["occurred_at"].isoformat() if isinstance(meta["occurred_at"], datetime) else str(meta["occurred_at"])
+                        await self.pending_confirmations.stage(
+                            draft_key=draft_key,
+                            tenant_id=settings.switch_tenant_id,
+                            room_id=meta["room_id"],
+                            thread_id=meta.get("thread_id"),
+                            switch_message_id=meta["switch_message_id"],
+                            author_name=meta["author_name"],
+                            body=row.question,
+                            occurred_at=occurred,
+                            decision=decision,
+                            source_metadata=meta,
+                        )
+                        staged_for_confirmation = True
+                        final_answer = format_draft_preview(decision)
+                        logger.info("Draft extraction staged for confirmation draft_key=%s ref=%s", draft_key, msg_ref)
+                    else:
+                        stored_counts = await store_ai_memory(
+                            settings,
+                            tenant_id=settings.switch_tenant_id,
+                            switch_room_id=meta["room_id"],
+                            switch_message_id=meta["switch_message_id"],
+                            author_name=meta["author_name"],
+                            body=row.question,
+                            occurred_at=meta["occurred_at"],
+                            decision=decision,
+                            source_metadata=meta,
+                        )
+                        if job:
+                            await self.journal.stored(msg_ref, stored_counts)
+                        logger.info(
+                            "AI database store complete ref=%s request_id=%s action=%s stored=%s",
+                            msg_ref,
+                            row.request_id,
+                            decision.action,
+                            json.dumps(stored_counts, sort_keys=True),
+                        )
 
                 if decision.action in ("query_only", "store_and_query"):
                     msg_timestamp = source_meta.get("timestamp_ms") if source_meta else None
@@ -598,13 +738,14 @@ class AIService:
                         synthesized = await ask_switch(settings, synthesis_prompt, synthesis=True)
                         final_answer = _extract_plain_answer(synthesized)
                 else:
-                    final_answer = (decision.answer or "").strip()
-                    if not final_answer:
-                        final_answer = (
-                            "Data has been saved into the database."
-                            if decision.action == "store_only"
-                            else "No database action was needed."
-                        )
+                    if not staged_for_confirmation:
+                        final_answer = (decision.answer or "").strip()
+                        if not final_answer:
+                            final_answer = (
+                                "Data has been saved into the database."
+                                if decision.action == "store_only"
+                                else "No database action was needed."
+                            )
 
             safe_answer_log = message_text_for_log(final_answer, settings)
             safe_answer = json.loads(safe_answer_log)
@@ -626,7 +767,8 @@ class AIService:
                 and source_meta.get("room_id")
                 and bool(final_answer and final_answer.strip())
                 and (
-                    decision.action in ("store_only", "query_only", "store_and_query", "clarify")
+                    staged_for_confirmation
+                    or decision.action in ("store_only", "query_only", "store_and_query", "clarify")
                     or source_meta.get("addressed")
                     or (decision.action == "none" and bool(decision.answer and decision.answer.strip()))
                 )
@@ -643,47 +785,23 @@ class AIService:
                     should_reply = False
 
             if should_reply:
-                try:
-                    requester_api = SwitchAPI(
-                        settings.switch_bridge_url,
-                        settings.switch_requester_agent_id,
-                        settings.switch_requester_api_key.get_secret_value(),
-                    )
-                    reply_room_id = source_meta["room_id"]
-                    reply_thread_id = source_meta.get("thread_id")
-                    reply_body = (
+                reply_body = (
+                    final_answer
+                    if staged_for_confirmation
+                    else (
                         "Data has been saved into the database."
                         if decision.action == "store_only"
                         else final_answer
                     )
-                    # Record before posting: the echo can arrive before the HTTP call returns.
-                    self.posted_replies.append(self._reply_fingerprint(reply_room_id, reply_body))
-                    await self.journal.remember_reply(self._reply_fingerprint(reply_room_id, reply_body))
-                    await requester_api.post_room_message(
-                        room_id=reply_room_id,
-                        body=reply_body,
-                        thread_id=reply_thread_id,
-                    )
-                    msg_timestamp = source_meta.get("timestamp_ms")
-                    self.record_reply(
-                        timestamp_ms=msg_timestamp,
-                        message_id=source_meta.get("switch_message_id"),
-                        room_id=reply_room_id,
-                    )
-                    logger.info(
-                        "AI reply posted to Switch room=%s ref=%s request_id=%s watermark=%s",
-                        reply_room_id,
-                        msg_ref,
-                        row.request_id,
-                        self.reply_state.timestamp_ms,
-                    )
-                except Exception as post_err:
-                    logger.warning(
-                        "Failed to post AI reply to Switch room=%s ref=%s reason=%s",
-                        source_meta.get("room_id"),
-                        msg_ref,
-                        "delivery_failed",
-                    )
+                )
+                await self._send_discord_reply(
+                    settings,
+                    source_meta["room_id"],
+                    reply_body,
+                    source_meta.get("thread_id"),
+                    source_meta.get("timestamp_ms"),
+                    source_meta.get("switch_message_id"),
+                )
             self.repository.update(
                 scope,
                 row.request_id,

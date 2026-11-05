@@ -20,16 +20,31 @@ from app.services.ai_service import AIService, ExtractionFailure, ingestion_scop
 from app.services.extraction_service import storage_items
 
 
-def config():
-    return Settings(_env_file=None, switch_requester_agent_id="fixture-requester",
-                    switch_requester_api_key="fixture-client-key", switch_ai_room_id="private-room",
-                    switch_ai_sender_id="fixture-ai-participant")
+def config(**updates):
+    params = {
+        "switch_requester_agent_id": "fixture-requester",
+        "switch_requester_api_key": "fixture-client-key",
+        "switch_ai_room_id": "private-room",
+        "switch_ai_sender_id": "fixture-ai-participant",
+        "require_save_confirmation": False,
+        **updates,
+    }
+    return Settings(_env_file=None, **params)
 
 
 def message(settings, body="Planning is Friday", **updates):
-    return IncomingMessage(tenant_id=settings.switch_tenant_id, room_id="test-room",
-                           message_id="unique-source", sender="human", sender_name="Person",
-                           body=body, timestamp_ms=1793872800000, thread_id="thread-1", **updates)
+    params = {
+        "tenant_id": settings.switch_tenant_id,
+        "room_id": "test-room",
+        "message_id": "unique-source",
+        "sender": "human",
+        "sender_name": "Person",
+        "body": body,
+        "timestamp_ms": 1793872800000,
+        "thread_id": "thread-1",
+        **updates,
+    }
+    return IncomingMessage(**params)
 
 
 @pytest.mark.parametrize("text,category", [
@@ -152,6 +167,86 @@ def test_unclear_message_triggers_clarification_reply_and_no_storage(monkeypatch
             assert posted[0]["body"] == "Please clarify what topic or date you would like to set up the meeting for."
             assert posted[0]["room_id"] == "test-room"
             assert posted[0]["thread_id"] == "thread-1"
+        finally:
+            await service.close()
+    asyncio.run(run())
+
+
+def test_confirmation_flow_yes_commits_and_no_cancels(monkeypatch):
+    async def run():
+        settings = config(require_save_confirmation=True)
+        service = AIService()
+        receipts = MessageReceiptRepository()
+        saved = []
+        posted = []
+
+        async def ask(settings, question):
+            return json.dumps({
+                "action": "store_only",
+                "commitments": [{"description": "Launch on Friday"}],
+            })
+
+        async def store(settings, **kwargs):
+            saved.append(kwargs)
+            return {"messages": 1, "commitments": 1, "decisions": 0, "memories": 1}
+
+        async def post(self, room_id, body, thread_id=None):
+            posted.append({"room_id": room_id, "body": body, "thread_id": thread_id})
+
+        monkeypatch.setattr(ai_service, "ask_switch", ask)
+        monkeypatch.setattr(ai_service, "store_ai_memory", store)
+        monkeypatch.setattr(ai_service.SwitchAPI, "post_room_message", post)
+
+        try:
+            msg1 = message(settings, "I'll handle the launch on Friday")
+            await service.ingest(msg1, settings, receipts)
+            await service.queue.join()
+
+            assert len(saved) == 0
+            assert len(posted) == 1
+            assert "I extracted the following data to save:" in posted[0]["body"]
+            assert "Launch on Friday" in posted[0]["body"]
+            assert "Reply 'yes' to confirm or 'no' to cancel" in posted[0]["body"]
+
+            msg2 = IncomingMessage(
+                tenant_id=settings.switch_tenant_id,
+                room_id="test-room",
+                message_id="confirm-msg-2",
+                sender="human",
+                sender_name="Person",
+                body="yes",
+                thread_id="thread-1",
+                timestamp_ms=1793872801000,
+            )
+            await service.ingest(msg2, settings, receipts)
+
+            assert len(saved) == 1
+            assert len(posted) == 2
+            assert posted[1]["body"] == "Data has been saved into the database."
+            assert await service.pending_confirmations.get("test-room:thread-1") is None
+
+            msg3 = message(settings, "Launch on Friday", message_id="msg-3", timestamp_ms=1793872802000)
+            await service.ingest(msg3, settings, receipts)
+            await service.queue.join()
+            assert len(posted) == 3
+            assert "Would you like to save this" in posted[2]["body"]
+
+            msg4 = IncomingMessage(
+                tenant_id=settings.switch_tenant_id,
+                room_id="test-room",
+                message_id="cancel-msg-4",
+                sender="human",
+                sender_name="Person",
+                body="no",
+                thread_id="thread-1",
+                timestamp_ms=1793872803000,
+            )
+            await service.ingest(msg4, settings, receipts)
+
+            assert len(saved) == 1
+            assert len(posted) == 4
+            assert posted[3]["body"] == "Cancelled. Data was not saved."
+            assert await service.pending_confirmations.get("test-room:thread-1") is None
         finally:
             await service.close()
     asyncio.run(run())
