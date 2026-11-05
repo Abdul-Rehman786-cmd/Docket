@@ -26,6 +26,8 @@ def sqlite_settings(temp_sqlite_dir: Path):
         switch_tenant_id=tenant_id,
         switch_room_ids="room-1,room-2",
         switch_ingest_token="test-token",
+        sqlite_max_space_enabled=False,
+        storage_retention_unit="indefinite",
     )
 
 
@@ -424,5 +426,107 @@ async def test_sqlite_max_space_enforced_automatically_on_persist(sqlite_setting
     surviving_ids = [m["switch_message_id"] for m in surviving]
     assert "auto-msg-2" in surviving_ids
     assert "auto-msg-0" not in surviving_ids
+
+
+@pytest.mark.anyio
+async def test_storage_retention_worker_process_once(sqlite_settings: Settings):
+    from datetime import timedelta
+    from app.services.storage_service import StorageRetentionWorker
+
+    sqlite_settings.storage_retention_unit = "indefinite"
+
+    # Insert an old message (3 hours ago) and a fresh message (10 mins ago)
+    now = datetime.now(timezone.utc)
+    await persist_extraction(
+        sqlite_settings,
+        tenant_id=sqlite_settings.switch_tenant_id,
+        switch_room_id="room-1",
+        switch_message_id="worker-old-msg",
+        author_name="Alice",
+        body="Old body",
+        occurred_at=now - timedelta(hours=3),
+        items={"commitments": [], "decisions": [], "memories": [{"content": "old memory", "memory_type": "fact"}]},
+    )
+    await persist_extraction(
+        sqlite_settings,
+        tenant_id=sqlite_settings.switch_tenant_id,
+        switch_room_id="room-1",
+        switch_message_id="worker-fresh-msg",
+        author_name="Bob",
+        body="Fresh body",
+        occurred_at=now - timedelta(minutes=10),
+        items={"commitments": [], "decisions": [], "memories": [{"content": "fresh memory", "memory_type": "fact"}]},
+    )
+
+    # Now enable 1-hour retention and run worker
+    sqlite_settings.storage_retention_value = 1
+    sqlite_settings.storage_retention_unit = "hours"
+
+    events = []
+    worker = StorageRetentionWorker(on_change=lambda ev: events.append(ev))
+    result = await worker.process_once(sqlite_settings)
+
+    assert result["status"] == "ok"
+    assert result["deleted"]["messages"] >= 1
+    assert len(events) == 1
+    assert events[0]["event"] == "records_pruned"
+
+    surviving = sqlite_records.list_records("messages", sqlite_settings)
+    surviving_ids = [m["switch_message_id"] for m in surviving]
+    assert "worker-fresh-msg" in surviving_ids
+    assert "worker-old-msg" not in surviving_ids
+
+
+@pytest.mark.anyio
+async def test_auto_prune_timeline_on_persist_extraction(sqlite_settings: Settings):
+    from datetime import timedelta
+
+    sqlite_settings.storage_retention_unit = "indefinite"
+    now = datetime.now(timezone.utc)
+
+    # Seed an old message from 5 hours ago
+    await persist_extraction(
+        sqlite_settings,
+        tenant_id=sqlite_settings.switch_tenant_id,
+        switch_room_id="room-1",
+        switch_message_id="auto-prune-old",
+        author_name="Alice",
+        body="Old record",
+        occurred_at=now - timedelta(hours=5),
+        items={"commitments": [], "decisions": [], "memories": []},
+    )
+
+    # Configure 1 hour retention
+    sqlite_settings.storage_retention_value = 1
+    sqlite_settings.storage_retention_unit = "hours"
+
+    # Persist new message: should automatically delete the 5-hour-old message
+    await persist_extraction(
+        sqlite_settings,
+        tenant_id=sqlite_settings.switch_tenant_id,
+        switch_room_id="room-1",
+        switch_message_id="auto-prune-new",
+        author_name="Bob",
+        body="New record",
+        occurred_at=now,
+        items={"commitments": [], "decisions": [], "memories": []},
+    )
+
+    surviving = sqlite_records.list_records("messages", sqlite_settings)
+    surviving_ids = [m["switch_message_id"] for m in surviving]
+    assert "auto-prune-new" in surviving_ids
+    assert "auto-prune-old" not in surviving_ids
+
+
+@pytest.mark.anyio
+async def test_storage_retention_worker_skips_indefinite(sqlite_settings: Settings):
+    from app.services.storage_service import StorageRetentionWorker
+
+    sqlite_settings.storage_retention_unit = "indefinite"
+    worker = StorageRetentionWorker()
+    result = await worker.process_once(sqlite_settings)
+    assert result["status"] == "skipped"
+    assert result["reason"] == "indefinite_retention"
+
 
 

@@ -1,10 +1,14 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
+import logging
 from typing import Any
 from fastapi import HTTPException
 
 from app.core.config import Settings, get_settings
 from app.repositories import record_repository, sqlite_records
 from app.services.env_service import write_env_variables
+
+logger = logging.getLogger("team_memory")
 
 
 def compute_cutoff_datetime(
@@ -162,4 +166,83 @@ def configure_and_enforce_sqlite_space(
         "result": enforcement,
         "sqlite": stats,
     }
+
+
+class StorageRetentionWorker:
+    """Background worker that continuously prunes records older than configured timeline."""
+
+    def __init__(self, on_change: Any = None):
+        self.task: asyncio.Task | None = None
+        self.on_change = on_change
+        self._stop_event = asyncio.Event()
+
+    def start(self):
+        if self.task is None or self.task.done():
+            self._stop_event.clear()
+            self.task = asyncio.create_task(self.run())
+
+    async def process_once(self, settings: Settings | None = None) -> dict[str, Any]:
+        active = settings or get_settings()
+        unit = (active.storage_retention_unit or "").strip().lower()
+        if unit == "indefinite":
+            return {"status": "skipped", "reason": "indefinite_retention"}
+
+        engine = active.effective_database_engine
+        db_ready = (
+            active.sqlite_configured
+            if engine == "sqlite"
+            else active.supabase_configured
+        )
+        if not db_ready:
+            return {"status": "skipped", "reason": "database_not_configured"}
+
+        res = await prune_data_by_timeline(
+            engine=engine,
+            retention_value=active.storage_retention_value,
+            retention_unit=active.storage_retention_unit,
+            settings=active,
+        )
+        del_dict = res.get("deleted") or {}
+        total_deleted = sum(int(v) for v in del_dict.values())
+        if total_deleted > 0 and self.on_change:
+            try:
+                self.on_change({
+                    "event": "records_pruned",
+                    "engine": engine,
+                    "deleted": del_dict,
+                })
+            except Exception as exc:
+                logger.debug("Storage retention worker on_change broadcast warning: %s", exc)
+        return res
+
+    async def run(self):
+        while not self._stop_event.is_set():
+            active = get_settings()
+            try:
+                await self.process_once(active)
+            except Exception as exc:
+                logger.warning("Storage retention background prune warning: %s", exc)
+
+            unit = (active.storage_retention_unit or "").strip().lower()
+            if unit in ("minutes", "hours"):
+                sleep_secs = 60
+            elif unit == "indefinite":
+                sleep_secs = 300
+            else:
+                sleep_secs = 300
+
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=sleep_secs)
+            except (asyncio.TimeoutError, TimeoutError):
+                pass
+
+    async def close(self):
+        self._stop_event.set()
+        if self.task and not self.task.done():
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+
 

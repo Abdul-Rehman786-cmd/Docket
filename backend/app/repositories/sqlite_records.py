@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 from fastapi import HTTPException
 
@@ -230,6 +230,28 @@ async def persist_extraction(
             target_tables=added_tables,
         )
 
+    # Automatically prune records older than timeline if retention is not indefinite
+    if settings.storage_retention_unit and settings.storage_retention_unit.lower() != "indefinite":
+        now = datetime.now(timezone.utc)
+        unit = settings.storage_retention_unit.lower()
+        val = settings.storage_retention_value
+        cutoff = None
+        if val > 0:
+            if unit == "minutes":
+                cutoff = now - timedelta(minutes=val)
+            elif unit == "hours":
+                cutoff = now - timedelta(hours=val)
+            elif unit == "days":
+                cutoff = now - timedelta(days=val)
+            elif unit == "weeks":
+                cutoff = now - timedelta(weeks=val)
+            elif unit == "months":
+                cutoff = now - timedelta(days=val * 30)
+            elif unit == "years":
+                cutoff = now - timedelta(days=val * 365)
+        if cutoff is not None:
+            delete_records_older_than_sqlite(cutoff, settings)
+
     return {
         "messages": 1,
         "commitments": len(commitments),
@@ -383,11 +405,9 @@ def delete_records_older_than_sqlite(
     active = settings or get_settings()
     init_sqlite_db(active)
     if isinstance(cutoff, datetime):
-        cutoff_iso = cutoff.isoformat()
-        cutoff_sqlite = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        cutoff_param = cutoff.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     else:
-        cutoff_iso = str(cutoff)
-        cutoff_sqlite = str(cutoff).replace("T", " ")[:19]
+        cutoff_param = str(cutoff).replace("T", " ")[:19]
 
     tenant_clause = "AND tenant_id = ?" if active.switch_tenant_id is not None else ""
     tenant_params = (str(active.switch_tenant_id),) if active.switch_tenant_id is not None else ()
@@ -407,10 +427,10 @@ def delete_records_older_than_sqlite(
             cursor.execute(
                 f"""
                 SELECT id FROM messages
-                WHERE (occurred_at < ? OR occurred_at < ? OR created_at < ? OR created_at < ?)
+                WHERE (datetime(occurred_at) < datetime(?) OR datetime(created_at) < datetime(?))
                 {tenant_clause}
                 """,
-                (cutoff_iso, cutoff_sqlite, cutoff_iso, cutoff_sqlite, *tenant_params),
+                (cutoff_param, cutoff_param, *tenant_params),
             )
             old_msg_ids = [r[0] for r in cursor.fetchall()]
 
@@ -428,10 +448,10 @@ def delete_records_older_than_sqlite(
                 cursor.execute(
                     f"""
                     DELETE FROM {child_table}
-                    WHERE (created_at < ? OR created_at < ?)
+                    WHERE datetime(created_at) < datetime(?)
                     {tenant_clause}
                     """,
-                    (cutoff_iso, cutoff_sqlite, *tenant_params),
+                    (cutoff_param, *tenant_params),
                 )
                 deleted_counts[child_table] += max(0, cursor.rowcount)
 
@@ -447,10 +467,10 @@ def delete_records_older_than_sqlite(
             cursor.execute(
                 f"""
                 SELECT id FROM documents
-                WHERE (created_at < ? OR created_at < ?)
+                WHERE datetime(created_at) < datetime(?)
                 {tenant_clause}
                 """,
-                (cutoff_iso, cutoff_sqlite, *tenant_params),
+                (cutoff_param, *tenant_params),
             )
             old_doc_ids = [r[0] for r in cursor.fetchall()]
             if old_doc_ids:

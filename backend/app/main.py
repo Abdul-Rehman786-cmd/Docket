@@ -18,6 +18,7 @@ from app.core.logging import configure_logging
 from app.repositories.record_repository import ensure_tenant_and_rooms_provisioned
 from app.services.viewer_service import ViewerHub
 from app.services.embedding_service import EmbeddingWorker
+from app.services.storage_service import StorageRetentionWorker
 
 
 @asynccontextmanager
@@ -29,6 +30,9 @@ async def lifespan(application):
     application.state.message_receipts.on_change = application.state.viewer_hub.publish
     application.state.ai_service.repository.on_change = application.state.viewer_hub.publish
     application.state.embedding_worker = EmbeddingWorker()
+    application.state.retention_worker = StorageRetentionWorker(
+        on_change=application.state.viewer_hub.publish
+    )
     with use_http_clients(application.state.http_clients):
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             try:
@@ -37,12 +41,15 @@ async def lifespan(application):
                 logging.getLogger("uvicorn.error").warning("Startup auto-provision warning: %s", exc)
         application.state.ai_service.start_recovery()
         application.state.embedding_worker.start()
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            application.state.retention_worker.start()
     try:
         yield
     finally:
         try:
             await application.state.ai_service.close()
         finally:
+            await application.state.retention_worker.close()
             await application.state.embedding_worker.close()
             application.state.viewer_hub.close()
             application.state.message_receipts.on_change = None

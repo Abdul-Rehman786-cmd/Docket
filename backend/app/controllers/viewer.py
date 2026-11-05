@@ -75,6 +75,10 @@ def get_env_variables(request: Request) -> JSONResponse:
 @router.post("/viewer/env")
 def update_env_variables(payload: EnvVariablesPayload, request: Request) -> JSONResponse:
     write_env_variables(payload.variables)
+    if any(k in payload.variables for k in ("STORAGE_RETENTION_VALUE", "STORAGE_RETENTION_UNIT")):
+        worker = getattr(request.app.state, "retention_worker", None)
+        if worker:
+            asyncio.create_task(worker.process_once())
     headers = viewer_headers(request)
     headers["Cache-Control"] = "no-store, private"
     return JSONResponse(content={"status": "ok"}, headers=headers)
