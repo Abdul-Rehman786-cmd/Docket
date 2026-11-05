@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.models.messages import MessageRef
 from app.models.commitment_chat import TaskChangeProposal, ChatOutcome
 
-DatabaseAction = Literal["store_only", "query_only", "none", "store_and_query"]
+DatabaseAction = Literal["store_only", "query_only", "none", "store_and_query", "clarify"]
 
 
 class ExtractedCommitment(BaseModel):
@@ -54,6 +54,8 @@ class LLMDecision(BaseModel):
             raise ValueError("Storage action and extraction items must agree")
         if querying != bool(self.search_query and self.search_query.strip()):
             raise ValueError("Query action and search query must agree")
+        if self.action == "clarify" and not (self.answer and self.answer.strip()):
+            raise ValueError("Clarification action requires a question in answer")
         if any(m.memory_type != "fact" for m in self.memories):
             raise ValueError("Structured items generate their own summaries; memories must contain facts only")
         for item in self.commitments:

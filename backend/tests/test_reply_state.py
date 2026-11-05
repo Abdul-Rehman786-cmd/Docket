@@ -184,8 +184,9 @@ async def test_ai_service_replies_and_updates_watermark_for_newer_message(monkey
     await service.close()
 
     # Post should succeed for the new message!
-    assert len(posted_replies) == 1
-    assert posted_replies[0]["body"] == "Sprint ends on Friday."
+    assert len(posted_replies) == 2
+    assert posted_replies[0]["body"] == "Processing your request..."
+    assert posted_replies[1]["body"] == "Sprint ends on Friday."
 
     # Watermark should be updated to 3000 in the file!
     assert ReplyState.load(state_file).timestamp_ms == 3000
