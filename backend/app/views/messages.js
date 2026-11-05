@@ -314,19 +314,38 @@ const engineSupabaseRadio = document.getElementById("engine-supabase");
 const engineSqliteRadio = document.getElementById("engine-sqlite");
 const sqliteConfigBox = document.getElementById("sqlite-config-box");
 const sqliteDirPath = document.getElementById("sqlite-dir-path");
-const sqliteResetPathBtn = document.getElementById("sqlite-reset-path-btn");
+const browseSqliteDirBtn = document.getElementById("browse-sqlite-dir-btn");
+const sqliteQuickLocalBtn = document.getElementById("sqlite-quick-local-btn");
 const startMigrationBtn = document.getElementById("start-migration-btn");
 const migrationLogBox = document.getElementById("migration-log-box");
 const migrationProgressBar = document.getElementById("migration-progress-bar");
 const migrationLog = document.getElementById("migration-log");
+const migrationModal = document.getElementById("migration-modal");
+const modalDirInput = document.getElementById("modal-dir-input");
+const modalBrowseBtn = document.getElementById("modal-browse-btn");
+const modalQuickLocalBtn = document.getElementById("modal-quick-local-btn");
+const modalErrorMsg = document.getElementById("modal-error-msg");
+const modalProgressWrap = document.getElementById("modal-progress-wrap");
+const modalProgressBar = document.getElementById("modal-progress-bar");
+const modalProgressText = document.getElementById("modal-progress-text");
+const modalCancelBtn = document.getElementById("modal-cancel-btn");
+const modalSkipBtn = document.getElementById("modal-skip-btn");
+const modalMigrateBtn = document.getElementById("modal-migrate-btn");
 const remindersToggle = document.getElementById("reminders-toggle");
 const remindersLeadBox = document.getElementById("reminders-lead-time-box");
 const reminderLeadTime = document.getElementById("reminder-lead-time");
 const reminderLeadUnit = document.getElementById("reminder-lead-unit");
 const storageRetentionTime = document.getElementById("storage-retention-time");
 const storageRetentionUnit = document.getElementById("storage-retention-unit");
+const pruneTargetEngine = document.getElementById("prune-target-engine");
+const pruneTimelineBtn = document.getElementById("prune-timeline-btn");
+const pruneTimelineStatus = document.getElementById("prune-timeline-status");
+const sqliteMaxSpaceBox = document.getElementById("sqlite-max-space-box");
+const sqliteMaxSpaceToggle = document.getElementById("sqlite-max-space-toggle");
 const storageMaxSpace = document.getElementById("storage-max-space");
 const storageMaxUnit = document.getElementById("storage-max-unit");
+const enforceSpaceBtn = document.getElementById("enforce-space-btn");
+const enforceSpaceStatus = document.getElementById("enforce-space-status");
 const storageUsageText = document.getElementById("storage-usage-text");
 const storageBarFill = document.getElementById("storage-bar-fill");
 const envVarList = document.getElementById("env-var-list");
@@ -389,22 +408,27 @@ function updateEngineDisplay() {
   const isSqlite = engineSqliteRadio.checked;
   sqliteConfigBox.hidden = false;
   sqliteDirPath.disabled = !isSqlite;
-  sqliteResetPathBtn.disabled = !isSqlite;
+  if (browseSqliteDirBtn) browseSqliteDirBtn.disabled = !isSqlite;
   storageLocationPath.disabled = !isSqlite;
   browseDirBtn.disabled = !isSqlite;
 
   if (isSqlite) {
     sqliteConfigBox.classList.remove("disabled-box");
+    if (sqliteMaxSpaceBox) sqliteMaxSpaceBox.classList.remove("disabled-box");
   } else {
     sqliteConfigBox.classList.add("disabled-box");
+    if (sqliteMaxSpaceBox) sqliteMaxSpaceBox.classList.add("disabled-box");
   }
+  if (sqliteMaxSpaceToggle) sqliteMaxSpaceToggle.disabled = !isSqlite;
+  if (storageMaxSpace) storageMaxSpace.disabled = !isSqlite;
+  if (storageMaxUnit) storageMaxUnit.disabled = !isSqlite;
+  if (enforceSpaceBtn) enforceSpaceBtn.disabled = !isSqlite;
 
   const dbEngineInput = envVarList.querySelector('.env-val-input[data-key="DATABASE_ENGINE"]');
   if (dbEngineInput) {
     dbEngineInput.value = isSqlite ? "sqlite" : "supabase";
   }
 
-  // Disable SQLITE_DB_PATH in .env list if supabase
   const sqliteDbPathInput = envVarList.querySelector('.env-val-input[data-key="SQLITE_DB_PATH"]');
   if (sqliteDbPathInput) {
     sqliteDbPathInput.disabled = !isSqlite;
@@ -422,16 +446,34 @@ function updateEngineDisplay() {
 let engineUpdating = false;
 async function onEngineChanged() {
   if (engineUpdating) return;
-  engineUpdating = true;
-  const newEngine = engineSupabaseRadio.checked ? "supabase" : "sqlite";
-  updateEngineDisplay();
 
+  if (engineSqliteRadio.checked) {
+    // Open modal directly to ask user for directory path & migration choice
+    const currentPath = (sqliteDirPath.value || storageLocationPath.value || "").trim();
+    if (modalDirInput) {
+      modalDirInput.value = currentPath;
+    }
+    modalErrorMsg.hidden = true;
+    modalProgressWrap.hidden = true;
+    modalMigrateBtn.disabled = false;
+    modalSkipBtn.disabled = false;
+    modalCancelBtn.disabled = false;
+    migrationModal.hidden = false;
+    if (modalDirInput) {
+      setTimeout(() => modalDirInput.focus(), 50);
+    }
+    return;
+  }
+
+  // Switched back to Supabase
+  engineUpdating = true;
+  updateEngineDisplay();
   sessionStorage.setItem("active_view", "settings");
   try {
     await fetch("/viewer/env", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ variables: { DATABASE_ENGINE: newEngine } })
+      body: JSON.stringify({ variables: { DATABASE_ENGINE: "supabase" } }),
     });
   } catch (err) {
     console.error("Could not update DATABASE_ENGINE in backend/.env", err);
@@ -443,93 +485,397 @@ async function onEngineChanged() {
 engineSupabaseRadio.addEventListener("change", onEngineChanged);
 engineSqliteRadio.addEventListener("change", onEngineChanged);
 
+modalCancelBtn.addEventListener("click", () => {
+  migrationModal.hidden = true;
+  engineSupabaseRadio.checked = true;
+  updateEngineDisplay();
+});
+
+modalSkipBtn.addEventListener("click", async () => {
+  if (engineUpdating) return;
+  const chosenPath = (modalDirInput ? modalDirInput.value : sqliteDirPath.value).trim();
+  if (!chosenPath) {
+    modalErrorMsg.textContent = "Please enter or browse a folder path for SQLite storage.";
+    modalErrorMsg.hidden = false;
+    if (modalDirInput) modalDirInput.focus();
+    return;
+  }
+
+  engineUpdating = true;
+  modalSkipBtn.disabled = true;
+  modalMigrateBtn.disabled = true;
+  modalCancelBtn.disabled = true;
+
+  sessionStorage.setItem("active_view", "settings");
+  try {
+    await fetch("/viewer/env", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        variables: {
+          DATABASE_ENGINE: "sqlite",
+          SQLITE_DB_PATH: chosenPath,
+        },
+      }),
+    });
+    window.location.reload();
+  } catch (err) {
+    modalErrorMsg.textContent = "Failed to update configuration: " + err.message;
+    modalErrorMsg.hidden = false;
+    modalSkipBtn.disabled = false;
+    modalMigrateBtn.disabled = false;
+    modalCancelBtn.disabled = false;
+    engineUpdating = false;
+  }
+});
+
+modalMigrateBtn.addEventListener("click", async () => {
+  if (engineUpdating) return;
+  const chosenPath = (modalDirInput ? modalDirInput.value : sqliteDirPath.value).trim();
+  if (!chosenPath) {
+    modalErrorMsg.textContent = "Please enter or browse a folder path before migrating data.";
+    modalErrorMsg.hidden = false;
+    if (modalDirInput) modalDirInput.focus();
+    return;
+  }
+
+  engineUpdating = true;
+  modalMigrateBtn.disabled = true;
+  modalSkipBtn.disabled = true;
+  modalCancelBtn.disabled = true;
+  modalErrorMsg.hidden = true;
+  modalProgressWrap.hidden = false;
+  modalProgressBar.style.width = "20%";
+  modalProgressText.textContent = "Saving directory path and connecting to Supabase...";
+
+  try {
+    // 1. Save SQLITE_DB_PATH first so backend migration knows the user-selected path
+    await fetch("/viewer/env", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variables: { SQLITE_DB_PATH: chosenPath } }),
+    });
+
+    modalProgressBar.style.width = "50%";
+    modalProgressText.textContent = "Migrating database records & embeddings...";
+
+    // 2. Run backend migration
+    const resp = await fetch("/viewer/migrate-db", { method: "POST" });
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      throw new Error(errData.detail || "Database migration failed on server");
+    }
+    const res = await resp.json();
+
+    modalProgressBar.style.width = "90%";
+    modalProgressText.textContent = "Switching active engine to SQLite...";
+
+    // 3. Switch engine to sqlite
+    await fetch("/viewer/env", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variables: { DATABASE_ENGINE: "sqlite" } }),
+    });
+
+    modalProgressBar.style.width = "100%";
+    modalProgressText.textContent = "Migration complete! Reloading...";
+    sessionStorage.setItem("active_view", "settings");
+    setTimeout(() => { window.location.reload(); }, 600);
+  } catch (err) {
+    modalProgressWrap.hidden = true;
+    modalErrorMsg.textContent = err.message || "Failed to migrate database";
+    modalErrorMsg.hidden = false;
+    modalMigrateBtn.disabled = false;
+    modalSkipBtn.disabled = false;
+    modalCancelBtn.disabled = false;
+    engineUpdating = false;
+  }
+});
+
 const storageLocationPath = document.getElementById("storage-location-path");
 const browseDirBtn = document.getElementById("browse-dir-btn");
 const dirPickerInput = document.getElementById("dir-picker-input");
 
-sqliteResetPathBtn.addEventListener("click", () => {
-  const def = "backend/.local/team_memory.db";
-  sqliteDirPath.value = def;
-  storageLocationPath.value = def;
-});
+function applyChosenPath(chosenPath) {
+  if (!chosenPath) return;
+  const pathStr = String(chosenPath).trim();
+  if (modalDirInput) {
+    modalDirInput.value = pathStr;
+  }
+  if (sqliteDirPath) {
+    sqliteDirPath.value = pathStr;
+  }
+  if (storageLocationPath) {
+    storageLocationPath.value = pathStr;
+  }
+  const envInput = envVarList.querySelector('.env-val-input[data-key="SQLITE_DB_PATH"]');
+  if (envInput) envInput.value = pathStr;
+}
 
 sqliteDirPath.addEventListener("input", () => {
   storageLocationPath.value = sqliteDirPath.value;
+  if (modalDirInput) modalDirInput.value = sqliteDirPath.value;
+  const envInput = envVarList.querySelector('.env-val-input[data-key="SQLITE_DB_PATH"]');
+  if (envInput) envInput.value = sqliteDirPath.value;
 });
 storageLocationPath.addEventListener("input", () => {
   sqliteDirPath.value = storageLocationPath.value;
+  if (modalDirInput) modalDirInput.value = storageLocationPath.value;
+  const envInput = envVarList.querySelector('.env-val-input[data-key="SQLITE_DB_PATH"]');
+  if (envInput) envInput.value = storageLocationPath.value;
 });
+if (modalDirInput) {
+  modalDirInput.addEventListener("input", () => {
+    sqliteDirPath.value = modalDirInput.value;
+    storageLocationPath.value = modalDirInput.value;
+    const envInput = envVarList.querySelector('.env-val-input[data-key="SQLITE_DB_PATH"]');
+    if (envInput) envInput.value = modalDirInput.value;
+  });
+}
 
-browseDirBtn.addEventListener("click", async () => {
+async function pickDirectory() {
   if (window.showDirectoryPicker) {
     try {
       const handle = await window.showDirectoryPicker();
-      const chosenPath = `${handle.name}/team_memory.db`;
-      storageLocationPath.value = chosenPath;
-      sqliteDirPath.value = chosenPath;
-    } catch (err) {
-      if (err.name !== "AbortError") {
-        dirPickerInput.click();
+      if (handle && handle.name) {
+        applyChosenPath(`${handle.name}/team_memory.db`);
+        return;
       }
+    } catch (err) {
+      if (err.name === "AbortError") return;
     }
-  } else {
-    dirPickerInput.click();
   }
-});
 
-dirPickerInput.addEventListener("change", () => {
-  if (dirPickerInput.files.length > 0) {
-    const file = dirPickerInput.files[0];
-    const path = file.webkitRelativePath ? file.webkitRelativePath.split("/")[0] : file.name;
-    const finalPath = `${path}/team_memory.db`;
-    storageLocationPath.value = finalPath;
-    sqliteDirPath.value = finalPath;
+  // Fallback: prompt user for folder or database file path
+  const current = (modalDirInput ? modalDirInput.value : "") || (sqliteDirPath ? sqliteDirPath.value : "") || "backend/.local/team_memory.db";
+  const userEntered = prompt("Enter local SQLite storage folder or file path:", current);
+  if (userEntered && userEntered.trim()) {
+    applyChosenPath(userEntered.trim());
   }
-});
+}
+
+browseDirBtn.addEventListener("click", pickDirectory);
+if (browseSqliteDirBtn) browseSqliteDirBtn.addEventListener("click", pickDirectory);
+if (modalBrowseBtn) modalBrowseBtn.addEventListener("click", pickDirectory);
+if (sqliteQuickLocalBtn) {
+  sqliteQuickLocalBtn.addEventListener("click", () => applyChosenPath("backend/.local/team_memory.db"));
+}
+if (modalQuickLocalBtn) {
+  modalQuickLocalBtn.addEventListener("click", () => applyChosenPath("backend/.local/team_memory.db"));
+}
 
 remindersToggle.addEventListener("change", () => {
   remindersLeadBox.style.opacity = remindersToggle.checked ? "1" : "0.45";
   remindersLeadBox.style.pointerEvents = remindersToggle.checked ? "auto" : "none";
 });
 
+let currentSqliteUsedBytes = 0;
+let currentSqlitePayloadBytes = 0;
+let currentSqliteFileBytes = 0;
+
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return "0 KB";
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 function updateStorageBar() {
   const maxVal = parseFloat(storageMaxSpace.value) || 500;
-  const unit = storageMaxUnit.value;
-  const maxMB = unit === "GB" ? maxVal * 1024 : maxVal;
-  const simulatedUsedMB = 14.2;
-  const pct = Math.min(100, Math.max(0.5, (simulatedUsedMB / maxMB) * 100));
-  storageUsageText.textContent = `${simulatedUsedMB} MB / ${maxVal} ${unit} (${pct.toFixed(1)}%)`;
+  const unit = storageMaxUnit.value || "MB";
+  const multiplier = unit === "GB" ? 1024 * 1024 * 1024 : (unit === "KB" ? 1024 : 1024 * 1024);
+  const maxBytes = Math.max(1, maxVal * multiplier);
+
+  // If user sets quota < 256KB, measure against data payload so empty schema/indexes don't overflow
+  const isPayloadMode = maxBytes < 262144 && currentSqlitePayloadBytes > 0;
+  const activeBytes = isPayloadMode ? currentSqlitePayloadBytes : (currentSqliteUsedBytes || currentSqliteFileBytes);
+  const pct = Math.min(100, Math.max(0.5, (activeBytes / maxBytes) * 100));
+
+  if (isPayloadMode) {
+    storageUsageText.textContent = `Payload: ${formatBytes(activeBytes)} / ${maxVal} ${unit} (${((activeBytes / maxBytes) * 100).toFixed(1)}%) • Disk: ${formatBytes(currentSqliteFileBytes)}`;
+  } else {
+    storageUsageText.textContent = `${formatBytes(activeBytes)} / ${maxVal} ${unit} (${((activeBytes / maxBytes) * 100).toFixed(1)}%)`;
+  }
   storageBarFill.style.width = `${pct}%`;
 }
+
+async function refreshStorageStatus() {
+  try {
+    const res = await fetch("/viewer/storage/status");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.retention_value) storageRetentionTime.value = data.retention_value;
+    if (data.retention_unit) storageRetentionUnit.value = data.retention_unit;
+    if (typeof data.sqlite_max_space_enabled === "boolean" && sqliteMaxSpaceToggle) {
+      sqliteMaxSpaceToggle.checked = data.sqlite_max_space_enabled;
+    }
+    if (data.sqlite_max_space_value) storageMaxSpace.value = data.sqlite_max_space_value;
+    if (data.sqlite_max_space_unit) storageMaxUnit.value = data.sqlite_max_space_unit;
+    if (data.sqlite && typeof data.sqlite.used_bytes === "number") {
+      currentSqliteUsedBytes = data.sqlite.used_bytes;
+      currentSqliteFileBytes = data.sqlite.file_bytes || data.sqlite.used_bytes;
+      currentSqlitePayloadBytes = data.sqlite.payload_bytes || 0;
+    }
+    updateStorageBar();
+  } catch {}
+}
+
 storageMaxSpace.addEventListener("input", updateStorageBar);
 storageMaxUnit.addEventListener("change", updateStorageBar);
+
+if (pruneTimelineBtn) {
+  pruneTimelineBtn.addEventListener("click", async () => {
+    const unit = storageRetentionUnit.value;
+    const val = parseInt(storageRetentionTime.value, 10) || 90;
+    const targetEngine = pruneTargetEngine ? pruneTargetEngine.value : "active";
+    if (unit === "indefinite") {
+      pruneTimelineStatus.textContent = "Retention is set to Indefinite (Keep Forever). Select a timeline unit to delete older data.";
+      return;
+    }
+    pruneTimelineBtn.disabled = true;
+    pruneTimelineStatus.textContent = "Deleting old records...";
+    try {
+      const resp = await fetch("/viewer/storage/prune-timeline", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          engine: targetEngine,
+          retention_value: val,
+          retention_unit: unit,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data.detail || "Failed to delete older records");
+      }
+      const del = data.deleted || {};
+      const total = Object.values(del).reduce((a, b) => a + (Number(b) || 0), 0);
+      pruneTimelineStatus.textContent = `✓ Pruned (${data.engine}): ${total} records removed (messages: ${del.messages || 0}, memories: ${del.memories || 0}, commitments: ${del.commitments || 0}, decisions: ${del.decisions || 0}).`;
+      if (data.sqlite && typeof data.sqlite.used_bytes === "number") {
+        currentSqliteUsedBytes = data.sqlite.used_bytes;
+        updateStorageBar();
+      }
+    } catch (err) {
+      pruneTimelineStatus.textContent = `❌ Error: ${err.message}`;
+    } finally {
+      pruneTimelineBtn.disabled = false;
+    }
+  });
+}
+
+async function applyAndEnforceSqliteSpace() {
+  if (!engineSqliteRadio.checked) return;
+  const maxVal = parseFloat(storageMaxSpace.value);
+  const unit = storageMaxUnit.value || "MB";
+  const enabled = sqliteMaxSpaceToggle ? sqliteMaxSpaceToggle.checked : true;
+  if (!maxVal || maxVal <= 0) {
+    enforceSpaceStatus.textContent = "❌ Please enter a valid maximum space greater than 0.";
+    return;
+  }
+  if (enforceSpaceBtn) enforceSpaceBtn.disabled = true;
+  enforceSpaceStatus.textContent = "Applying SQLite space limit and checking usage...";
+  try {
+    const resp = await fetch("/viewer/storage/enforce-space", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        max_space_value: maxVal,
+        max_space_unit: unit,
+        enabled: enabled,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(data.detail || "Failed to enforce SQLite space limit");
+    }
+    if (data.sqlite && typeof data.sqlite.used_bytes === "number") {
+      currentSqliteUsedBytes = data.sqlite.used_bytes;
+      currentSqliteFileBytes = data.sqlite.file_bytes || data.sqlite.used_bytes;
+      currentSqlitePayloadBytes = data.sqlite.payload_bytes || 0;
+      updateStorageBar();
+    }
+    const r = data.result || {};
+    const evicted = (r.deleted_messages || 0) + (r.deleted_memories || 0) + (r.deleted_commitments || 0) + (r.deleted_decisions || 0) + (r.deleted_documents || 0);
+    if (!enabled) {
+      enforceSpaceStatus.textContent = "✓ SQLite max space auto-eviction disabled.";
+    } else if (evicted > 0) {
+      enforceSpaceStatus.textContent = `✓ Limit enforced! Deleted oldest data (${r.deleted_messages || 0} messages, ${r.deleted_memories || 0} memories) to meet ${maxVal} ${unit} limit.`;
+    } else {
+      enforceSpaceStatus.textContent = `✓ Limit active (${maxVal} ${unit}). Current SQLite usage is within limit.`;
+    }
+    loadEnvVars();
+  } catch (err) {
+    enforceSpaceStatus.textContent = `❌ Error: ${err.message}`;
+  } finally {
+    if (enforceSpaceBtn) enforceSpaceBtn.disabled = !engineSqliteRadio.checked;
+  }
+}
+
+if (enforceSpaceBtn) {
+  enforceSpaceBtn.addEventListener("click", () => {
+    if (sqliteMaxSpaceToggle && !sqliteMaxSpaceToggle.checked) {
+      sqliteMaxSpaceToggle.checked = true;
+    }
+    applyAndEnforceSqliteSpace();
+  });
+}
+if (sqliteMaxSpaceToggle) {
+  sqliteMaxSpaceToggle.addEventListener("change", applyAndEnforceSqliteSpace);
+}
 
 let migrationInProgress = false;
 startMigrationBtn.addEventListener("click", async () => {
   if (migrationInProgress) return;
+  const chosenPath = (sqliteDirPath.value || storageLocationPath.value || "").trim();
+  if (!chosenPath) {
+    alert("Please select or enter a SQLite storage directory path first.");
+    sqliteDirPath.focus();
+    return;
+  }
+
   migrationInProgress = true;
   startMigrationBtn.disabled = true;
   migrationLogBox.hidden = false;
-  migrationProgressBar.style.width = "5%";
-  migrationLog.textContent = "[1/7] Connecting to Supabase PostgreSQL source...\n";
+  migrationProgressBar.style.width = "10%";
+  migrationLog.textContent = `[1/4] Preparing SQLite database at ${chosenPath}...\n`;
 
-  const steps = [
-    { pct: 20, text: "[2/7] Checking schema & initializing SQLite tables at " + (sqliteDirPath.value || "backend/.local/team_memory.db") + "..." },
-    { pct: 35, text: "[3/7] Migrating `tenants` and `rooms` tables..." },
-    { pct: 55, text: "[4/7] Migrating `messages` history..." },
-    { pct: 75, text: "[5/7] Migrating `commitments` & `decisions`..." },
-    { pct: 90, text: "[6/7] Migrating `memories` & vector embeddings..." },
-    { pct: 100, text: "[7/7] Verifying row counts and foreign keys.\n✓ Migration complete! All records successfully transferred to SQLite." }
-  ];
+  try {
+    await fetch("/viewer/env", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variables: { SQLITE_DB_PATH: chosenPath } }),
+    });
 
-  for (const step of steps) {
-    await new Promise(r => setTimeout(r, 600));
-    migrationProgressBar.style.width = `${step.pct}%`;
-    migrationLog.textContent += step.text + "\n";
-    migrationLog.scrollTop = migrationLog.scrollHeight;
+    migrationProgressBar.style.width = "40%";
+    migrationLog.textContent += "[2/4] Connecting to Supabase and reading tables...\n";
+
+    const resp = await fetch("/viewer/migrate-db", { method: "POST" });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || "Server migration error");
+    }
+    const res = await resp.json();
+
+    migrationProgressBar.style.width = "80%";
+    migrationLog.textContent += "[3/4] Migrating records into SQLite schema:\n";
+    if (res.counts) {
+      Object.entries(res.counts).forEach(([tbl, cnt]) => {
+        migrationLog.textContent += `  • ${tbl}: ${cnt} rows\n`;
+      });
+    }
+
+    migrationProgressBar.style.width = "100%";
+    migrationLog.textContent += `[4/4] ✓ Migration complete! Data saved at ${res.target_path || chosenPath}\n`;
+  } catch (err) {
+    migrationLog.textContent += `\n❌ Migration failed: ${err.message}\n`;
+  } finally {
+    startMigrationBtn.disabled = false;
+    migrationInProgress = false;
   }
-  startMigrationBtn.disabled = false;
-  migrationInProgress = false;
 });
 
 function createEnvRow(key = "", val = "", optionalText = "") {
@@ -642,6 +988,10 @@ async function loadEnvVars() {
     }
   }
 
+  const pathVal = loadedVars["SQLITE_DB_PATH"] || "";
+  sqliteDirPath.value = pathVal;
+  storageLocationPath.value = pathVal;
+
   // Populate rows
   Object.entries(loadedVars).forEach(([key, val]) => {
     const optText = optionalMap[key] || "";
@@ -730,13 +1080,31 @@ downloadEnvBtn.addEventListener("click", () => {
 });
 
 saveSettingsBtn.addEventListener("click", async () => {
+  const maxEnabled = sqliteMaxSpaceToggle ? sqliteMaxSpaceToggle.checked : false;
+  const maxVal = parseFloat(storageMaxSpace.value) || 500;
+  const maxUnit = storageMaxUnit.value || "MB";
+
+  const setEnvField = (k, v) => {
+    const inp = envVarList.querySelector(`.env-val-input[data-key="${k}"]`);
+    if (inp) inp.value = String(v);
+  };
+  setEnvField("STORAGE_RETENTION_VALUE", storageRetentionTime.value || "90");
+  setEnvField("STORAGE_RETENTION_UNIT", storageRetentionUnit.value || "days");
+  setEnvField("SQLITE_MAX_SPACE_ENABLED", maxEnabled ? "true" : "false");
+  setEnvField("SQLITE_MAX_SPACE_VALUE", String(maxVal));
+  setEnvField("SQLITE_MAX_SPACE_UNIT", maxUnit);
+
   await saveEnvToServer();
+  if (engineSqliteRadio.checked && maxEnabled) {
+    await applyAndEnforceSqliteSpace();
+  }
 
   const settingsData = {
     dbEngine: engineSqliteRadio.checked ? "sqlite" : "supabase",
     sqlitePath: sqliteDirPath.value.trim(),
     retentionTime: storageRetentionTime.value,
     retentionUnit: storageRetentionUnit.value,
+    sqliteMaxSpaceEnabled: maxEnabled,
     maxSpace: storageMaxSpace.value,
     maxSpaceUnit: storageMaxUnit.value
   };
@@ -766,6 +1134,9 @@ function loadSavedSettings() {
     // Reminder policy is scoped and backend-managed; never restore browser-local authority.
     if (data.retentionTime) storageRetentionTime.value = data.retentionTime;
     if (data.retentionUnit) storageRetentionUnit.value = data.retentionUnit;
+    if (typeof data.sqliteMaxSpaceEnabled === "boolean" && sqliteMaxSpaceToggle) {
+      sqliteMaxSpaceToggle.checked = data.sqliteMaxSpaceEnabled;
+    }
     if (data.maxSpace) storageMaxSpace.value = data.maxSpace;
     if (data.maxSpaceUnit) storageMaxUnit.value = data.maxSpaceUnit;
     updateStorageBar();
@@ -774,6 +1145,7 @@ function loadSavedSettings() {
 
 loadEnvVars();
 loadSavedSettings();
+refreshStorageStatus();
 updateEngineDisplay();
 
 if (sessionStorage.getItem("active_view") === "settings" || window.location.hash === "#settings") {

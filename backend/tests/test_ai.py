@@ -45,6 +45,12 @@ def input_detail(room_id):
             "agent_names": ["team-memory-client"]}
 
 
+def test_clean_reply_text_removes_source_tags():
+    from app.services.ai_service import clean_reply_text
+    raw = "The meetings are at 5:00 PM tomorrow. [source:[REDACTED]] [source:[REDACTED]] [source:3b48f6c4-1a2b-4c3d-8e5f-123456789abc]"
+    assert clean_reply_text(raw) == "The meetings are at 5:00 PM tomorrow."
+
+
 @pytest.mark.parametrize("method", ["get", "post"])
 def test_ai_endpoints_require_existing_local_authentication(method):
     with TestClient(app) as client:

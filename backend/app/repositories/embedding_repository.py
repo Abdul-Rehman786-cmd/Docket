@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from app.core.http_clients import database_client
 from app.repositories.record_repository import _authorized_room, _rest_url, _supabase_headers
+from app.repositories import sqlite_embeddings
 
 
 async def authorized_room_ids(settings, client, switch_room_id=None):
@@ -32,6 +33,8 @@ async def _rpc(settings, name, payload, client):
 
 @database_client
 async def claim_embeddings(settings, *, client):
+    if settings.effective_database_engine == "sqlite":
+        return await sqlite_embeddings.claim_embeddings(settings)
     rooms = await authorized_room_ids(settings, client)
     rows = await _rpc(settings, "claim_memory_embeddings", {
         "p_tenant_id": str(settings.switch_tenant_id), "p_room_ids": rooms, "p_limit": 8,
@@ -46,6 +49,8 @@ async def claim_embeddings(settings, *, client):
 
 @database_client
 async def finish_embedding(settings, job, *, vector=None, error=None, client):
+    if settings.effective_database_engine == "sqlite":
+        return await sqlite_embeddings.finish_embedding(settings, job, vector=vector, error=error)
     rooms = await authorized_room_ids(settings, client)
     if job["tenant_id"] != str(settings.switch_tenant_id) or job["room_id"] not in rooms:
         raise HTTPException(403, "Room is not authorized")
@@ -61,6 +66,8 @@ async def finish_embedding(settings, job, *, vector=None, error=None, client):
 
 @database_client
 async def search_embeddings(settings, vector, *, switch_room_id=None, client):
+    if settings.effective_database_engine == "sqlite":
+        return await sqlite_embeddings.search_embeddings(settings, vector, switch_room_id=switch_room_id)
     rooms = await authorized_room_ids(settings, client, switch_room_id)
     matches = []
     for room in rooms:
@@ -76,6 +83,8 @@ async def search_embeddings(settings, vector, *, switch_room_id=None, client):
 
 @database_client
 async def source_context(settings, matches, *, client):
+    if settings.effective_database_engine == "sqlite":
+        return await sqlite_embeddings.source_context(settings, matches)
     rooms = await authorized_room_ids(settings, client)
     if any(row.get("room_id") not in rooms for row in matches):
         raise HTTPException(403, "Room is not authorized")

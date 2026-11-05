@@ -12,6 +12,11 @@ env/
 *.p12
 *.pfx
 *credentials*.json
+# Database files
+*.db
+*.sqlite3
+*.db-shm
+*.db-wal
 # Python, Node, IDE
 __pycache__/
 *.py[cod]

@@ -117,6 +117,19 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
 .btn-delete { color: #a83232; border-color: #eed5d5; }
 .btn-delete:hover { background: #fbf1f1; border-color: #e5b3b3; }
 
+.modal-overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(18, 30, 27, 0.65); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 9999; padding: 20px; box-sizing: border-box; }
+.modal-overlay[hidden] { display: none; }
+.modal-card { background: #ffffff; border-radius: 14px; max-width: 540px; width: 100%; padding: 26px; box-shadow: 0 16px 40px rgba(0, 0, 0, 0.25); border: 1px solid #d4e2dc; }
+.modal-header { margin-bottom: 12px; }
+.modal-title { font-size: 18px; font-weight: 700; color: #1f3b35; margin: 0; }
+.modal-desc { font-size: 13.5px; line-height: 1.55; color: #415954; margin: 0 0 16px; }
+.modal-path-box { background: #f3f7f5; border: 1px solid #d8e5e0; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 4px; }
+.modal-path-label { font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .5px; color: #5a7570; }
+.modal-target-path { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12.5px; color: #165b51; word-break: break-all; }
+.modal-progress-wrap { margin: 14px 0; }
+.modal-progress-text { display: block; font-size: 12px; color: #3e5953; margin-top: 6px; font-style: italic; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
+
 footer { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; padding: 24px 0 40px; color: #94a3a3; font-size: 11px; }
 .footer-dot { width: 5px; height: 5px; background: #98b2a3; }
 .footer-separator { color: #bcc9c4; }

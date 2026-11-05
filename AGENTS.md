@@ -18,6 +18,7 @@ Read `architecture.md` and `README.md` before creating or changing files. Work i
 - Keep ALL schema migrations under `supabase/migrations/` using timestamped SQL names. Never change an already-applied migration; write a new one. Ask before applying destructive SQL.
 - Add tests for endpoints and security. No new endpoint for private data without authentication and authorization.
 - Avoid unnecessary dependencies; update `README.md` and `architecture.md` when interfaces change.
+- For all the database insertion and everything make sure to follow the ATOM principles
 
 ## MCP guidance
 - Use documentation MCPs to check vendor APIs before coding. MCP installation does NOT mean a live database or service is connected.

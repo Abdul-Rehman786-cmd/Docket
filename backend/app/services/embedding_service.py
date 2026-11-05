@@ -46,6 +46,7 @@ class EmbeddingWorker:
         while True:
             settings = get_settings()
             delay = 2
+<<<<<<< HEAD
             reason=('flag_disabled' if not settings.local_embeddings_enabled else 'database_not_configured' if not settings.supabase_configured
                     else 'scope_not_configured' if not settings.switch_tenant_id or not settings.allowed_switch_rooms else None)
             state=reason or 'running'
@@ -53,6 +54,14 @@ class EmbeddingWorker:
                 feature_event('embedding','enabled' if reason is None else ('disabled' if reason=='flag_disabled' else 'blocked'),reason=reason)
                 previous=state
             if settings.local_embeddings_enabled and settings.supabase_configured and settings.switch_tenant_id and settings.allowed_switch_rooms:
+=======
+            db_ready = (
+                settings.sqlite_configured
+                if settings.effective_database_engine == "sqlite"
+                else settings.supabase_configured
+            )
+            if settings.local_embeddings_enabled and db_ready and settings.switch_tenant_id and settings.allowed_switch_rooms:
+>>>>>>> bca86dfbe1ba6e11e2fae1582f3357629179ae82
                 try:
                     await self.process_once(settings)
                 except (HTTPException, EmbeddingError):

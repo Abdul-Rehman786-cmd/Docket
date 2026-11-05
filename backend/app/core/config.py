@@ -72,10 +72,28 @@ class Settings(BaseSettings):
     switch_ai_sender_ids: str = Field(default="", repr=False)
     switch_backend_url: str = Field(default="http://127.0.0.1:8000", repr=False)
     switch_reply_to_discord: bool = Field(default=True, validation_alias=AliasChoices("SWITCH_REPLY_TO_DISCORD"))
-    database_engine: str = Field(default="sqlite", validation_alias=AliasChoices("DATABASE_ENGINE", "DB_ENGINE"))
-    sqlite_db_path: str = Field(default="backend/.local/team_memory.db", validation_alias=AliasChoices("SQLITE_DB_PATH", "SQLITE_PATH"))
+    database_engine: str = Field(default="", validation_alias=AliasChoices("DATABASE_ENGINE", "DB_ENGINE"))
+    sqlite_db_path: str = Field(default="", validation_alias=AliasChoices("SQLITE_DB_PATH", "SQLITE_PATH"))
+    storage_retention_value: int = Field(default=90, validation_alias=AliasChoices("STORAGE_RETENTION_VALUE"))
+    storage_retention_unit: str = Field(default="days", validation_alias=AliasChoices("STORAGE_RETENTION_UNIT"))
+    sqlite_max_space_enabled: bool = Field(default=False, validation_alias=AliasChoices("SQLITE_MAX_SPACE_ENABLED"))
+    sqlite_max_space_value: float = Field(default=500.0, validation_alias=AliasChoices("SQLITE_MAX_SPACE_VALUE"))
+    sqlite_max_space_unit: str = Field(default="MB", validation_alias=AliasChoices("SQLITE_MAX_SPACE_UNIT"))
     log_discord_messages: bool = False
     local_embeddings_enabled: bool = True
+
+    @property
+    def effective_database_engine(self) -> str:
+        engine = (self.database_engine or "").strip().lower()
+        if engine in ("sqlite", "supabase"):
+            return engine
+        if self.supabase_configured:
+            return "supabase"
+        return "sqlite"
+
+    @property
+    def sqlite_configured(self) -> bool:
+        return bool(self.sqlite_db_path.strip())
 
     @property
     def supabase_configured(self) -> bool:
