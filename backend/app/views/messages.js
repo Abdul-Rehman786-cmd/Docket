@@ -1102,9 +1102,6 @@ saveSettingsBtn.addEventListener("click", async () => {
   const settingsData = {
     dbEngine: engineSqliteRadio.checked ? "sqlite" : "supabase",
     sqlitePath: sqliteDirPath.value.trim(),
-    remindersEnabled: remindersToggle.checked,
-    reminderLeadTime: reminderLeadTime.value,
-    reminderLeadUnit: reminderLeadUnit.value,
     retentionTime: storageRetentionTime.value,
     retentionUnit: storageRetentionUnit.value,
     sqliteMaxSpaceEnabled: maxEnabled,
@@ -1134,13 +1131,7 @@ function loadSavedSettings() {
       sqliteDirPath.value = data.sqlitePath;
       storageLocationPath.value = data.sqlitePath;
     }
-    if (typeof data.remindersEnabled === "boolean") {
-      remindersToggle.checked = data.remindersEnabled;
-      remindersLeadBox.style.opacity = data.remindersEnabled ? "1" : "0.45";
-      remindersLeadBox.style.pointerEvents = data.remindersEnabled ? "auto" : "none";
-    }
-    if (data.reminderLeadTime) reminderLeadTime.value = data.reminderLeadTime;
-    if (data.reminderLeadUnit) reminderLeadUnit.value = data.reminderLeadUnit;
+    // Reminder policy is scoped and backend-managed; never restore browser-local authority.
     if (data.retentionTime) storageRetentionTime.value = data.retentionTime;
     if (data.retentionUnit) storageRetentionUnit.value = data.retentionUnit;
     if (typeof data.sqliteMaxSpaceEnabled === "boolean" && sqliteMaxSpaceToggle) {

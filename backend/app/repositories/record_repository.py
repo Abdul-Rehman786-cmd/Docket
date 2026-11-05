@@ -79,7 +79,7 @@ async def check_database_connection(settings: Settings | None = None, *, client)
 
 
 @database_client
-async def storage_rpc_available(settings: Settings, *, client) -> bool:
+async def storage_rpc_available(settings: Settings, *, client, capture=False) -> bool:
     """Read-only PostgREST schema preflight; never attempts a speculative write."""
     if settings.effective_database_engine == "sqlite":
         sqlite_records.check_database_connection(settings)
@@ -88,7 +88,10 @@ async def storage_rpc_available(settings: Settings, *, client) -> bool:
         response = await client.get(_rest_url(settings,""),
             headers={**_supabase_headers(settings),"Accept":"application/openapi+json"},timeout=10)
         response.raise_for_status()
-        return "/rpc/store_message_extraction" in response.json().get("paths",{})
+        operation=response.json().get('paths',{}).get('/rpc/store_message_extraction')
+        if capture:
+            return isinstance(operation,dict) and 'p_capture' in json.dumps(operation)
+        return operation is not None
     except (httpx.HTTPError,ValueError,TypeError,AttributeError):
         raise HTTPException(503,"Storage schema verification unavailable") from None
 
@@ -266,12 +269,16 @@ async def persist_extraction(
     for field in ("switch_author_id", "thread_id", "workspace_id", "channel_id",
                   "external_message_id", "external_author_id"):
         source[field] = redact_source_identifier(meta.get(field), settings)
+    rpc_payload={"p_tenant_id":str(tenant_id),"p_switch_room_id":switch_room_id,"p_source":source,"p_items":items}
+    if meta.get('commitment_capture'):
+        # A required fifth argument selects the reviewed overload. An old hosted
+        # four-argument function cannot silently acknowledge an owner-less task.
+        rpc_payload['p_capture']=True
     try:
         response = await client.post(
             _rest_url(settings, "rpc/store_message_extraction"),
             headers=_supabase_headers(settings),
-            json={"p_tenant_id": str(tenant_id), "p_switch_room_id": switch_room_id,
-                  "p_source": source, "p_items": items},
+            json=rpc_payload,
             timeout=10,
         )
         response.raise_for_status()
@@ -282,10 +289,7 @@ async def persist_extraction(
             raise ValueError("Invalid storage acknowledgement")
         return counts
     except (httpx.HTTPError, ValueError, TypeError) as err:
-        detail = f"{type(err).__name__}: {err}"
-        if isinstance(err, httpx.HTTPStatusError):
-            detail = f"status={err.response.status_code} body={err.response.text[:200]}"
-        logger.warning("Supabase store reason=database_write_failed detail=%s", detail)
+        logger.warning("Supabase store reason=database_write_failed")
         raise HTTPException(503, "database_write_failed") from None
 
 

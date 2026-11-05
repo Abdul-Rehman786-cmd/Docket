@@ -160,8 +160,9 @@ BEGIN
     passed := passed || jsonb_build_array('Duplicate searchable memory rejected');
     BEGIN
         DELETE FROM public.messages WHERE id=m1;
-        RAISE EXCEPTION 'Expected 23503: Source evidence deletion restricted';
-    EXCEPTION WHEN SQLSTATE '23503' THEN NULL;
+        RAISE EXCEPTION 'Expected constraint violation: Source evidence deletion restricted';
+    -- RESTRICT can report restrict_violation (23001); NO ACTION reports 23503.
+    EXCEPTION WHEN SQLSTATE '23503' OR SQLSTATE '23001' THEN NULL;
     END;
     passed := passed || jsonb_build_array('Source evidence deletion restricted');
     BEGIN

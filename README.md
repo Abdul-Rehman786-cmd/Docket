@@ -5,6 +5,18 @@ A project scaffold for **FastAPI + Supabase + React Native (Expo)** with a Switc
 The implemented flow receives Discord messages through Switch, journals human input durably, displays bounded redacted previews, and evaluates useful information through the existing private Codex runtime. Atomic storage and versioned embedding jobs are defined in the single consolidated development baseline. The hosted non-destructive upgrade is prepared for review and approval; never replay the baseline reset on the hosted database. FastAPI and the Switch listener run as separate processes. See [architecture.md](architecture.md) for runtime boundaries, recovery, storage, retrieval and reply behavior.
 
 ## Structure
+
+Content-free feature logs are enabled with `FEATURE_LOGS_ENABLED=true` (default). Restart the API/listener and look for `[feature]` events for disabled gates, queued work, persisted actions, replay/conflicts, embeddings and reminder outcomes. See [FEATURE_LOGGING.md](FEATURE_LOGGING.md) for event meanings and commands. Logs do not enable business features or prove unverified hosted/Discord delivery.
+
+
+Reminder planning, a durable Supabase outbox and a Switch notification dispatcher are implemented locally, disabled by default. The hosted read-only check found storage/embedding support but no exposed lifecycle/chat/reminder deployment. See [REMINDERS.md](REMINDERS.md) for defaults, approval requirements, recovery behavior and the single-worker deployment limit. No external reminder has been sent or verified. The viewer's reminder controls are read-only; policies are backend-managed.
+
+
+The commitment creation flow is **tag the bot → extract → save atomically in Supabase → embed the linked memory → scoped semantic search**. It uses Switch's existing `addressed` metadata and the delivered sender ID, with no registration, membership/mapping lookup, role setup or human/bot classification. Unresolved deadlines retain their wording with no invented timestamp. Confirmation follows durable cloud storage and says indexing is pending. Creation does not require lifecycle/reminder activation. See [SIMPLE_COMMITMENT_CAPTURE.md](SIMPLE_COMMITMENT_CAPTURE.md) for the current contract, verification and deployment steps. Existing lifecycle/history/reminder services and protected manual HTTP routes remain separately controlled.
+
+
+Commitment lifecycle management is implemented separately with scoped reads/actions, audit history, versions and atomic idempotency. New routes fail closed until trusted individual-user authentication is supplied. The additive migration is prepared for review, not deployed. See [COMMITMENT_MANAGEMENT.md](COMMITMENT_MANAGEMENT.md) for contracts and deployment dependencies.
+
 - `architecture.md`: design and boundaries.
 - `AGENTS.md`: mandatory AI development and security rules.
 - `backend/`: FastAPI MVC-inspired layers and tests.

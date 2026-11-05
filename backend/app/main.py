@@ -11,19 +11,24 @@ from app.controllers.records import router as records_router
 from app.controllers.viewer import router as viewer_router
 from app.repositories.message_receipts import MessageReceiptRepository
 from app.controllers.ai import router as ai_router
-from app.services.ai_service import AIService
+from app.services.ai_service import AIService, is_ai_configured
+from app.core.feature_logging import feature_event, startup_events
 from app.core.http_clients import HTTPClients, use_http_clients
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.repositories.record_repository import ensure_tenant_and_rooms_provisioned
 from app.services.viewer_service import ViewerHub
 from app.services.embedding_service import EmbeddingWorker
+from app.controllers.commitments import router as commitments_router
+from app.models.commitments import CommitmentError
+from app.services.reminder_worker import ReminderWorker
 from app.services.storage_service import StorageRetentionWorker
 
 
 @asynccontextmanager
 async def lifespan(application):
     configure_logging(get_settings())
+    startup_events(get_settings(),is_ai_configured(get_settings()))
     application.state.http_clients = HTTPClients()
     application.state.ai_service = AIService()
     application.state.viewer_hub = ViewerHub()
@@ -33,20 +38,25 @@ async def lifespan(application):
     application.state.retention_worker = StorageRetentionWorker(
         on_change=application.state.viewer_hub.publish
     )
+    application.state.reminder_worker = ReminderWorker()
     with use_http_clients(application.state.http_clients):
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             try:
                 await ensure_tenant_and_rooms_provisioned()
-            except Exception as exc:
-                logging.getLogger("uvicorn.error").warning("Startup auto-provision warning: %s", exc)
+            except Exception:
+                feature_event('storage','failed',reason='storage_unavailable')
+                logging.getLogger("uvicorn.error").warning("Startup auto-provision unavailable")
         application.state.ai_service.start_recovery()
         application.state.embedding_worker.start()
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             application.state.retention_worker.start()
+        application.state.reminder_worker.start()
     try:
         yield
     finally:
+        feature_event('startup','stopping')
         try:
+            await application.state.reminder_worker.close()
             await application.state.ai_service.close()
         finally:
             await application.state.retention_worker.close()
@@ -55,6 +65,7 @@ async def lifespan(application):
             application.state.message_receipts.on_change = None
             await application.state.http_clients.close()
             application.state.http_clients = None
+            feature_event('startup','stopped')
 
 
 app = FastAPI(title="Team Memory API", version="0.1.0", lifespan=lifespan)
@@ -64,6 +75,7 @@ app.include_router(records_router)
 app.include_router(messages_router)
 app.include_router(viewer_router)
 app.include_router(ai_router)
+app.include_router(commitments_router)
 
 
 @app.middleware("http")
@@ -71,7 +83,7 @@ async def prevent_message_caching(request, call_next):
     started = perf_counter()
     with use_http_clients(getattr(request.app.state, "http_clients", None)):
         response = await call_next(request)
-    if request.url.path.startswith(("/messages", "/ai")):
+    if request.url.path.startswith(("/messages", "/ai", "/api/v1/tenants/")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
     route = request.scope.get("route")
@@ -88,6 +100,11 @@ async def validation_error_handler(request, exc: RequestValidationError):
     # FastAPI's default 422 response echoes invalid input, which may contain chat secrets.
     logging.getLogger("team_memory").debug("Request validation rejected")
     return JSONResponse(status_code=422, content={"detail": "Invalid request payload"})
+
+
+@app.exception_handler(CommitmentError)
+async def commitment_error_handler(request, exc: CommitmentError):
+    return JSONResponse(status_code=exc.status, content={"detail": exc.code}, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health", tags=["health"])

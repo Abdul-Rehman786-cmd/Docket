@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketExce
 
 from app.core.config import BACKEND_DIR, Settings
 from app.models.messages import IncomingMessage, MessageReceipt, MessageStatus
+from app.core.feature_logging import feature_event
 from app.repositories.listener_state import ListenerState
 from app.services.message_service import message_reference
 
@@ -72,6 +73,7 @@ class SwitchListener:
         ])
         identity_ref = hashlib.sha256(identity.encode()).hexdigest()
         self.state = ListenerState.load(self.state_path, identity_ref)
+        self.registered_agent_name = None
 
     def socket_url(self, state: ListenerState | None = None, *, claim_rooms: bool = True) -> str:
         state = state or self.state
@@ -100,7 +102,8 @@ class SwitchListener:
     def http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             base_url=self.settings.switch_backend_url.rstrip("/") + "/",
-            headers={"X-Ingest-Token": self.settings.switch_ingest_token.get_secret_value()},
+            headers={"X-Ingest-Token": self.settings.switch_ingest_token.get_secret_value(),
+                     "X-Adapter-Token": self.settings.switch_adapter_token.get_secret_value()},
             timeout=10, trust_env=False, follow_redirects=False,
         )
 
@@ -162,6 +165,7 @@ class SwitchListener:
                 self.state.save(self.state_path)
                 covered = self.settings.allowed_switch_rooms.intersection(data.get("rooms", []))
                 logger.info("Switch connected; configured rooms covered=%d", len(covered))
+                feature_event('switch_listener','connected',rooms=len(covered))
                 if not covered:
                     logger.warning("No configured room is covered; check agent membership and other clients.")
             elif kind == "gap":
@@ -195,6 +199,11 @@ class SwitchListener:
                 payload = data.get("payload")
                 if not isinstance(payload, dict):
                     raise ListenerStopped("Switch sent an invalid message payload.")
+                targets=payload.get('mentioned_agent_ids')
+                if targets is not None and (not isinstance(targets,list) or len(targets)>20 or
+                    any(not isinstance(target,str) or not target or len(target)>512 or any(c.isspace() for c in target) for target in targets)):
+                    targets=[]  # Unsupported metadata denies tasks; preserve ordinary ingestion.
+                bot_flag=payload.get('sender_is_bot')
                 try:
                     message = IncomingMessage(
                         tenant_id=self.settings.switch_tenant_id, room_id=data["room_id"],
@@ -205,6 +214,10 @@ class SwitchListener:
                         workspace_id=payload.get("workspace_id"), channel_id=payload.get("channel_id"),
                         external_message_id=payload.get("external_message_id"),
                         external_author_id=payload.get("external_author_id"),
+                        registered_agent_id=self.settings.listener_agent_id,
+                        registered_agent_name=self.registered_agent_name,
+                        mentioned_agent_ids=targets,
+                        sender_is_bot=bot_flag if type(bot_flag) is bool else None,
                     )
                 except ValidationError:
                     raise ListenerStopped("Switch sent an invalid message; cursor was not advanced.") from None
@@ -223,6 +236,7 @@ class SwitchListener:
                 if receipt.message_ref != message_reference(message):
                     raise ListenerStopped("API receipt does not match the message; cursor was not advanced.")
                 logger.info("API acknowledged message ref=%s duplicate=%s", receipt.message_ref, receipt.duplicate)
+                feature_event('switch_listener','duplicate' if receipt.duplicate else 'acknowledged',reference=receipt.message_ref)
             self.state.cursor = sequence
             self.state.save(self.state_path)
 
@@ -245,6 +259,20 @@ class SwitchListener:
         async with self.http_client() as client:
             # Fail early for a wrong backend URL or credential; no message is consumed.
             await self.delivery_status(client)
+            # Only the separately enabled advanced action policy needs this.
+            # Simple creation uses Switch's addressed metadata, with no lookup.
+            if self.settings.automatic_commitments_enabled:
+                from app.services.switch_api import SwitchAPI, SwitchError
+                api=SwitchAPI(self.settings.switch_bridge_url,self.settings.listener_agent_id,
+                              self.settings.listener_api_key.get_secret_value())
+                try:
+                    async with api.http() as switch_client:
+                        detail=await api.operation(switch_client,'get_agent_detail',{'agent_id':self.settings.listener_agent_id})
+                        name=detail.get('name') if isinstance(detail,dict) else None
+                        self.registered_agent_name=name if isinstance(name,str) else None
+                except (SwitchError,httpx.HTTPError):
+                    self.registered_agent_name=None
+                    logger.warning('Agent registration unavailable; advanced lifecycle actions will fail closed')
             while True:
                 try:
                     await self._session(client)
@@ -258,5 +286,6 @@ class SwitchListener:
                 except (RetryConnection, OSError, TimeoutError, WebSocketException):
                     pass
                 logger.warning("Switch delivery interrupted; reconnecting from acknowledged cursor in %ds", delay)
+                feature_event('switch_listener','retry_scheduled',reason='switch_unavailable',wait_seconds=delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)

@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from app.core.config import get_settings
 from app.core.embedding_model import EmbeddingError, get_embedder, validate_vector
 from app.repositories.embedding_repository import claim_embeddings, finish_embedding
+from app.core.feature_logging import feature_event
 
 logger = logging.getLogger("team_memory")
 
@@ -21,6 +22,7 @@ class EmbeddingWorker:
 
     async def process_once(self, settings):
         jobs = await claim_embeddings(settings)
+        feature_event('embedding','claimed' if jobs else 'idle',embedding_jobs=len(jobs))
         # At most eight claimed items; one item failing must not fail its neighbors.
         # Single-item inference is deliberately bounded, sharing one loaded CPU model.
         for job in jobs:
@@ -29,27 +31,41 @@ class EmbeddingWorker:
                 vector = validate_vector(vectors[0])
             except EmbeddingError as error:
                 accepted = await finish_embedding(settings, job, error=str(error))
+                feature_event('embedding','failed' if accepted else 'superseded',reference=job['id'],reason='database_or_model_unavailable')
                 logger.info("Embedding ref=%s state=%s reason=%s", job["id"],
                             "failed" if accepted else "superseded", str(error))
             else:
                 accepted = await finish_embedding(settings, job, vector=vector)
+                feature_event('embedding','succeeded' if accepted else 'superseded',reference=job['id'])
                 logger.info("Embedding ref=%s state=%s dimensions=384", job["id"],
                             "completed" if accepted else "superseded")
         return len(jobs)
 
     async def run(self):
+        previous=None
         while True:
             settings = get_settings()
             delay = 2
+<<<<<<< HEAD
+            reason=('flag_disabled' if not settings.local_embeddings_enabled else 'database_not_configured' if not settings.supabase_configured
+                    else 'scope_not_configured' if not settings.switch_tenant_id or not settings.allowed_switch_rooms else None)
+            state=reason or 'running'
+            if previous!=state:
+                feature_event('embedding','enabled' if reason is None else ('disabled' if reason=='flag_disabled' else 'blocked'),reason=reason)
+                previous=state
+            if settings.local_embeddings_enabled and settings.supabase_configured and settings.switch_tenant_id and settings.allowed_switch_rooms:
+=======
             db_ready = (
                 settings.sqlite_configured
                 if settings.effective_database_engine == "sqlite"
                 else settings.supabase_configured
             )
             if settings.local_embeddings_enabled and db_ready and settings.switch_tenant_id and settings.allowed_switch_rooms:
+>>>>>>> bca86dfbe1ba6e11e2fae1582f3357629179ae82
                 try:
                     await self.process_once(settings)
                 except (HTTPException, EmbeddingError):
+                    feature_event('embedding','failed',reason='database_or_model_unavailable')
                     logger.warning("Embedding worker state=retry_wait reason=database_or_model_unavailable")
                     delay = 30
                 except Exception:

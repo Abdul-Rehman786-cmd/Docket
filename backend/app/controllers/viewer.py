@@ -1,8 +1,11 @@
 from pathlib import Path
 import re
 
-from fastapi import APIRouter, Request, WebSocket
+from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
+<<<<<<< HEAD
+from app.models.viewer import EnvVariablesPayload
+=======
 from app.models.viewer import (
     EnforceSqliteSpacePayload,
     EnvVariablesPayload,
@@ -15,6 +18,7 @@ from app.services.storage_service import (
     get_storage_status,
     prune_data_by_timeline,
 )
+>>>>>>> bca86dfbe1ba6e11e2fae1582f3357629179ae82
 from app.services.viewer_service import serve_viewer
 
 router = APIRouter(include_in_schema=False)
@@ -66,14 +70,14 @@ async def viewer_socket(websocket: WebSocket):
 
 @router.get("/viewer/env")
 def get_env_variables(request: Request) -> JSONResponse:
-    vars_dict = read_env_variables()
-    headers = viewer_headers(request)
-    headers["Cache-Control"] = "no-store, private"
-    return JSONResponse(content={"variables": vars_dict, "optional_keys": OPTIONAL_KEYS}, headers=headers)
+    raise HTTPException(503,'Environment access is disabled; configure secrets locally')
 
 
 @router.post("/viewer/env")
 def update_env_variables(payload: EnvVariablesPayload, request: Request) -> JSONResponse:
+<<<<<<< HEAD
+    raise HTTPException(503,'Environment access is disabled; configure secrets locally')
+=======
     write_env_variables(payload.variables)
     if any(k in payload.variables for k in ("STORAGE_RETENTION_VALUE", "STORAGE_RETENTION_UNIT")):
         worker = getattr(request.app.state, "retention_worker", None)
@@ -131,3 +135,4 @@ def viewer_enforce_sqlite_space(payload: EnforceSqliteSpacePayload, request: Req
     headers["Cache-Control"] = "no-store, private"
     return JSONResponse(content=res, headers=headers)
 
+>>>>>>> bca86dfbe1ba6e11e2fae1582f3357629179ae82

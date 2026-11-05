@@ -6,6 +6,8 @@ from app.core.config import Settings
 
 
 def configure_logging(settings: Settings) -> None:
+    # Feature tracing is opt-out and always INFO; it never enables transport debug logs.
+    logging.getLogger('team_memory.features').setLevel(logging.INFO)
     logger = logging.getLogger("team_memory")
     logger.setLevel(settings.log_level)
     logger.propagate = False

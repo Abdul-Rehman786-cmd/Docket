@@ -8,6 +8,7 @@ from app.core.embedding_model import EmbeddingError, get_embedder
 from app.core.message_logging import message_text_for_log
 from app.repositories.embedding_repository import search_embeddings, source_context
 from app.repositories.record_repository import query_team_memory as keyword_query
+from app.core.feature_logging import feature_event
 
 
 async def query_team_memory(settings, *, search_query=None, switch_room_id=None):
@@ -19,6 +20,7 @@ async def query_team_memory(settings, *, search_query=None, switch_room_id=None)
             rows = await search_embeddings(settings, vectors[0], switch_room_id=switch_room_id)
             if rows:
                 context = await source_context(settings, rows)
+                feature_event('retrieval','succeeded',reason='semantic',count=len(rows))
                 return {**context, "memories": rows, "retrieval": [{"mode": "semantic", "source_field": "message_id"}]}
             reason = "no_vector_matches"
         except EmbeddingError as error:
@@ -29,5 +31,6 @@ async def query_team_memory(settings, *, search_query=None, switch_room_id=None)
             reason = "vector_search_unavailable"
     logging.getLogger("team_memory").info("Retrieval mode=keyword_fallback reason=%s", reason)
     records = await keyword_query(settings, search_query=search_query, switch_room_id=switch_room_id)
+    feature_event('retrieval','succeeded',reason='keyword_fallback',count=sum(len(rows) for rows in records.values() if isinstance(rows,list)))
     records["retrieval"] = [{"mode": "keyword_fallback", "reason": reason}]
     return records

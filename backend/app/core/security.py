@@ -37,3 +37,12 @@ def require_ingest_token(x_ingest_token: str | None = Header(default=None)) -> N
     """A dedicated server-to-server credential; grants no access to record reads."""
     if not ingest_token_matches(x_ingest_token, get_settings()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+
+def trusted_adapter(token, settings) -> bool:
+    """Dedicated listener credential. Shared viewer/admin keys cannot attest chat identity."""
+    expected = settings.switch_adapter_token.get_secret_value()
+    shared = {settings.switch_ingest_token.get_secret_value(), settings.admin_api_token,
+              settings.supabase_secret_key, settings.supabase_service_role_key}
+    return bool(expected and len(expected) >= 32 and expected not in shared and token
+                and secrets.compare_digest(token.encode(), expected.encode()))

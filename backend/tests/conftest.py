@@ -15,9 +15,11 @@ def isolate_local_configuration(monkeypatch, tmp_path):
         raise AssertionError("External HTTP requires an explicit test transport")
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", blocked_network)
     monkeypatch.setattr("app.repositories.ingestion_jobs.JOURNAL_PATH", tmp_path / "ingestion.sqlite3")
+    monkeypatch.setattr("app.repositories.pending_confirmation.DB_PATH", tmp_path / "ingestion.sqlite3")
     monkeypatch.setattr("app.services.ai_service.DEFAULT_REPLY_STATE_PATH", tmp_path / "last_replied_message.txt")
     for name, value in {
         "LOG_LEVEL": "INFO",
+        "FEATURE_LOGS_ENABLED": "true",
         "ADMIN_API_TOKEN": "",
         "SUPABASE_URL": "",
         "SUPABASE_SERVICE_ROLE_KEY": "",
@@ -25,6 +27,10 @@ def isolate_local_configuration(monkeypatch, tmp_path):
         "SWITCH_AGENT_ID": "test-agent",
         "SWITCH_AGENT_API_KEY": "test-agent-key",
         "SWITCH_INGEST_TOKEN": "test-ingest-token",
+        "SWITCH_ADAPTER_TOKEN": "",
+        "AUTOMATIC_COMMITMENTS_ENABLED": "false",
+        "REMINDERS_ENABLED": "false",
+        "REMINDER_DELIVERY_ENABLED": "false",
         "SWITCH_TENANT_ID": "00000000-0000-0000-0000-000000000001",
         "SWITCH_ROOM_IDS": "test-room,second-room",
         "SWITCH_AI_SENDER_IDS": "fixture-ai-participant",
