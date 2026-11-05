@@ -157,10 +157,11 @@ def test_unclear_message_triggers_clarification_reply_and_no_storage(monkeypatch
             # Zero database writes occurred
             assert saved == []
             # Reply sent to Discord thread with clarification question
-            assert len(posted) == 1
-            assert posted[0]["body"] == "Please clarify what topic or date you would like to set up the meeting for."
-            assert posted[0]["room_id"] == "test-room"
-            assert posted[0]["thread_id"] == "thread-1"
+            assert len(posted) == 2
+            assert posted[0]["body"] == "Processing your request..."
+            assert posted[1]["body"] == "Please clarify what topic or date you would like to set up the meeting for."
+            assert posted[1]["room_id"] == "test-room"
+            assert posted[1]["thread_id"] == "thread-1"
         finally:
             await service.close()
     asyncio.run(run())
@@ -197,10 +198,11 @@ def test_confirmation_flow_yes_commits_and_no_cancels(monkeypatch):
             await service.queue.join()
 
             assert len(saved) == 0
-            assert len(posted) == 1
-            assert "I extracted the following data to save:" in posted[0]["body"]
-            assert "Launch on Friday" in posted[0]["body"]
-            assert "Reply 'yes' to confirm or 'no' to cancel" in posted[0]["body"]
+            assert len(posted) == 2
+            assert posted[0]["body"] == "Processing your request..."
+            assert "I extracted the following data to save:" in posted[1]["body"]
+            assert "Launch on Friday" in posted[1]["body"]
+            assert "Reply 'yes' to confirm or 'no' to cancel" in posted[1]["body"]
 
             msg2 = IncomingMessage(
                 tenant_id=settings.switch_tenant_id,
@@ -215,15 +217,16 @@ def test_confirmation_flow_yes_commits_and_no_cancels(monkeypatch):
             await service.ingest(msg2, settings, receipts)
 
             assert len(saved) == 1
-            assert len(posted) == 2
-            assert posted[1]["body"] == "Data has been saved into the database."
+            assert len(posted) == 3
+            assert posted[2]["body"] == "Data has been saved into the database."
             assert await service.pending_confirmations.get("test-room:thread-1") is None
 
             msg3 = message(settings, "Launch on Friday", message_id="msg-3", timestamp_ms=1793872802000, addressed=True)
             await service.ingest(msg3, settings, receipts)
             await service.queue.join()
-            assert len(posted) == 3
-            assert "Would you like to save this" in posted[2]["body"]
+            assert len(posted) == 5
+            assert posted[3]["body"] == "Processing your request..."
+            assert "Would you like to save this" in posted[4]["body"]
 
             msg4 = IncomingMessage(
                 tenant_id=settings.switch_tenant_id,
@@ -238,8 +241,8 @@ def test_confirmation_flow_yes_commits_and_no_cancels(monkeypatch):
             await service.ingest(msg4, settings, receipts)
 
             assert len(saved) == 1
-            assert len(posted) == 4
-            assert posted[3]["body"] == "Cancelled. Data was not saved."
+            assert len(posted) == 6
+            assert posted[5]["body"] == "Cancelled. Data was not saved."
             assert await service.pending_confirmations.get("test-room:thread-1") is None
         finally:
             await service.close()

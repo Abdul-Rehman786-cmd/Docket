@@ -644,8 +644,35 @@ class AIService:
                 msg_ref,
                 row.request_id,
             )
+            is_addressed = bool(
+                source_meta
+                and (
+                    source_meta.get("addressed")
+                    or is_bot_mentioned(source_meta.get("body") or row.question, settings)
+                )
+            )
+            msg_timestamp = source_meta.get("timestamp_ms") if source_meta else None
+            job = await self.journal.get(msg_ref) if source_meta and source_meta.get("durable") else None
+
+            if (
+                settings.switch_reply_to_discord
+                and is_addressed
+                and source_meta
+                and source_meta.get("origin") == "discord"
+                and source_meta.get("room_id")
+                and not self.is_message_older_than_last_reply(msg_timestamp)
+                and not (job and job.get("decision"))
+            ):
+                await self._send_discord_reply(
+                    settings,
+                    source_meta["room_id"],
+                    "Processing your request...",
+                    thread_id=source_meta.get("thread_id"),
+                    timestamp_ms=None,
+                    switch_message_id=source_meta.get("switch_message_id"),
+                )
+
             async with asyncio.timeout(settings.switch_ai_timeout_seconds):
-                job = await self.journal.get(msg_ref) if source_meta and source_meta.get("durable") else None
                 if job and job["decision"]:
                     decision = LLMDecision.model_validate_json(job["decision"])
                 else:
@@ -683,7 +710,7 @@ class AIService:
                         source_meta
                         and (
                             source_meta.get("addressed")
-                            or is_bot_mentioned(source_meta.get("body"), settings)
+                            or is_bot_mentioned(source_meta.get("body") or row.question, settings)
                         )
                     )
 
@@ -786,7 +813,7 @@ class AIService:
                 source_meta
                 and (
                     source_meta.get("addressed")
-                    or is_bot_mentioned(source_meta.get("body"), settings)
+                    or is_bot_mentioned(source_meta.get("body") or row.question, settings)
                 )
             )
             should_reply = (

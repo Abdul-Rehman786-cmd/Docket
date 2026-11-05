@@ -479,10 +479,11 @@ def test_incoming_message_replies_to_switch_discord_room(ai_config, monkeypatch,
 
             assert delivered.wait(2), "The worker must finish the durable checkpoint and post before shutdown"
 
-    assert len(posted_messages) == 1
-    assert posted_messages[0]["room_id"] == "test-room"
-    assert posted_messages[0]["thread_id"] == "discord-thread-99"
-    assert "Friday" in posted_messages[0]["body"]
+    assert len(posted_messages) == 2
+    assert posted_messages[0]["body"] == "Processing your request..."
+    assert posted_messages[1]["room_id"] == "test-room"
+    assert posted_messages[1]["thread_id"] == "discord-thread-99"
+    assert "Friday" in posted_messages[1]["body"]
     assert "AI reply posted to Switch room=test-room" in caplog.text
 
 
