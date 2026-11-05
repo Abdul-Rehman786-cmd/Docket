@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     switch_ai_sender_id: str = Field(default="", repr=False)
     switch_ai_timeout_seconds: int = Field(default=180, ge=10, le=600)
     switch_ingest_token: SecretStr = SecretStr("")
+    switch_adapter_token: SecretStr = SecretStr("")
+    automatic_commitments_enabled: bool = False
+    reminders_enabled: bool = False
+    reminder_delivery_enabled: bool = False
     switch_tenant_id: UUID | None = None
     switch_room_ids: str = Field(default="", repr=False)
     switch_ai_sender_ids: str = Field(default="", repr=False)

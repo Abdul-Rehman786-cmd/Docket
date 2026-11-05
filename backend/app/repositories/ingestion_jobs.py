@@ -32,6 +32,10 @@ class IngestionJobs:
                     attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
                     error TEXT)""")
                 db.execute("CREATE TABLE IF NOT EXISTS posted_replies (fingerprint TEXT PRIMARY KEY)")
+                columns={row['name'] for row in db.execute('PRAGMA table_info(jobs)')}
+                for name in ('chat_plan','chat_outcome'):
+                    if name not in columns:
+                        db.execute(f'ALTER TABLE jobs ADD COLUMN {name} TEXT')
                 return operation(db)
         return await asyncio.to_thread(run)
 
@@ -75,7 +79,7 @@ class IngestionJobs:
 
     async def diagnostics(self):
         return await self._execute(lambda db: [dict(row) for row in db.execute(
-            "SELECT ref,state,attempts,error,counts FROM jobs ORDER BY rowid DESC LIMIT 100"
+            "SELECT ref,state,attempts,error,counts,chat_outcome FROM jobs ORDER BY rowid DESC LIMIT 100"
         )])
 
     async def retry(self, ref):
@@ -100,8 +104,16 @@ class IngestionJobs:
 
     async def finish(self, ref):
         await self._execute(lambda db: db.execute(
-            "UPDATE jobs SET state='done',payload=NULL,decision=NULL,error=NULL WHERE ref=?", (ref,)
+            "UPDATE jobs SET state='done',payload=NULL,decision=NULL,chat_plan=NULL,error=NULL WHERE ref=?", (ref,)
         ).rowcount)
+
+    async def chat_prepared(self,ref,plan):
+        await self._execute(lambda db: db.execute('UPDATE jobs SET chat_plan=? WHERE ref=?',
+            (plan.model_dump_json(),ref)).rowcount)
+
+    async def chat_result(self,ref,outcome):
+        await self._execute(lambda db: db.execute('UPDATE jobs SET chat_outcome=? WHERE ref=?',
+            (outcome.model_dump_json(),ref)).rowcount)
 
     async def fail(self, ref, category):
         await self._execute(lambda db: db.execute(

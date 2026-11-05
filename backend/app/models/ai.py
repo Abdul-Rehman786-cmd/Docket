@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.messages import MessageRef
+from app.models.commitment_chat import TaskChangeProposal, ChatOutcome
 
 DatabaseAction = Literal["store_only", "query_only", "none", "store_and_query"]
 
@@ -40,9 +41,13 @@ class LLMDecision(BaseModel):
     decisions: list[ExtractedDecision] = Field(default_factory=list)
     memories: list[ExtractedMemory] = Field(default_factory=list)
     answer: str | None = Field(default=None, max_length=4000)
+    # Multiple proposals are a bounded ambiguous outcome, never partial execution.
+    task_changes: list[TaskChangeProposal] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
     def consistent_extraction(self):
+        if self.task_changes and (self.commitments or self.decisions or self.memories or self.action != 'none'):
+            raise ValueError('Lifecycle proposals must not create records or request retrieval')
         storing = self.action in ("store_only", "store_and_query")
         querying = self.action in ("query_only", "store_and_query")
         if storing != bool(self.commitments or self.decisions or self.memories):
@@ -87,3 +92,4 @@ class AIResponse(BaseModel):
     db_action: DatabaseAction | None = None
     stored_counts: dict[str, int] | None = None
     error: str | None = None
+    commitment_outcome: ChatOutcome | None = None

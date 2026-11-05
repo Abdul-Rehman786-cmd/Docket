@@ -29,7 +29,7 @@ IDENTIFIER_TOKEN = re.compile(KNOWN_TOKEN_PATTERN+r"|\bsb_(?:secret|publishable)
 
 def _configured_secrets(settings):
     configured = {
-        settings.admin_api_token,settings.supabase_service_role_key,
+        settings.admin_api_token,settings.supabase_service_role_key,settings.switch_adapter_token.get_secret_value(),
         settings.switch_agent_api_key.get_secret_value(),settings.switch_ingest_token.get_secret_value(),
         settings.switch_registration_token.get_secret_value(),settings.switch_requester_api_key.get_secret_value(),
     }

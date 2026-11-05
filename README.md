@@ -5,6 +5,15 @@ A project scaffold for **FastAPI + Supabase + React Native (Expo)** with a Switc
 The implemented flow receives Discord messages through Switch, journals human input durably, displays bounded redacted previews, and evaluates useful information through the existing private Codex runtime. Atomic storage and versioned embedding jobs are defined in the single consolidated development baseline. The hosted non-destructive upgrade is prepared for review and approval; never replay the baseline reset on the hosted database. FastAPI and the Switch listener run as separate processes. See [architecture.md](architecture.md) for runtime boundaries, recovery, storage, retrieval and reply behavior.
 
 ## Structure
+
+Reminder planning, a durable Supabase outbox and a Switch notification dispatcher are implemented locally, disabled by default. The hosted read-only check found storage/embedding support but no exposed lifecycle/chat/reminder deployment. See [REMINDERS.md](REMINDERS.md) for defaults, approval requirements, recovery behavior and the single-worker deployment limit. No external reminder has been sent or verified. The viewer's reminder controls are read-only; policies are backend-managed.
+
+
+Automatic chat lifecycle updates now connect the private AI proposal pipeline to the commitment service, with separate adapter authentication and trusted sender mappings. This path needs no human-login screen; it is disabled by default pending approved deployment/onboarding. See [AUTOMATIC_COMMITMENTS.md](AUTOMATIC_COMMITMENTS.md). Public/manual lifecycle routes remain protected. Viewer environment read/write APIs are disabled; edit ignored local configuration directly.
+
+
+Commitment lifecycle management is implemented separately with scoped reads/actions, audit history, versions and atomic idempotency. New routes fail closed until trusted individual-user authentication is supplied. The additive migration is prepared for review, not deployed. See [COMMITMENT_MANAGEMENT.md](COMMITMENT_MANAGEMENT.md) for contracts and deployment dependencies.
+
 - `architecture.md`: design and boundaries.
 - `AGENTS.md`: mandatory AI development and security rules.
 - `backend/`: FastAPI MVC-inspired layers and tests.

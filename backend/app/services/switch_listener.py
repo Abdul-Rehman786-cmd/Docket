@@ -100,7 +100,8 @@ class SwitchListener:
     def http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             base_url=self.settings.switch_backend_url.rstrip("/") + "/",
-            headers={"X-Ingest-Token": self.settings.switch_ingest_token.get_secret_value()},
+            headers={"X-Ingest-Token": self.settings.switch_ingest_token.get_secret_value(),
+                     "X-Adapter-Token": self.settings.switch_adapter_token.get_secret_value()},
             timeout=10, trust_env=False, follow_redirects=False,
         )
 

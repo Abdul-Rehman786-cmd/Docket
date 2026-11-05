@@ -4,6 +4,19 @@ This document describes the system architecture, component boundaries, Switch ag
 
 ## Current implementation: FastAPI and Switch message delivery
 
+### Reminder milestone (2026-11-05)
+
+The separate [reminder module](REMINDERS.md) reuses commitment eligibility and the existing room-policy/delivery tables. A pure planner produces versioned intentions; bounded application loops persist them and dispatch through the existing non-AI Switch identity. Durable claims/send-start markers, current-state rechecks, quiet hours, cadence, room spacing and stale-intent invalidation are implemented. Defaults remain disabled. Hosted metadata verifies storage/embedding presence but lacks the lifecycle/chat/reminder API footprint; deployment and real external delivery await approval. Earlier scheduler-as-future-work descriptions are superseded by this local implementation, not by a claim of live delivery.
+
+
+### Commitment lifecycle addition (2026-11-05)
+
+The chat integration is documented in [AUTOMATIC_COMMITMENTS.md](AUTOMATIC_COMMITMENTS.md). Authenticated Switch listener deliveries can resolve a trusted initiating member, offer bounded room/thread candidates to the existing private AI runtime, and execute evidence-validated proposals through an internal lifecycle service method. Source/actor policy, versions, receipts and memory/audit updates are revalidated atomically. The chat path has its own additive migration and explicit opt-in room/global policies; it does not bypass public human authentication. Pending owner completion can record separate automated acceptance while leaving human approval pending. Handoffs currently require an admin statement. No hosted deployment or real chat verification is claimed.
+
+
+The separate commitment service implements approve, reject, start, complete, cancel, reassign, reschedule and scoped reads/history. It reuses existing role/status/source/embedding contracts; each mutation uses a backend-only PostgreSQL transaction with locked authorization, versions, audit and idempotency. The additive migration is locally tested and awaits hosted deployment review. Human authentication is absent: all new routes fail closed; shared ingestion/admin tokens do not identify people. See [COMMITMENT_MANAGEMENT.md](COMMITMENT_MANAGEMENT.md) for permitted transitions, HTTP contracts, independent identity/storage interfaces, reminder integration and verification limits. Earlier planned approval/task-state descriptions below are superseded by that implementation contract. No scheduler, notifications, recording controls or frontend redesign was added.
+
+
 The diagram and implementation plan below describe the target system. The current backend is a local FastAPI scaffold that starts without database, LLM, or messaging credentials:
 
 - `backend/app/main.py` creates the app and registers routes; `/health` returns `{"status":"ok"}`. FastAPI provides `/docs` and `/openapi.json`. `controllers/viewer.py` serves the public browser-viewer shell at `/` and its local CSS/JavaScript from `views/`; no private data or credentials are embedded in these files.

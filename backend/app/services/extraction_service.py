@@ -3,7 +3,8 @@
 import hashlib
 import json
 
-from app.core.message_logging import message_text_for_log
+from app.core.message_logging import message_text_for_log, redact_source_identifier
+from app.services.commitment_service import summary_text
 from fastapi import HTTPException
 
 
@@ -26,6 +27,11 @@ def redact_decision(decision, settings):
             for field in fields:
                 if item[field] is not None:
                     item[field] = json.loads(message_text_for_log(item[field], settings))
+    for proposal in data.get('task_changes',[]):
+        proposal['evidence']=json.loads(message_text_for_log(proposal['evidence'],settings,max_length=4000))
+        for field in ('source_message_id','assignee_id'):
+            if proposal.get(field) is not None:
+                proposal[field]=redact_source_identifier(proposal[field],settings) or 'unresolved'
     return type(decision).model_validate(data)
 
 
@@ -47,9 +53,7 @@ def storage_items(decision, settings):
         seen.add(identity)
         result["commitments"].append(dict(extraction_key=identity, description=description,
                                           owner_name=owner, due_at=item.due_at))
-        summary = f"{owner}: {description}" if owner else description
-        if item.due_at:
-            summary += f"; due {item.due_at}"
+        summary = summary_text(description, owner_name=owner, due_at=item.due_at)
         result["memories"].append(dict(extraction_key=identity, memory_type="commitment", content=summary))
     for item in decision.decisions:
         summary, topic = safe(item.summary), safe(item.topic)

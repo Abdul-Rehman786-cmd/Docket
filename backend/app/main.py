@@ -18,6 +18,9 @@ from app.core.logging import configure_logging
 from app.repositories.record_repository import ensure_tenant_and_rooms_provisioned
 from app.services.viewer_service import ViewerHub
 from app.services.embedding_service import EmbeddingWorker
+from app.controllers.commitments import router as commitments_router
+from app.models.commitments import CommitmentError
+from app.services.reminder_worker import ReminderWorker
 
 
 @asynccontextmanager
@@ -29,6 +32,7 @@ async def lifespan(application):
     application.state.message_receipts.on_change = application.state.viewer_hub.publish
     application.state.ai_service.repository.on_change = application.state.viewer_hub.publish
     application.state.embedding_worker = EmbeddingWorker()
+    application.state.reminder_worker = ReminderWorker()
     with use_http_clients(application.state.http_clients):
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             try:
@@ -37,10 +41,12 @@ async def lifespan(application):
                 logging.getLogger("uvicorn.error").warning("Startup auto-provision warning: %s", exc)
         application.state.ai_service.start_recovery()
         application.state.embedding_worker.start()
+        application.state.reminder_worker.start()
     try:
         yield
     finally:
         try:
+            await application.state.reminder_worker.close()
             await application.state.ai_service.close()
         finally:
             await application.state.embedding_worker.close()
@@ -57,6 +63,7 @@ app.include_router(records_router)
 app.include_router(messages_router)
 app.include_router(viewer_router)
 app.include_router(ai_router)
+app.include_router(commitments_router)
 
 
 @app.middleware("http")
@@ -64,7 +71,7 @@ async def prevent_message_caching(request, call_next):
     started = perf_counter()
     with use_http_clients(getattr(request.app.state, "http_clients", None)):
         response = await call_next(request)
-    if request.url.path.startswith(("/messages", "/ai")):
+    if request.url.path.startswith(("/messages", "/ai", "/api/v1/tenants/")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
     route = request.scope.get("route")
@@ -81,6 +88,11 @@ async def validation_error_handler(request, exc: RequestValidationError):
     # FastAPI's default 422 response echoes invalid input, which may contain chat secrets.
     logging.getLogger("team_memory").debug("Request validation rejected")
     return JSONResponse(status_code=422, content={"detail": "Invalid request payload"})
+
+
+@app.exception_handler(CommitmentError)
+async def commitment_error_handler(request, exc: CommitmentError):
+    return JSONResponse(status_code=exc.status, content={"detail": exc.code}, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health", tags=["health"])

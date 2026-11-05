@@ -116,10 +116,10 @@
         <div class="section-title-row">
           <div>
             <h3>Task &amp; Commitment Reminders</h3>
-            <p class="subtitle">Enable automated reminders for extracted commitments and deadlines.</p>
+            <p class="subtitle">Reminder policy is managed by a trusted server administrator. These controls do not change server policy.</p>
           </div>
           <label class="switch">
-            <input id="reminders-toggle" type="checkbox" checked>
+            <input id="reminders-toggle" type="checkbox" disabled aria-label="Reminders are configured on the server">
             <span class="slider"></span>
           </label>
         </div>
@@ -127,8 +127,8 @@
         <div id="reminders-lead-time-box" class="lead-time-box">
           <label for="reminder-lead-time">Advance Notice Time (Kitna time pehla de)</label>
           <div class="input-group-row">
-            <input id="reminder-lead-time" type="number" min="1" max="1000" value="30" style="max-width: 120px;">
-            <select id="reminder-lead-unit" class="select-input">
+            <input id="reminder-lead-time" type="number" min="1" max="1000" value="30" disabled style="max-width: 120px;">
+            <select id="reminder-lead-unit" class="select-input" disabled>
               <option value="minutes" selected>Minutes before</option>
               <option value="hours">Hours before</option>
               <option value="days">Days before</option>

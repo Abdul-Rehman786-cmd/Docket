@@ -13,6 +13,22 @@ change has been performed for this task.
 
 ## Inspected live difference
 
+**Latest read-only observation (2026-11-05):** storage and embedding functions/columns are now exposed by the configured hosted PostgREST API. The historical absence findings below are superseded by [REMINDER_VERIFICATION.md](REMINDER_VERIFICATION.md). Lifecycle/chat/reminder functions and columns remain absent from the exposed metadata. Review exact hosted definitions/grants with `reminder_deployment_review.sql`, then obtain approval for the missing additive migrations `20261105000100`, `20261105000200`, and `20261105000300` in order. No remote changes were made for this milestone. Do not automatically replay an older storage/embedding upgrade, the core reset or migration-history changes.
+
+
+Automatic chat management additionally prepares `migrations/20261105000200_commitment_chat.sql`, after the lifecycle migration. It requires reviewed sender/member mappings, enabled room policies and a separate private adapter credential. See [automatic chat contracts](../AUTOMATIC_COMMITMENTS.md). It has not been applied remotely and must not be enabled against an unreviewed schema.
+
+
+The separately implemented commitment lifecycle has its own additive migration,
+`migrations/20261105000100_commitment_lifecycle.sql`. It requires the full reviewed
+embedding recovery upgrade before deployment, plus trusted human authentication
+before its routes can be enabled. It has not been applied remotely. See
+[COMMITMENT_VERIFICATION.md](COMMITMENT_VERIFICATION.md) and
+[the lifecycle contract](../COMMITMENT_MANAGEMENT.md). It does not replace or replay
+the destructive core baseline, and the smaller text-storage-only proposal is not
+sufficient for the lifecycle's embedding recovery guarantees.
+
+
 The connected configured project is `team-memory-agent`. Its migration list is
 empty; the foundation was installed through SQL Editor, not recorded migration
 history. `store_message_extraction` is absent. The existing four-argument
