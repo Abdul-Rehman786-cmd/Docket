@@ -4,6 +4,87 @@ This document describes the system architecture, component boundaries, Switch ag
 
 ## Current implementation: FastAPI and Switch message delivery
 
+### Optional person profiles
+
+`PERSON_PROFILES_ENABLED=false` keeps profile extraction disabled by default. When
+enabled, the existing private reasoning pipeline may propose explicit first-person
+responsibility, skill, preference and timezone statements. A conservative backend
+grammar checks the full redacted source and exact value; identity comes exclusively
+from the delivered `switch_author_id`. Names are display labels. No external identity
+lookup, new messaging integration or historical backfill is introduced.
+
+`person_profiles.id` is an internal UUID, with a unique
+`(tenant_id, room_id, switch_author_id)` identity. Claims and evidence remain
+room-scoped through composite foreign keys. `person_profile_claims` stores immutable
+attribute/value claims and derived active/superseded state;
+`person_profile_evidence` links each claim to its exact source quote, message,
+source timestamp and searchable `fact` memory. These are reported statements,
+not independently verified attributes. Repeated evidence supports the same claim.
+Explicit corrections supersede older reports of that attribute using source time;
+late arrivals cannot overwrite newer corrections. Equal-time contradictions remain
+visible. Different timezone reports are flagged as conflicts; skills,
+responsibilities and preferences can contain multiple values.
+
+Source, existing extraction items, profile evidence and searchable memories commit
+in one transaction. Supabase uses the distinct backend-only
+`store_profile_message_extraction` RPC; missing deployment fails explicitly rather
+than silently ignoring profiles. SQLite uses `BEGIN IMMEDIATE`, a durable extraction
+fingerprint and native transactions. A changed replay is rejected; a successful
+replay does not recreate pruned evidence. No automatic backfill of existing stored
+messages occurs. Profile writes keep the existing four-count acknowledgement contract.
+
+The additive PostgreSQL migration is
+`supabase/migrations/20261106000200_person_profiles.sql`; it requires the existing
+atomic storage and simple-capture functions. The separate SQLite migration is under
+`supabase/migrations/sqlite/` and is applied once to the explicitly configured local
+database by the SQLite schema runner. Ship that directory with the backend. No
+applied migration was edited and no remote migration is applied by this module.
+
+Evidence deletion through message pruning or memory quota eviction recomputes
+claims and search eligibility transactionally and removes unsupported claims and
+empty profiles. Deleting correction evidence can restore earlier retained reports;
+the result always reflects the remaining sources. Database migration preserves
+profile IDs, evidence and active flags, uses upserts to avoid cascaded deletion,
+and recomputes profile state after import. Extraction receipts are engine-local;
+replaying an imported message cannot silently backfill it.
+
+Retrieval expands matching profiles to their retained source reports, carries
+conflicts/history explicitly, excludes superseded memories, and requests profile
+source citations. Only citations matching retrieved source IDs survive answer
+redaction. Context exceeding the evidence bound fails explicitly rather than
+hiding potentially contradictory reports.
+
+`GET /api/v1/tenants/{tenant_id}/rooms/{room_id}/profiles` supports `limit` and UUID
+`after` pagination; `GET .../profiles/{profile_id}` returns claims, evidence and
+explicit truncation metadata. Both require verified individual identity, configured
+tenant/room authorization and stored room membership. `core/profile_identity.py`
+fails closed until a trusted identity provider is integrated; shared admin/ingest
+tokens are never treated as people. Responses use `Cache-Control: no-store`.
+The mobile app and viewer have no new private-data UI.
+
+Personal questions such as "what is my preferred name?" are routed from the
+original message to an exact `(tenant_id, room_id, switch_author_id)` lookup.
+The backend answers from that sender's active source-backed claims, bypassing
+room-wide keyword/vector retrieval and the shared AI context. Missing sender
+identity, missing records and disabled profiles never fall back to another user's
+facts. Multiple active preferred-name reports produce an explicit conflict.
+Names/usernames remain labels and never become identity keys. A content-free
+retrieval event hashes the sender reference for diagnosing identity separation.
+Confirmation drafts are also keyed by tenant, room, thread and sender; another
+participant cannot confirm, cancel or overwrite a pending save. Old drafts using
+the previous room/thread key must be restaged after this change.
+
+The user-approved hosted profile migration was applied on 2026-11-06 (Pakistan
+time), recorded by Supabase as `20261105232021_person_profiles`. The connected
+project was verified against backend configuration before application. Read-only
+checks verified all four tables, the context view, evidence trigger, RLS and
+backend-only permissions; the authenticated Supabase API now advertises the profile
+storage RPC and tables. The active backend configuration has profiles enabled.
+No synthetic team records or external messages were created for this verification.
+Live message extraction remains to be checked with a new user message.
+See [PERSON_PROFILES.md](PERSON_PROFILES.md) for supported statements, local checks
+and rollout boundaries.
+
 ### Feature observability
 
 `core/feature_logging.py` emits content-free INFO events for ingestion, AI/extraction, confirmations, commitment actions, retrieval/embeddings, viewer connections and reminder planning/delivery. Events distinguish configuration, durable persistence, replay, denial, deferral and saved Switch acknowledgement. IDs are hashed; reasons and metrics are allow-listed. Empty-worker heartbeats are bounded. This adds no database probes, model calls or business activation; see [FEATURE_LOGGING.md](FEATURE_LOGGING.md).
@@ -391,8 +472,10 @@ authorize room access and keep searchable summaries synchronized with structured
 commitment/decision state. RLS is enabled and client table privileges are revoked;
 service-role access still bypasses RLS.
 
-The following list records the broader planned data model. Tables not listed in
-the current foundation above remain future scope.
+The optional local profile module adds `person_profiles`, `person_profile_claims`,
+`person_profile_evidence` and extraction replay receipts through its additive
+migration described above. The following list records the broader data model;
+other tables not listed in the current foundation remain future scope.
 
 Room-scoped tables carry `tenant_id` and `room_id`. Every query and every vector search must enforce the caller's authorized scope. Postgres row-level security can provide additional protection for non-privileged access; privileged backend credentials require explicit authorization in FastAPI.
 

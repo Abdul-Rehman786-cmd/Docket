@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.messages import MessageRef
+from app.models.profiles import ExtractedProfileFact
 from app.models.commitment_chat import TaskChangeProposal, ChatOutcome
 
 DatabaseAction = Literal["store_only", "query_only", "none", "store_and_query", "clarify"]
@@ -40,17 +41,18 @@ class LLMDecision(BaseModel):
     commitments: list[ExtractedCommitment] = Field(default_factory=list)
     decisions: list[ExtractedDecision] = Field(default_factory=list)
     memories: list[ExtractedMemory] = Field(default_factory=list)
+    profile_facts: list[ExtractedProfileFact] = Field(default_factory=list, max_length=10)
     answer: str | None = Field(default=None, max_length=4000)
     # Multiple proposals are a bounded ambiguous outcome, never partial execution.
     task_changes: list[TaskChangeProposal] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
     def consistent_extraction(self):
-        if self.task_changes and (self.commitments or self.decisions or self.memories or self.action != 'none'):
+        if self.task_changes and (self.commitments or self.decisions or self.memories or self.profile_facts or self.action != 'none'):
             raise ValueError('Lifecycle proposals must not create records or request retrieval')
         storing = self.action in ("store_only", "store_and_query")
         querying = self.action in ("query_only", "store_and_query")
-        if storing != bool(self.commitments or self.decisions or self.memories):
+        if storing != bool(self.commitments or self.decisions or self.memories or self.profile_facts):
             raise ValueError("Storage action and extraction items must agree")
         if querying != bool(self.search_query and self.search_query.strip()):
             raise ValueError("Query action and search query must agree")

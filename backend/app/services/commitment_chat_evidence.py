@@ -199,6 +199,6 @@ def strip_chat_extraction(decision):
     data=decision.model_dump()
     data['commitments']=[]
     data['answer']=None  # An AI extraction is never confirmation of a saved task.
-    if not (data['decisions'] or data['memories']):
+    if not (data['decisions'] or data['memories'] or data.get('profile_facts')):
         data['action']='query_only' if decision.action=='store_and_query' else 'none'
     return type(decision).model_validate(data)

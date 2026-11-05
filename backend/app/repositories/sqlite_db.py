@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS rooms (
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_tenant ON rooms(tenant_id);
 
+
 -- 3. Messages
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
@@ -236,6 +237,8 @@ def init_sqlite_db(settings: Settings | None = None) -> None:
     """Initialize schema in the user-selected SQLite database and ensure schema migrations."""
     with get_sqlite_connection(settings) as conn:
         conn.executescript(SCHEMA_SQL)
+        from app.repositories.sqlite_profiles import initialize
+        initialize(conn)
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(commitments);")
         for col in cursor.fetchall():

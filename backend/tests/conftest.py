@@ -29,6 +29,7 @@ def isolate_local_configuration(monkeypatch, tmp_path):
         "SWITCH_INGEST_TOKEN": "test-ingest-token",
         "SWITCH_ADAPTER_TOKEN": "",
         "AUTOMATIC_COMMITMENTS_ENABLED": "false",
+        "PERSON_PROFILES_ENABLED": "false",
         "REMINDERS_ENABLED": "false",
         "REMINDER_DELIVERY_ENABLED": "false",
         "SWITCH_TENANT_ID": "00000000-0000-0000-0000-000000000001",

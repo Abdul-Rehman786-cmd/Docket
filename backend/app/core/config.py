@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     switch_ingest_token: SecretStr = SecretStr("")
     switch_adapter_token: SecretStr = SecretStr("")
     automatic_commitments_enabled: bool = False
+    person_profiles_enabled: bool = False
     commitment_timezone: str | None = None  # Confirmed shared room zone; unset means unresolved relative dates.
     reminders_enabled: bool = False
     reminder_delivery_enabled: bool = False

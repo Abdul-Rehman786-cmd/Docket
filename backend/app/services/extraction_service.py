@@ -13,7 +13,8 @@ async def store_ai_memory(settings, *, decision, **kwargs):
 
     if decision.action not in ("store_only", "store_and_query"):
         raise HTTPException(422, "A storage action is required")
-    return await persist_extraction(settings, items=storage_items(decision, settings, source_metadata=kwargs.get('source_metadata')), **kwargs)
+    return await persist_extraction(settings, items=storage_items(decision, settings,
+        source_metadata=kwargs.get('source_metadata'), source_body=kwargs.get('body')), **kwargs)
 
 
 def redact_decision(decision, settings):
@@ -22,7 +23,8 @@ def redact_decision(decision, settings):
         if data[field] is not None:
             data[field] = json.loads(message_text_for_log(data[field], settings))
     for group, fields in (("commitments", ("description", "owner_name")),
-                          ("decisions", ("summary", "topic")), ("memories", ("content",))):
+                          ("decisions", ("summary", "topic")), ("memories", ("content",)),
+                          ("profile_facts", ("value", "evidence"))):
         for item in data[group]:
             for field in fields:
                 if item[field] is not None:
@@ -37,7 +39,7 @@ def redact_decision(decision, settings):
     return type(decision).model_validate(data)
 
 
-def storage_items(decision, settings, *, source_metadata=None):
+def storage_items(decision, settings, *, source_metadata=None, source_body=None):
     result = {"commitments": [], "decisions": [], "memories": []}
     seen = set()
 
@@ -80,6 +82,13 @@ def storage_items(decision, settings, *, source_metadata=None):
             continue
         contents.add(content.casefold())
         result["memories"].append(dict(extraction_key=key("fact", content), memory_type="fact", content=content))
+    if decision.profile_facts:
+        from app.services.profile_service import profile_items
+        result['profile_facts'] = profile_items(decision.profile_facts, settings, source_metadata, source_body)
+        for fact in result['profile_facts']:
+            result['memories'].append(dict(extraction_key=fact['extraction_key'], memory_type='fact',
+                content=f"Reported profile ({safe(source_metadata.get('author_name')) or 'Unknown sender'}): "
+                        f"{fact['attribute']}: {fact['value']}"))
     return result
 
 
@@ -113,4 +122,4 @@ def capture_decision(decision, body, metadata, settings):
             pass  # Preserve wording; never invent an exact deadline/timezone.
     return LLMDecision(action='store_only',commitments=[ExtractedCommitment(description=description,
         owner_name=metadata.get('author_name'),due_at=due.isoformat() if due else None)],
-        decisions=decision.decisions,memories=decision.memories)
+        decisions=decision.decisions,memories=decision.memories,profile_facts=decision.profile_facts)

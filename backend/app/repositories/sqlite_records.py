@@ -112,9 +112,20 @@ async def persist_extraction(
     commitments = items.get("commitments", [])
     decisions = items.get("decisions", [])
     memories = items.get("memories", [])
+    facts = items.get("profile_facts", [])
+    memory_ids = {}
+    if facts:
+        from app.services.profile_service import profile_items
+        from app.repositories.sqlite_profiles import replay_hash
+        # Validate before opening a write transaction; never trust caller keys.
+        checked = profile_items(facts, settings, meta, clean_body)
+        if checked != facts:
+            raise HTTPException(422, "Invalid profile storage items")
+        request_hash = replay_hash(items, meta, clean_body, occurred_at)
 
     with get_sqlite_connection(settings) as conn:
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.cursor()
             room_uuid = _ensure_tenant_and_room(conn, str_tenant_id, switch_room_id)
 
@@ -125,6 +136,18 @@ async def persist_extraction(
             existing_msg = cursor.fetchone()
             if existing_msg:
                 message_uuid = existing_msg[0]
+                if facts:
+                    source = conn.execute("SELECT * FROM messages WHERE id=?", (message_uuid,)).fetchone()
+                    if (source['tenant_id'], source['room_id'], source['switch_author_id'], source['body']) != (
+                            str_tenant_id, room_uuid, meta.get('switch_author_id'), clean_body):
+                        raise HTTPException(409, "Profile source conflict")
+                    replay = conn.execute("SELECT request_hash,counts FROM profile_extractions WHERE message_id=?",
+                                          (message_uuid,)).fetchone()
+                    if replay:
+                        if replay['request_hash'] != request_hash:
+                            raise HTTPException(409, "Profile extraction conflict")
+                        return json.loads(replay['counts'])
+                    raise HTTPException(409, "Profile backfill requires a separate operation")
             else:
                 message_uuid = str(uuid4())
                 cursor.execute(
@@ -192,6 +215,7 @@ async def persist_extraction(
             import hashlib
             for mem in memories:
                 mem_uuid = str(uuid4())
+                memory_ids[mem.get('extraction_key')] = mem_uuid
                 content = mem.get("content", "")
                 content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
                 cursor.execute(
@@ -210,6 +234,14 @@ async def persist_extraction(
                         content_hash,
                     ),
                 )
+
+            if facts:
+                from app.repositories.sqlite_profiles import store
+                store(conn, settings, tenant_id=str_tenant_id, room_id=room_uuid, message_id=message_uuid,
+                      author_name=clean_author, body=clean_body, metadata=meta, occurred_at=occurred_at,
+                      facts=facts, memories=memory_ids)
+                counts = dict(messages=1, commitments=len(commitments), decisions=len(decisions), memories=len(memories))
+                conn.execute("INSERT INTO profile_extractions VALUES(?,?,?)", (message_uuid, request_hash, json.dumps(counts)))
 
     if settings.sqlite_max_space_enabled and settings.sqlite_max_space_value > 0:
         unit = (settings.sqlite_max_space_unit or "MB").strip().upper()
@@ -306,7 +338,8 @@ async def query_team_memory(
         )
 
         for table, cols, order_col in specs:
-            query = f"SELECT {cols} FROM {table} WHERE tenant_id = ? AND room_id IN ({room_placeholders}) ORDER BY {order_col} DESC LIMIT 50"
+            active_filter = " AND active=1" if table == "memories" else ""
+            query = f"SELECT {cols} FROM {table} WHERE tenant_id = ? AND room_id IN ({room_placeholders}){active_filter} ORDER BY {order_col} DESC LIMIT 50"
             cursor.execute(query, (str_tenant_id, *room_ids))
             rows = [dict(r) for r in cursor.fetchall()]
 
@@ -359,7 +392,7 @@ def get_sqlite_storage_stats(settings: Settings | None = None) -> dict[str, int 
         page_size = (cursor.fetchone() or [4096])[0]
         logical_bytes = max(0, (page_count - freelist_count) * page_size)
 
-        for tbl in ("messages", "commitments", "decisions", "memories", "documents"):
+        for tbl in ("messages", "commitments", "decisions", "memories", "documents", "person_profiles", "person_profile_claims", "person_profile_evidence"):
             try:
                 if active.switch_tenant_id is not None:
                     cursor.execute(f"SELECT COUNT(*) FROM {tbl} WHERE tenant_id = ?", (str(active.switch_tenant_id),))
@@ -382,6 +415,12 @@ def get_sqlite_storage_stats(settings: Settings | None = None) -> dict[str, int 
             payload_bytes += int((cursor.fetchone() or [0])[0])
             cursor.execute("SELECT COALESCE(SUM(LENGTH(text) + COALESCE(LENGTH(embedding), 0) + 128), 0) FROM document_chunks")
             payload_bytes += int((cursor.fetchone() or [0])[0])
+            for table, fields in (("person_profiles", "LENGTH(switch_author_id)+LENGTH(display_name)"),
+                                  ("person_profile_claims", "LENGTH(attribute)+LENGTH(value)"),
+                                  ("person_profile_evidence", "LENGTH(quote)"),
+                                  ("profile_extractions", "LENGTH(request_hash)+LENGTH(counts)")):
+                cursor.execute(f"SELECT COALESCE(SUM({fields}+128),0) FROM {table}")
+                payload_bytes += int(cursor.fetchone()[0])
         except Exception:
             pass
 

@@ -44,7 +44,7 @@ async def claim_embeddings(settings: Settings) -> list[dict]:
                 SELECT id, tenant_id, room_id, content, content_hash
                 FROM memories
                 WHERE tenant_id = ? AND room_id IN ({room_placeholders})
-                  AND embedding IS NULL
+                  AND embedding IS NULL AND active=1
                   AND (claim_expires_at IS NULL OR claim_expires_at < DATETIME('now'))
                 LIMIT 8
                 """,
@@ -129,7 +129,7 @@ async def search_embeddings(
             f"""
             SELECT id, tenant_id, room_id, message_id, content, memory_type, embedding, created_at
             FROM memories
-            WHERE tenant_id = ? AND room_id IN ({room_placeholders}) AND embedding IS NOT NULL
+            WHERE tenant_id = ? AND room_id IN ({room_placeholders}) AND embedding IS NOT NULL AND active=1
             """,
             (str(settings.switch_tenant_id), *room_ids),
         )

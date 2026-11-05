@@ -6,6 +6,23 @@ The implemented flow receives Discord messages through Switch, journals human in
 
 ## Structure
 
+Optional source-backed person profiles are implemented and disabled by
+default (`PERSON_PROFILES_ENABLED=false`). Profiles use an internal UUID and unique
+tenant/room/Switch-sender identity, with atomic claim/evidence storage in Supabase
+and SQLite, explicit corrections and cited retrieval. Profile HTTP reads remain
+closed until verified individual-user authentication is integrated. The additive
+profile migration was applied to the configured Supabase project with user approval;
+its tables, backend-only grants and API exposure were verified. Profiles are enabled
+in the active local backend configuration; the corrected sender-specific query
+path still needs fresh live messages from distinct users. Future remote migrations require separate approval. See
+[PERSON_PROFILES.md](PERSON_PROFILES.md) for supported statements and verification.
+
+Personal profile questions now use the incoming sender's ID within the current
+tenant and room, bypassing shared-room search. An unknown user receives a no-saved-
+profile response instead of someone else's preference. Confirmation drafts are
+sender-scoped too. This correction needs no database migration; reload or restart
+the backend and restage any pending save from before the change.
+
 Content-free feature logs are enabled with `FEATURE_LOGS_ENABLED=true` (default). Restart the API/listener and look for `[feature]` events for disabled gates, queued work, persisted actions, replay/conflicts, embeddings and reminder outcomes. See [FEATURE_LOGGING.md](FEATURE_LOGGING.md) for event meanings and commands. Logs do not enable business features or prove unverified hosted/Discord delivery.
 
 

@@ -260,6 +260,11 @@ async def persist_extraction(
     if safe_source_id != switch_message_id:
         raise HTTPException(422,"Invalid source identifier")
     meta = source_metadata or {}
+    profile_write = bool(items.get('profile_facts'))
+    if profile_write:
+        from app.services.profile_service import profile_items
+        if profile_items(items['profile_facts'], settings, meta, body) != items['profile_facts']:
+            raise HTTPException(422, "Invalid profile storage items")
     source = {
         "switch_message_id": switch_message_id,
         "author_name": _redact(author_name, settings) or "Unknown sender",
@@ -271,13 +276,13 @@ async def persist_extraction(
                   "external_message_id", "external_author_id"):
         source[field] = redact_source_identifier(meta.get(field), settings)
     rpc_payload={"p_tenant_id":str(tenant_id),"p_switch_room_id":switch_room_id,"p_source":source,"p_items":items}
-    if meta.get('commitment_capture'):
-        # A required fifth argument selects the reviewed overload. An old hosted
-        # four-argument function cannot silently acknowledge an owner-less task.
-        rpc_payload['p_capture']=True
+    if meta.get('commitment_capture') or profile_write:
+        # Capture selects the reviewed overload. Profile writes select a distinct
+        # RPC below, so an older hosted writer cannot silently ignore profile data.
+        rpc_payload['p_capture']=bool(meta.get('commitment_capture'))
     try:
         response = await client.post(
-            _rest_url(settings, "rpc/store_message_extraction"),
+            _rest_url(settings, "rpc/store_profile_message_extraction" if profile_write else "rpc/store_message_extraction"),
             headers=_supabase_headers(settings),
             json=rpc_payload,
             timeout=10,
@@ -290,10 +295,7 @@ async def persist_extraction(
             raise ValueError("Invalid storage acknowledgement")
         return counts
     except (httpx.HTTPError, ValueError, TypeError) as err:
-        err_detail = str(err)
-        if isinstance(err, httpx.HTTPStatusError):
-            err_detail = f"{err} - body: {err.response.text}"
-        logger.warning("Supabase store reason=database_write_failed detail=%s", err_detail)
+        logger.warning("Supabase store reason=database_write_failed category=%s", type(err).__name__)
         raise HTTPException(503, "database_write_failed") from None
 
 

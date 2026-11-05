@@ -20,6 +20,7 @@ from app.repositories.record_repository import ensure_tenant_and_rooms_provision
 from app.services.viewer_service import ViewerHub
 from app.services.embedding_service import EmbeddingWorker
 from app.controllers.commitments import router as commitments_router
+from app.controllers.profiles import router as profiles_router
 from app.models.commitments import CommitmentError
 from app.services.reminder_worker import ReminderWorker
 from app.services.storage_service import StorageRetentionWorker
@@ -76,6 +77,7 @@ app.include_router(messages_router)
 app.include_router(viewer_router)
 app.include_router(ai_router)
 app.include_router(commitments_router)
+app.include_router(profiles_router)
 
 
 @app.middleware("http")
