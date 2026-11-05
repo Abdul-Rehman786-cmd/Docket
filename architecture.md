@@ -283,6 +283,12 @@ Every message is ingested into the authenticated preview feed (`POST /messages`)
 
 Outbound Discord posting is controlled by `SWITCH_REPLY_TO_DISCORD=true` in `backend/.env`.
 
+### Reply Watermark (`backend/.local/last_replied_message.txt`)
+To prevent replaying or re-answering historical questions when the backend is restarted after being offline, `AIService` tracks the highest message timestamp (`timestamp_ms`) that received an AI reply.
+- The watermark is persisted atomically in ignored `backend/.local/last_replied_message.txt`.
+- When an incoming Discord message has `timestamp_ms <= last_replied_watermark`, it is identified as an older or replayed message.
+- For such older messages, expensive database query synthesis and Discord replies are skipped (`logger.info("AI skipped reply to older message...")`), preventing duplicate responses to past queries upon listener reconnection. Memory storage (`store_only` / `store_and_query`) continues to safely upsert into Supabase with conflict resolution.
+
 `reply_mode` values: `silent`, `mentions_only`, `proactive`. Set from the Preferences UI and read by `router.py`.
 
 Because follow-ups may mark an unaddressed message as addressed, the backend should also check the message body for an explicit mention before treating it as a question. This is not yet verified.

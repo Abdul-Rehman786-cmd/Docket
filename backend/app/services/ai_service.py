@@ -4,17 +4,20 @@ import json
 import logging
 import re
 from collections import deque
+from datetime import datetime, timezone
+from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.core.config import Settings
+from app.core.config import BACKEND_DIR, Settings
 from app.core.message_logging import message_text_for_log
 from app.models.ai import AskRequest, LLMDecision
 from app.models.messages import IncomingMessage, MessageReceipt
 from app.repositories.ai_requests import AIRequestRepository
 from app.repositories.record_repository import query_team_memory, store_ai_memory
+from app.repositories.reply_state import ReplyState
 from app.services.message_service import (
     get_recent_messages, receive_message, message_reference, validate_message_scope,
 )
@@ -207,7 +210,7 @@ async def ask_switch(settings: Settings, question: str) -> str:
 
 
 class AIService:
-    def __init__(self):
+    def __init__(self, reply_state_path: Path | None = None):
         self.repository = AIRequestRepository()
         self.tasks: set[asyncio.Task] = set()
         self.queue = asyncio.Queue(maxsize=MAX_PENDING_JOBS)
@@ -217,6 +220,33 @@ class AIService:
         # Fingerprints of replies we posted. Switch sender IDs are participant IDs that may
         # differ from agent IDs, so also recognise our own posts by room + content.
         self.posted_replies: deque[str] = deque(maxlen=100)
+        self.reply_state_path = reply_state_path or (BACKEND_DIR / ".local" / "last_replied_message.txt")
+        self.reply_state = ReplyState.load(self.reply_state_path)
+
+    def is_message_older_than_last_reply(self, message_timestamp_ms: int | None) -> bool:
+        """Return True if message was sent at or before the latest message already responded to."""
+        if message_timestamp_ms is None or self.reply_state.timestamp_ms is None:
+            return False
+        return message_timestamp_ms <= self.reply_state.timestamp_ms
+
+    def record_reply(
+        self,
+        timestamp_ms: int | None,
+        message_id: str | None = None,
+        room_id: str | None = None,
+    ) -> None:
+        """Persist the highest replied message timestamp watermark to the .txt file."""
+        if timestamp_ms is None:
+            return
+        current_watermark = self.reply_state.timestamp_ms or 0
+        if timestamp_ms >= current_watermark:
+            self.reply_state = ReplyState(
+                timestamp_ms=timestamp_ms,
+                message_id=message_id,
+                room_id=room_id,
+                replied_at=datetime.now(timezone.utc).isoformat(),
+            )
+            self.reply_state.save(self.reply_state_path)
 
     @staticmethod
     def _reply_fingerprint(room_id: str, body: str) -> str:
@@ -248,6 +278,7 @@ class AIService:
             "switch_message_id": message.message_id,
             "author_name": message.sender_name or "Unknown sender",
             "occurred_at": receipt.received_at,
+            "timestamp_ms": message.timestamp_ms or int(receipt.received_at.timestamp() * 1000),
             "thread_id": message.thread_id,
             "addressed": message.addressed,
             "body": message.body,
@@ -427,22 +458,36 @@ class AIService:
                     )
 
                 if decision.action in ("query_only", "store_and_query"):
-                    db_context = await query_team_memory(
-                        settings,
-                        search_query=decision.search_query or row.question,
-                    )
-                    logger.info(
-                        "AI database query complete ref=%s request_id=%s action=%s matched=%s",
-                        msg_ref,
-                        row.request_id,
-                        decision.action,
-                        json.dumps({k: len(v) for k, v in db_context.items()}, sort_keys=True),
-                    )
-                    synthesis_prompt = build_context_synthesis_prompt(
-                        row.question, db_context, stored_counts=stored_counts
-                    )
-                    synthesized = await ask_switch(settings, synthesis_prompt)
-                    final_answer = _extract_plain_answer(synthesized)
+                    msg_timestamp = source_meta.get("timestamp_ms") if source_meta else None
+                    if (
+                        source_meta
+                        and source_meta.get("origin") == "discord"
+                        and self.is_message_older_than_last_reply(msg_timestamp)
+                    ):
+                        logger.info(
+                            "AI skipped database query/synthesis for older message ref=%s timestamp_ms=%s last_replied_ms=%s",
+                            msg_ref,
+                            msg_timestamp,
+                            self.reply_state.timestamp_ms,
+                        )
+                        final_answer = "Skipped response for older message."
+                    else:
+                        db_context = await query_team_memory(
+                            settings,
+                            search_query=decision.search_query or row.question,
+                        )
+                        logger.info(
+                            "AI database query complete ref=%s request_id=%s action=%s matched=%s",
+                            msg_ref,
+                            row.request_id,
+                            decision.action,
+                            json.dumps({k: len(v) for k, v in db_context.items()}, sort_keys=True),
+                        )
+                        synthesis_prompt = build_context_synthesis_prompt(
+                            row.question, db_context, stored_counts=stored_counts
+                        )
+                        synthesized = await ask_switch(settings, synthesis_prompt)
+                        final_answer = _extract_plain_answer(synthesized)
                 else:
                     final_answer = (decision.answer or "").strip()
                     if not final_answer:
@@ -482,6 +527,17 @@ class AIService:
                 )
             )
             if should_reply:
+                msg_timestamp = source_meta.get("timestamp_ms")
+                if self.is_message_older_than_last_reply(msg_timestamp):
+                    logger.info(
+                        "AI skipped reply to older message ref=%s timestamp_ms=%s last_replied_ms=%s",
+                        msg_ref,
+                        msg_timestamp,
+                        self.reply_state.timestamp_ms,
+                    )
+                    should_reply = False
+
+            if should_reply:
                 try:
                     requester_api = SwitchAPI(
                         settings.switch_bridge_url,
@@ -497,11 +553,18 @@ class AIService:
                         body=final_answer,
                         thread_id=reply_thread_id,
                     )
+                    msg_timestamp = source_meta.get("timestamp_ms")
+                    self.record_reply(
+                        timestamp_ms=msg_timestamp,
+                        message_id=source_meta.get("switch_message_id"),
+                        room_id=reply_room_id,
+                    )
                     logger.info(
-                        "AI reply posted to Switch room=%s ref=%s request_id=%s",
+                        "AI reply posted to Switch room=%s ref=%s request_id=%s watermark=%s",
                         reply_room_id,
                         msg_ref,
                         row.request_id,
+                        self.reply_state.timestamp_ms,
                     )
                 except Exception as post_err:
                     logger.warning(
