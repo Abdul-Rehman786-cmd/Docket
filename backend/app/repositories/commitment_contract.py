@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Storage-independent port; apply_action must be one atomic database operation."""
 
 from datetime import datetime
