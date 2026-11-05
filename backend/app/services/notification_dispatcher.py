@@ -6,6 +6,7 @@ from datetime import datetime,timedelta,timezone
 from app.models.reminders import NotificationFailure,NotificationEnvelope
 from app.services.reminder_planner import eligible,after_quiet_hours,utc
 from app.core.message_logging import message_text_for_log
+from app.core.feature_logging import feature_event
 
 
 def notification_fingerprint(room_id,body):
@@ -54,31 +55,57 @@ class NotificationDispatcher:
         self.readiness,self.render=readiness,render
 
     async def tick(self):
-        if self.lock.locked():return 0
+        if self.lock.locked():
+            feature_event('reminder_dispatch','skipped',reason='tick_already_running')
+            return 0
         async with self.lock:
             count=0
             for _ in range(4):
                 claimed=await self.repository.claim(1)
                 if not claimed:break
                 delivery=claimed[0]
+                feature_event('reminder_dispatch','claimed',reference=delivery.id,task=delivery.intention.commitment_id,attempts=delivery.attempts)
                 context=await self.repository.context(delivery)
-                if context is None:continue
+                if context is None:
+                    feature_event('reminder_dispatch','skipped',reference=delivery.id,reason='current_state_recheck')
+                    continue
                 now=utc(self.clock());when=self.readiness(context,now)
                 if when is None or when>now:
-                    await self.repository.defer(delivery,when);continue
+                    accepted=await self.repository.defer(delivery,when)
+                    feature_event('reminder_dispatch',('deferred' if when else 'superseded') if accepted is True else 'skipped',
+                                  reference=delivery.id,reason='quiet_hours_or_cadence' if when else 'current_state_recheck',
+                                  wait_seconds=max(0,int((when-now).total_seconds())) if when else 0)
+                    continue
                 notification=self.render(context,self.settings)
                 body=notification.body
                 await self.journal.remember_reply(notification_fingerprint(notification.room_id,body))
                 # Final database recheck and durable send-start marker, then release transaction.
-                if not await self.repository.begin(delivery,body):continue
+                if not await self.repository.begin(delivery,body):
+                    feature_event('reminder_dispatch','skipped',reference=delivery.id,reason='current_state_recheck')
+                    continue
+                feature_event('reminder_dispatch','send_started',reference=delivery.id,attempts=delivery.attempts+1)
                 try:
                     receipt=await self.sink.send(notification.room_id,body,notification.thread_id)
                 except NotificationFailure as error:
-                    await self.repository.finish(delivery,error.kind,error=error.category)
-                except asyncio.CancelledError:raise # Expired started claims become ambiguous, never blind retries.
+                    await self._save_result(delivery,error.kind,error=error.category)
+                    state='ambiguous' if error.kind=='ambiguous' else ('retry_scheduled' if error.kind=='transient' and delivery.attempts+1<3 else 'failed')
+                    feature_event('reminder_dispatch',state,reference=delivery.id,reason=error.category,attempts=delivery.attempts+1)
+                except asyncio.CancelledError:
+                    feature_event('reminder_dispatch','ambiguous',reference=delivery.id,reason='interrupted')
+                    raise # Expired started claims become ambiguous, never blind retries.
                 except Exception:
-                    await self.repository.finish(delivery,'ambiguous',error='send_outcome_unknown')
+                    await self._save_result(delivery,'ambiguous',error='send_outcome_unknown')
+                    feature_event('reminder_dispatch','ambiguous',reference=delivery.id,reason='send_outcome_unknown')
                 else:
-                    await self.repository.finish(delivery,'sent',message_id=receipt.message_id)
+                    await self._save_result(delivery,'sent',message_id=receipt.message_id)
                     count+=1
+                    feature_event('reminder_dispatch','acknowledged',reference=delivery.id,attempts=delivery.attempts+1)
+            feature_event('reminder_dispatch','succeeded' if count else 'idle',acknowledged=count)
             return count
+
+    async def _save_result(self,delivery,outcome,**kwargs):
+        try:
+            await self.repository.finish(delivery,outcome,**kwargs)
+        except Exception:
+            feature_event('reminder_dispatch','failed',reference=delivery.id,reason='storage_unavailable')
+            raise

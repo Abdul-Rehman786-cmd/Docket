@@ -123,6 +123,7 @@ class FakeOutbox:
         row=self.owned(delivery)
         if row:self.rows[delivery.intention.occurrence_key]=row.model_copy(update={'status':'pending' if until else 'superseded',
             'next_attempt_at':until,'claim_token':None,'lease_until':None})
+        return row is not None
 
     async def finish(self,delivery,outcome,message_id=None,error=None):
         if self.fail_finish:raise RuntimeError('Simulated lost database acknowledgement')

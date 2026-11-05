@@ -6,10 +6,13 @@ The implemented flow receives Discord messages through Switch, journals human in
 
 ## Structure
 
+Content-free feature logs are enabled with `FEATURE_LOGS_ENABLED=true` (default). Restart the API/listener and look for `[feature]` events for disabled gates, queued work, persisted actions, replay/conflicts, embeddings and reminder outcomes. See [FEATURE_LOGGING.md](FEATURE_LOGGING.md) for event meanings and commands. Logs do not enable business features or prove unverified hosted/Discord delivery.
+
+
 Reminder planning, a durable Supabase outbox and a Switch notification dispatcher are implemented locally, disabled by default. The hosted read-only check found storage/embedding support but no exposed lifecycle/chat/reminder deployment. See [REMINDERS.md](REMINDERS.md) for defaults, approval requirements, recovery behavior and the single-worker deployment limit. No external reminder has been sent or verified. The viewer's reminder controls are read-only; policies are backend-managed.
 
 
-Automatic chat lifecycle updates now connect the private AI proposal pipeline to the commitment service, with separate adapter authentication and trusted sender mappings. This path needs no human-login screen; it is disabled by default pending approved deployment/onboarding. See [AUTOMATIC_COMMITMENTS.md](AUTOMATIC_COMMITMENTS.md). Public/manual lifecycle routes remain protected. Viewer environment read/write APIs are disabled; edit ignored local configuration directly.
+The commitment creation flow is **tag the bot → extract → save atomically in Supabase → embed the linked memory → scoped semantic search**. It uses Switch's existing `addressed` metadata and the delivered sender ID, with no registration, membership/mapping lookup, role setup or human/bot classification. Unresolved deadlines retain their wording with no invented timestamp. Confirmation follows durable cloud storage and says indexing is pending. Creation does not require lifecycle/reminder activation. See [SIMPLE_COMMITMENT_CAPTURE.md](SIMPLE_COMMITMENT_CAPTURE.md) for the current contract, verification and deployment steps. Existing lifecycle/history/reminder services and protected manual HTTP routes remain separately controlled.
 
 
 Commitment lifecycle management is implemented separately with scoped reads/actions, audit history, versions and atomic idempotency. New routes fail closed until trusted individual-user authentication is supplied. The additive migration is prepared for review, not deployed. See [COMMITMENT_MANAGEMENT.md](COMMITMENT_MANAGEMENT.md) for contracts and deployment dependencies.

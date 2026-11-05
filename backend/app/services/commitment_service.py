@@ -11,17 +11,19 @@ from app.models.commitments import (
     ReassignRequest, ReminderState, RescheduleRequest, Scope,
 )
 from app.repositories.commitment_contract import CommitmentRepository
+from app.core.feature_logging import feature_event
 
 MANAGEMENT = {Action.approve, Action.reject, Action.cancel, Action.reassign, Action.reschedule}
 STATE_FIELDS = (
     "approval_status", "approval_by_switch_user_id", "approval_at", "task_status",
     "owner_switch_user_id", "owner_name", "due_at", "completed_at", "cancelled_at", "next_reminder_at", "version",
     "automated_acceptance_at", "automated_acceptance_source_id",
+    "owner_accepted_at", "owner_acceptance_source_id",
 )
 
 
 def reminder_state(record: CommitmentState) -> ReminderState:
-    if record.approval_status != "approved":
+    if record.approval_status != "approved" and not (record.approval_status=='pending' and record.owner_accepted_at):
         reason = record.approval_status
     elif record.task_status in ("completed", "cancelled"):
         reason = record.task_status
@@ -46,11 +48,12 @@ def utc_text(value: datetime | str | None) -> str:
 
 
 def summary_text(description: str, owner_name=None, owner_id=None, due_at=None,
-                 approval_status="pending", task_status="not_started", automated_acceptance_at=None) -> str:
+                 approval_status="pending", task_status="not_started", automated_acceptance_at=None, owner_accepted_at=None) -> str:
     owner = owner_id or ("unresolved: " + owner_name if owner_name else "unassigned")
     return (f"Commitment: {description}\nAssignee: {owner}\nApproval: {approval_status}"
             f"\nTask: {task_status}\nDue (UTC): {utc_text(due_at)}"
-            + ('\nAcceptance: automated owner completion evidence' if automated_acceptance_at else ''))
+            + ('\nAcceptance: automated owner completion evidence' if automated_acceptance_at else '')
+            + ('\nAcceptance: explicit owner statement' if owner_accepted_at else ''))
 
 
 def request_content(commitment_id: UUID, action: Action, request: ActionRequest, chat=None) -> dict:
@@ -71,9 +74,9 @@ def authorize(context: ActionContext, actor: Actor, action: Action, chat=None) -
         if (chat.backend_actor!='switch-ingestion-worker' or chat.source.actor!=actor or
             (record.tenant_id,record.room_id)!=(chat.source.scope.tenant_id,chat.source.scope.room_id)):
             raise CommitmentError('forbidden_action',403)
-        if action not in (Action.complete,Action.cancel,Action.reschedule,Action.reassign):
+        if action not in (Action.start,Action.complete,Action.cancel,Action.reschedule,Action.reassign):
             raise CommitmentError('forbidden_action',403)
-        if context.role=='admin': return
+        if context.role=='admin' and chat.policy.mode!='open_mentions': return
         if action==Action.reassign or record.owner_switch_user_id!=actor.subject_id:
             raise CommitmentError('forbidden_action',403)
         return
@@ -121,7 +124,9 @@ def decide(context: ActionContext, actor: Actor, action: Action, request: Action
         pending_owner_evidence = (chat is not None and action==Action.complete and
             record.approval_status=='pending' and record.owner_switch_user_id==actor.subject_id and
             chat.policy.accept_pending_owner_completion)
-        if record.approval_status != "approved" and not pending_owner_evidence:
+        owner_accepted = (chat is not None and chat.policy.mode=='open_mentions' and
+            record.owner_accepted_at is not None and record.approval_status=='pending')
+        if record.approval_status != "approved" and not pending_owner_evidence and not owner_accepted:
             raise CommitmentError("invalid_transition", 409)
         desired = "in_progress" if action == Action.start else "completed"
         if record.task_status not in ("not_started", "in_progress", desired):
@@ -139,7 +144,8 @@ def decide(context: ActionContext, actor: Actor, action: Action, request: Action
         if not isinstance(request, ReassignRequest) or not context.assignee_valid:
             raise CommitmentError("invalid_assignee", 422)
         if request.assignee_id != record.owner_switch_user_id:
-            updates.update(owner_switch_user_id=request.assignee_id, owner_name=None)
+            updates.update(owner_switch_user_id=request.assignee_id, owner_name=None,
+                owner_accepted_at=None,owner_acceptance_source_id=None)
     elif action == Action.reschedule:
         if not isinstance(request, RescheduleRequest):
             raise CommitmentError("invalid_action_payload", 422)
@@ -156,21 +162,43 @@ class CommitmentService:
                  clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self.repository, self.clock = repository, clock
 
+    async def create_chat(self, execution, key, description, due_at):
+        if execution.policy.mode!='open_mentions' or execution.backend_actor!='switch-ingestion-worker':
+            raise CommitmentError('forbidden_action',403)
+        at=self.clock()
+        if at.tzinfo is None or at.utcoffset() is None: raise ValueError('Clock must be aware')
+        return await self.repository.create_chat(execution,key,description,due_at,at.astimezone(timezone.utc))
+
     async def get(self, scope: Scope, actor: Actor, commitment_id: UUID) -> CommitmentView:
         context = await self.repository.context(scope, actor, commitment_id)
+        feature_event('commitment','succeeded',task=commitment_id,reason='read_detail')
         return CommitmentView(commitment=context.commitment, reminder=reminder_state(context.commitment))
 
     async def list(self, scope: Scope, actor: Actor, filters: Filters) -> CommitmentPage:
         rows, next_offset = await self.repository.list(scope, actor, filters)
+        feature_event('commitment','succeeded',reason='read_list',count=len(rows))
         return CommitmentPage(items=[CommitmentView(commitment=row, reminder=reminder_state(row)) for row in rows],
                               next_offset=next_offset)
 
     async def history(self, scope: Scope, actor: Actor, commitment_id: UUID, limit=25, offset=0) -> HistoryPage:
         rows, next_offset = await self.repository.history(scope, actor, commitment_id, limit, offset)
+        feature_event('commitment','succeeded',task=commitment_id,reason='read_history',count=len(rows))
         return HistoryPage(items=rows, next_offset=next_offset)
 
     async def perform(self, scope: Scope, actor: Actor, commitment_id: UUID,
                       action: Action, request: ActionRequest) -> ActionResult:
+        feature_event('commitment','requested',task=commitment_id,action=action.value,version=request.expected_version)
+        try:
+            return await self._perform_manual(scope,actor,commitment_id,action,request)
+        except CommitmentError as error:
+            feature_event('commitment','conflict' if error.status==409 else ('failed' if error.status>=500 else 'blocked'),
+                          task=commitment_id,action=action.value,reason=error.code,status=error.status)
+            raise
+        except Exception:
+            feature_event('commitment','failed',task=commitment_id,action=action.value,reason='unexpected_failure')
+            raise
+
+    async def _perform_manual(self,scope,actor,commitment_id,action,request):
         if request.reason:
             from app.core.config import get_settings
             from app.core.message_logging import message_text_for_log
@@ -184,16 +212,35 @@ class CommitmentService:
         decide(context, actor, action, request, at)
         # Even a replay goes through the transaction, which rechecks current membership/permissions.
         # The preceding read is only preflight and is NOT part of the atomic write transaction.
-        return await self.repository.apply_action(scope, actor, commitment_id, action, request, at)
+        result=await self.repository.apply_action(scope, actor, commitment_id, action, request, at)
+        feature_event('commitment','replayed' if context.previous_request is not None else ('applied' if result.changed else 'no_change'),
+                      task=commitment_id,action=action.value,version=result.commitment.version,changed=result.changed)
+        return result
 
     async def perform_chat(self, execution, commitment_id: UUID, action: Action, request: ActionRequest):
         """Internal worker entry. Repository must revalidate source/mapping/policy under lock.
 
         HTTP controllers never construct ChatExecution; AI output cannot supply it.
         """
+        feature_event('commitment','requested',reference=execution.source.switch_message_id,task=commitment_id,
+                      action=action.value,version=request.expected_version)
+        try:
+            return await self._perform_chat(execution,commitment_id,action,request)
+        except CommitmentError as error:
+            feature_event('commitment','conflict' if error.status==409 else ('failed' if error.status>=500 else 'blocked'),
+                          task=commitment_id,action=action.value,reason=error.code,status=error.status)
+            raise
+        except Exception:
+            feature_event('commitment','failed',task=commitment_id,action=action.value,reason='unexpected_failure')
+            raise
+
+    async def _perform_chat(self,execution,commitment_id,action,request):
         scope,actor=execution.source.scope,execution.source.actor
         context=await self.repository.context(scope,actor,commitment_id,request)
         at=self.clock()
         if at.tzinfo is None or at.utcoffset() is None: raise ValueError('Clock must be aware')
         decide(context,actor,action,request,at,execution)
-        return await self.repository.apply_chat_action(execution,commitment_id,action,request,at)
+        result=await self.repository.apply_chat_action(execution,commitment_id,action,request,at)
+        feature_event('commitment','replayed' if context.previous_request is not None else ('applied' if result.changed else 'no_change'),
+                      task=commitment_id,action=action.value,version=result.commitment.version,changed=result.changed)
+        return result

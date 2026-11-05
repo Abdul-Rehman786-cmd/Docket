@@ -28,13 +28,16 @@ from app.services.ai_service import response_scope
 async def check(settings):
     connected = await check_database_connection(settings)
     return {"cloud_status":connected["status"],"backend_key_type":backend_key_type(settings.supabase_service_role_key),
-            "storage_rpc_available":await storage_rpc_available(settings)}
+            "storage_rpc_available":await storage_rpc_available(settings),
+            "capture_overload_exposed":await storage_rpc_available(settings,capture=True)}
 
 
 async def verify(settings):
     preflight = await check(settings)
     if not preflight["storage_rpc_available"]:
         return {**preflight,"fixture_state":"blocked_missing_storage_rpc","fixture_rows_created":0}
+    if not preflight.get('capture_overload_exposed'):
+        return {**preflight,'fixture_state':'blocked_missing_capture_overload','fixture_rows_created':0}
     tenant, room = uuid4(), uuid4()
     marker = "TM-cloud-fixture-"+str(uuid4())
     fixture = settings.model_copy(update={
@@ -62,9 +65,7 @@ async def verify(settings):
 
         async def extraction(*args,**kwargs):
             return json.dumps({"action":"store_only",
-                "commitments":[{"description":"Send fixture report by Friday"}],
-                "decisions":[{"summary":"Use FastAPI for the fixture"}],
-                "memories":[{"content":"Fixture planning is Friday"}]})
+                "commitments":[{"description":"send the fixture report"}]})
 
         try:
             await request("POST","tenants",json={"id":str(tenant),"name":marker})
@@ -81,7 +82,7 @@ async def verify(settings):
                     timestamp_ms=int(datetime.now(timezone.utc).timestamp()*1000)
                     payload={"tenant_id":str(tenant),"room_id":marker,"message_id":marker,
                         "sender":"fixture-human","sender_name":"Disposable fixture user",
-                        "body":marker+": planning is Friday. I'll send the fixture report by Friday. We decided to use FastAPI for the fixture.",
+                        "body":"@fixture-agent I'll send the fixture report by Friday.","addressed":True,
                         "timestamp_ms":timestamp_ms,"thread_id":"fixture-thread",
                         "workspace_id":"fixture-workspace","channel_id":"fixture-channel",
                         "external_message_id":"fixture-platform-message","external_author_id":"fixture-platform-author"}
@@ -93,7 +94,7 @@ async def verify(settings):
                         await asyncio.wait_for(app.state.ai_service.queue.join(),45)
                         result=app.state.ai_service.repository.recent(response_scope(fixture))[0]
                         assert result.status=="answered", "fixture_processing_failed"
-                        expected={"messages":1,"commitments":1,"decisions":1,"memories":3}
+                        expected={"messages":1,"commitments":1,"decisions":0,"memories":1}
                         assert result.stored_counts==expected
                         repeated=await http.post("/messages",headers=header,json=payload)
                         assert repeated.status_code==200 and repeated.json()["duplicate"]
@@ -114,8 +115,8 @@ async def verify(settings):
                 assert all(row["message_id"]==source["id"] for row in records[table])
             commitment=records["commitments"][0]
             assert commitment["approval_status"]=="pending" and commitment["task_status"]=="not_started"
-            assert commitment["owner_name"] is None and commitment["due_at"] is None
-            assert records["decisions"][0]["approval_status"]=="pending"
+            assert commitment['owner_switch_user_id']=='fixture-human' and commitment["due_at"] is None
+            assert 'Deadline wording: Friday' in records['memories'][0]['content']
             evidence.update(stored_counts=counts,duplicate_counts_unchanged=True,source_links_verified=True,
                             source_metadata_verified=True,human_approval_defaults_verified=True)
         finally:

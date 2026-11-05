@@ -1,5 +1,9 @@
 # Automatic commitment management from chat
 
+For current creation, use [SIMPLE_COMMITMENT_CAPTURE.md](SIMPLE_COMMITMENT_CAPTURE.md). Registration/member mapping/human classification and lifecycle activation are not prerequisites for tagged capture. This document describes the separately controlled advanced action integration.
+
+**Current open chat policy:** [OPEN_COMMITMENTS.md](OPEN_COMMITMENTS.md) supersedes the mapped-member onboarding and untagged-action requirements below. The older mapped contract is retained for other internal integrations and its historical tests; the ingestion worker uses `prepare_open`, not this legacy onboarding path. Open chat derives sender ownership without registration, requires a genuine agent mention, supports creation/start/own-task reads, and records explicit owner acceptance. The existing local chat migration has been revised by user instruction; editing it does not deploy or safely replay an applied migration.
+
 Implemented locally on 2026-11-05. Hosted migration, live sender onboarding and external chat verification have not been performed. No real tasks or Discord messages were changed.
 
 ## Execution path and reused components

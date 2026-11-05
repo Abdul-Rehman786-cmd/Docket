@@ -241,6 +241,10 @@ async def test_authenticated_adapter_boundary_and_env_routes_fail_closed(monkeyp
 async def test_worker_recovery_replays_saved_proposal_without_duplicate_task_or_audit(monkeypatch):
     repo=FakeChatRepository(); settings=config(repo)
     chat=CommitmentChatService(repo,CommitmentService(repo,clock=lambda:NOW))
+    # This test isolates the legacy mapped transaction/recovery contract. The open
+    # adapter and genuine mention boundary is exercised in test_open_commitments.
+    monkeypatch.setattr(chat,'prepare_open',chat.prepare)
+    monkeypatch.setattr(ai_service,'explicit_agent_mention',lambda *args:True)
     monkeypatch.setattr(ai_service,'CommitmentChatService',lambda storage:chat)
     calls=[]
     async def mocked_ai(settings,question,**kwargs):
@@ -300,7 +304,7 @@ async def test_update_ambiguity_finishes_once_and_blocks_duplicate_extraction(mo
         MessageReceiptRepository(),adapter_verified=True)
     await service.queue.join()
     job=await service.journal.get(receipt.message_ref)
-    assert job['state']=='done' and job['attempts']==1 and json.loads(job['chat_outcome'])['status']=='ambiguous'
+    assert job['state']=='done' and job['attempts']==1 and json.loads(job['chat_outcome'])['status']=='unauthorized'
     assert not posted and not repo.events and repo.record.version==1
     assert await service.journal.recoverable(ai_service.ingestion_scope(settings),settings.allowed_switch_rooms)==[]
     await service.close()
@@ -431,6 +435,8 @@ async def test_chat_transport_carries_backend_actor_source_and_original_sender(m
 async def test_disabling_feature_blocks_saved_proposal_during_recovery(monkeypatch):
     repo=FakeChatRepository(); settings=config(repo)
     chat=CommitmentChatService(repo,CommitmentService(repo,clock=lambda:NOW))
+    monkeypatch.setattr(chat,'prepare_open',chat.prepare)
+    monkeypatch.setattr(ai_service,'explicit_agent_mention',lambda *args:True)
     monkeypatch.setattr(ai_service,'CommitmentChatService',lambda storage:chat)
     async def mocked_ai(settings,question,**kwargs):
         plan=ChatPlan.model_validate(kwargs['task_context'])

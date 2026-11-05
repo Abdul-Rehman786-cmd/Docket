@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.core.http_clients import service_client
 from app.models.commitments import ActionContext, ActionResult, AuditEvent, CommitmentError, CommitmentState
 from app.repositories.record_repository import _rest_url, _supabase_headers
+from app.core.feature_logging import feature_event
 
 PUBLIC_ERRORS = {
     "not_found": 404, "forbidden_action": 403, "stale_version": 409,
@@ -34,6 +35,8 @@ class SupabaseCommitmentRepository:
                         body = {}
                     category = body.get("message") if isinstance(body, dict) else None
                     code = body.get("code") if isinstance(body, dict) else None
+                    feature_event('storage','blocked' if code=='PGRST202' else 'failed',
+                                  reason='rpc_not_available' if code=='PGRST202' else 'database_request_rejected',status=response.status_code)
                     if category in PUBLIC_ERRORS and code == "PT" + str(PUBLIC_ERRORS[category]):
                         raise CommitmentError(category, PUBLIC_ERRORS[category])
                     raise CommitmentError("commitment_storage_unavailable", 503)
@@ -120,6 +123,8 @@ class SupabaseCommitmentRepository:
         from app.models.commitment_chat import ChatPlan
         source={key:metadata.get(key) for key in ('switch_message_id','switch_author_id','external_author_id',
                                                    'thread_id','occurred_at','external_message_id','workspace_id','channel_id')}
+        if metadata.get('policy_mode')=='open_mentions':
+            source.update({key:metadata.get(key) for key in ('policy_mode','registered_agent_id','registered_agent_name','sender_is_bot')})
         result=await self._rpc('prepare_commitment_chat',dict(p_tenant_id=str(tenant_id),
             p_switch_room_id=metadata['room_id'],p_source={**source,'body':body}))
         try:
@@ -142,6 +147,25 @@ class SupabaseCommitmentRepository:
                 or parsed.event.idempotency_key!=request.idempotency_key
                 or parsed.event.commitment_id!=commitment_id or parsed.event.tenant_id!=scope.tenant_id
                 or parsed.event.room_id!=scope.room_id):
+                raise CommitmentError('invalid_storage_result',503)
+            return parsed
+        except ValidationError:
+            raise CommitmentError('invalid_storage_result',503) from None
+
+    async def create_chat(self,execution,key,description,due_at,at):
+        source=execution.source
+        result=await self._rpc('create_owner_commitment',{
+            **self._scope(source.scope,source.actor),'p_chat_source_id':str(source.id),
+            'p_idempotency_key':str(key),'p_description':description,
+            'p_due_at':due_at.isoformat() if due_at else None})
+        try:
+            parsed=ActionResult.model_validate(result)
+            self._validate_scope(parsed.commitment,source.scope)
+            if (parsed.commitment.owner_switch_user_id!=source.actor.subject_id or
+                parsed.event.actor_id!=source.actor.subject_id or parsed.event.source_evidence_id!=source.id or
+                parsed.event.backend_actor!=execution.backend_actor or parsed.event.idempotency_key!=key or
+                parsed.event.action.value!='create' or parsed.event.commitment_id!=parsed.commitment.id or
+                parsed.event.tenant_id!=source.scope.tenant_id or parsed.event.room_id!=source.scope.room_id):
                 raise CommitmentError('invalid_storage_result',503)
             return parsed
         except ValidationError:

@@ -1,3 +1,6 @@
+-- Locally revised for open mentions. Hosted metadata lacks this module; migration
+-- history/other environments are unverified. Do NOT replay an applied version.
+-- Requires reviewed hosted reconciliation, not a reset or history rewrite.
 -- Additive proposal; requires reviewed storage/embedding and commitment lifecycle.
 -- Backend-only chat execution. Never apply the destructive core reset remotely.
 BEGIN;
@@ -29,6 +32,15 @@ CREATE TABLE public.commitment_chat_sources (
 );
 ALTER TABLE public.commitments ADD COLUMN automated_acceptance_at timestamptz;
 ALTER TABLE public.commitments ADD COLUMN automated_acceptance_source_id uuid;
+ALTER TABLE public.commitments ADD COLUMN owner_accepted_at timestamptz;
+ALTER TABLE public.commitments ADD COLUMN owner_acceptance_source_id uuid;
+ALTER TABLE public.commitments ADD CONSTRAINT commitments_owner_acceptance_pair CHECK (
+    (owner_accepted_at IS NULL) = (owner_acceptance_source_id IS NULL));
+ALTER TABLE public.commitments ADD FOREIGN KEY(tenant_id,room_id,owner_acceptance_source_id)
+    REFERENCES public.commitment_chat_sources(tenant_id,room_id,id) ON DELETE RESTRICT;
+ALTER TABLE public.commitment_action_events DROP CONSTRAINT commitment_action_events_action_check;
+ALTER TABLE public.commitment_action_events ADD CONSTRAINT commitment_action_events_action_check
+    CHECK(action IN ('create','approve','reject','start','complete','cancel','reassign','reschedule'));
 ALTER TABLE public.commitments ADD CONSTRAINT commitments_automated_acceptance_pair CHECK (
     (automated_acceptance_at IS NULL AND automated_acceptance_source_id IS NULL) OR
     (automated_acceptance_at IS NOT NULL AND automated_acceptance_source_id IS NOT NULL AND
@@ -68,18 +80,39 @@ RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path='' AS $$
 DECLARE
     room_uuid uuid; policy public.commitment_chat_policies; identity_row public.commitment_chat_identities;
     source_row public.commitment_chat_sources; actor_role text; candidates jsonb; members jsonb;
+    open_mode boolean := p_source->>'policy_mode'='open_mentions'; policy_json jsonb;
 BEGIN
     SELECT id INTO room_uuid FROM public.rooms WHERE tenant_id=p_tenant_id AND switch_room_id=p_switch_room_id AND enabled;
     IF NOT FOUND THEN RETURN NULL; END IF;
     SELECT * INTO policy FROM public.commitment_chat_policies WHERE tenant_id=p_tenant_id AND room_id=room_uuid AND enabled;
     IF NOT FOUND THEN RETURN NULL; END IF;
+    IF coalesce(open_mode,false) THEN
+      IF p_source->'sender_is_bot' IS DISTINCT FROM 'false'::jsonb
+        OR nullif(p_source->>'switch_author_id','') IS NULL
+        OR nullif(p_source->>'registered_agent_id','') IS NULL
+        OR nullif(p_source->>'registered_agent_name','') IS NULL THEN RETURN NULL; END IF;
+      -- Automatic participation projection, no onboarding or privileged authority.
+      -- Platform is Switch's immutable puppet namespace; never join by display name.
+      identity_row.subject_id := 'openchat:'||encode(sha256(convert_to(
+        jsonb_build_array(p_tenant_id::text,room_uuid::text,'switch',p_source->>'switch_author_id')::text,'UTF8')),'hex');
+      identity_row.switch_author_id:=p_source->>'switch_author_id';
+      identity_row.external_author_id:=coalesce(p_source->>'external_author_id','');
+      INSERT INTO public.room_members(tenant_id,room_id,switch_user_id,role)
+        VALUES(p_tenant_id,room_uuid,identity_row.subject_id,'member') ON CONFLICT DO NOTHING;
+      actor_role:='member'; -- Open chat never inherits admin or approver overrides.
+    ELSE
     SELECT i.* INTO identity_row FROM public.commitment_chat_identities i
       WHERE i.tenant_id=p_tenant_id AND i.room_id=room_uuid AND i.switch_author_id=p_source->>'switch_author_id'
         AND i.external_author_id=coalesce(p_source->>'external_author_id','');
     IF NOT FOUND THEN RETURN NULL; END IF;
+    END IF;
+    policy_json:=jsonb_build_object('timezone',policy.timezone,'handoff',policy.handoff,
+      'accept_pending_owner_completion',policy.accept_pending_owner_completion)||
+      CASE WHEN coalesce(open_mode,false) THEN '{"mode":"open_mentions"}'::jsonb ELSE '{}'::jsonb END;
     SELECT role INTO actor_role FROM public.room_members WHERE tenant_id=p_tenant_id AND room_id=room_uuid
       AND switch_user_id=identity_row.subject_id;
     IF NOT FOUND THEN RETURN NULL; END IF;
+    IF coalesce(open_mode,false) THEN actor_role:='member'; END IF;
     IF jsonb_typeof(p_source->'body') IS DISTINCT FROM 'string' OR length(p_source->>'body')>64000
       OR nullif(p_source->>'occurred_at','') IS NULL OR nullif(p_source->>'switch_message_id','') IS NULL THEN
       RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid_action_payload'; END IF;
@@ -89,8 +122,7 @@ BEGIN
       AND switch_message_id=p_source->>'switch_message_id';
     IF FOUND THEN
       IF source_row.source_input<>p_source OR source_row.subject_id<>identity_row.subject_id OR
-        source_row.policy_snapshot<>jsonb_build_object('timezone',policy.timezone,'handoff',policy.handoff,
-          'accept_pending_owner_completion',policy.accept_pending_owner_completion) THEN
+        source_row.policy_snapshot<>policy_json THEN
         RAISE EXCEPTION USING ERRCODE='PT409',MESSAGE='idempotency_conflict'; END IF;
     ELSE
       INSERT INTO public.commitment_chat_sources(tenant_id,room_id,switch_message_id,switch_author_id,external_author_id,
@@ -98,15 +130,15 @@ BEGIN
       VALUES(p_tenant_id,room_uuid,p_source->>'switch_message_id',identity_row.switch_author_id,identity_row.external_author_id,
         identity_row.subject_id,p_source->>'thread_id',p_source->>'external_message_id',p_source->>'workspace_id',p_source->>'channel_id',
         p_source->>'body',(p_source->>'occurred_at')::timestamptz,p_source,
-        jsonb_build_object('timezone',policy.timezone,'handoff',policy.handoff,'accept_pending_owner_completion',policy.accept_pending_owner_completion))
+        policy_json)
       RETURNING * INTO source_row;
     END IF;
     SELECT coalesce(jsonb_agg(to_jsonb(candidate)),'[]') INTO candidates FROM (
       SELECT c.* FROM public.commitments c JOIN public.messages m ON m.id=c.message_id AND m.tenant_id=c.tenant_id AND m.room_id=c.room_id
       WHERE c.tenant_id=p_tenant_id AND c.room_id=room_uuid AND c.approval_status<>'rejected'
         AND c.task_status IN ('not_started','in_progress')
-        AND (c.owner_switch_user_id=identity_row.subject_id OR actor_role='admin')
-        AND m.thread_id IS NOT DISTINCT FROM source_row.thread_id
+        AND (c.owner_switch_user_id=identity_row.subject_id OR (actor_role='admin' AND NOT coalesce(open_mode,false)))
+        AND (coalesce(open_mode,false) OR m.thread_id IS NOT DISTINCT FROM source_row.thread_id)
         AND m.occurred_at <= source_row.occurred_at
       ORDER BY c.created_at DESC,c.id LIMIT 21
     ) candidate;
@@ -121,26 +153,94 @@ BEGIN
       'switch_message_id',source_row.switch_message_id,'switch_author_id',source_row.switch_author_id,
       'external_author_id',nullif(source_row.external_author_id,''),'actor',jsonb_build_object('subject_id',source_row.subject_id),
       'external_message_id',source_row.external_message_id,'workspace_id',source_row.workspace_id,'channel_id',source_row.channel_id,
-      'body',source_row.body,'occurred_at',source_row.occurred_at,'thread_id',source_row.thread_id),
-      'role',actor_role,'policy',jsonb_build_object('timezone',policy.timezone,'handoff',policy.handoff,
-       'accept_pending_owner_completion',policy.accept_pending_owner_completion),
-      'candidates',candidates,'members',members,'truncated',jsonb_array_length(candidates)>20 OR jsonb_array_length(members)>100);
+      'body',source_row.body,'occurred_at',source_row.occurred_at,'thread_id',source_row.thread_id,
+      'registered_agent_name',p_source->>'registered_agent_name'),
+      'role',actor_role,'policy',policy_json,
+      'candidates',candidates,'members',CASE WHEN coalesce(open_mode,false) THEN '[]'::jsonb ELSE members END,
+      'truncated',jsonb_array_length(candidates)>20 OR (NOT coalesce(open_mode,false) AND jsonb_array_length(members)>100));
 END;
 $$;
+
+-- Same pure eligibility contract used by the existing reminder outbox migration.
+CREATE OR REPLACE FUNCTION public.commitment_reminder(c public.commitments) RETURNS jsonb
+LANGUAGE sql STABLE SECURITY INVOKER SET search_path='' AS $$
+    SELECT jsonb_build_object('eligible',reason='eligible','reason',reason,'due_at',c.due_at,'assignee_id',c.owner_switch_user_id)
+    FROM (SELECT CASE WHEN c.approval_status<>'approved' AND NOT (c.approval_status='pending' AND c.owner_accepted_at IS NOT NULL)
+      THEN c.approval_status WHEN c.task_status IN ('completed','cancelled') THEN c.task_status
+      WHEN c.owner_switch_user_id IS NULL THEN 'unassigned' WHEN c.due_at IS NULL THEN 'no_deadline' ELSE 'eligible' END reason) s;
+$$;
+
+-- Creation is its own atomic lifecycle transaction, never arbitrary AI extraction.
+CREATE FUNCTION public.create_owner_commitment(p_tenant_id uuid,p_room_id uuid,p_actor_id text,
+  p_chat_source_id uuid,p_idempotency_key uuid,p_description text,p_due_at timestamptz) RETURNS jsonb
+LANGUAGE plpgsql SECURITY INVOKER SET search_path='' AS $$
+DECLARE
+  s public.commitment_chat_sources; p public.commitment_chat_policies;
+  c public.commitments; e public.commitment_action_events; receipt public.commitment_action_receipts;
+  msg public.messages; content jsonb; result jsonb; at_time timestamptz:=transaction_timestamp();
+BEGIN
+  IF p_idempotency_key IS NULL OR p_description IS NULL OR length(btrim(p_description)) NOT BETWEEN 2 AND 2000 THEN
+    RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid_action_payload'; END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_tenant_id::text||'/'||p_room_id::text||'/'||p_actor_id||'/'||p_idempotency_key::text,0));
+  PERFORM 1 FROM public.rooms WHERE tenant_id=p_tenant_id AND id=p_room_id AND enabled FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='PT404',MESSAGE='not_found'; END IF;
+  SELECT * INTO s FROM public.commitment_chat_sources WHERE tenant_id=p_tenant_id AND room_id=p_room_id AND id=p_chat_source_id
+    AND subject_id=p_actor_id AND policy_snapshot->>'mode'='open_mentions' FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='PT403',MESSAGE='forbidden_action'; END IF;
+  SELECT * INTO p FROM public.commitment_chat_policies WHERE tenant_id=p_tenant_id AND room_id=p_room_id AND enabled FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='PT403',MESSAGE='forbidden_action'; END IF;
+  IF s.policy_snapshot<>jsonb_build_object('timezone',p.timezone,'handoff',p.handoff,
+    'accept_pending_owner_completion',p.accept_pending_owner_completion,'mode','open_mentions') THEN
+    RAISE EXCEPTION USING ERRCODE='PT409',MESSAGE='stale_version'; END IF;
+  content:=jsonb_build_object('action','create','chat_source_id',s.id,'description',p_description,'due_at',p_due_at);
+  SELECT * INTO receipt FROM public.commitment_action_receipts WHERE tenant_id=p_tenant_id AND room_id=p_room_id
+    AND actor_id=p_actor_id AND idempotency_key=p_idempotency_key;
+  IF FOUND THEN
+    IF receipt.request<>content THEN RAISE EXCEPTION USING ERRCODE='PT409',MESSAGE='idempotency_conflict'; END IF;
+    RETURN receipt.result;
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.commitment_action_events WHERE source_evidence_id=s.id) THEN
+    RAISE EXCEPTION USING ERRCODE='PT409',MESSAGE='idempotency_conflict'; END IF;
+  INSERT INTO public.messages(tenant_id,room_id,switch_message_id,switch_author_id,body,occurred_at,thread_id,
+    workspace_id,channel_id,external_message_id,external_author_id,extraction_status,extraction_completed_at)
+    VALUES(p_tenant_id,p_room_id,s.switch_message_id,s.switch_author_id,s.body,s.occurred_at,s.thread_id,
+      s.workspace_id,s.channel_id,s.external_message_id,nullif(s.external_author_id,''),'completed',at_time)
+    ON CONFLICT(tenant_id,room_id,switch_message_id) DO NOTHING;
+  SELECT * INTO msg FROM public.messages WHERE tenant_id=p_tenant_id AND room_id=p_room_id AND switch_message_id=s.switch_message_id FOR SHARE;
+  IF msg.body<>s.body OR msg.switch_author_id IS DISTINCT FROM s.switch_author_id OR msg.occurred_at<>s.occurred_at
+    OR msg.thread_id IS DISTINCT FROM s.thread_id THEN RAISE EXCEPTION USING ERRCODE='PT409',MESSAGE='idempotency_conflict'; END IF;
+  INSERT INTO public.commitments(tenant_id,room_id,message_id,extraction_key,description,owner_switch_user_id,due_at,
+    owner_accepted_at,owner_acceptance_source_id)
+    VALUES(p_tenant_id,p_room_id,msg.id,'owner-chat:'||s.id,p_description,p_actor_id,p_due_at,at_time,s.id) RETURNING * INTO c;
+  INSERT INTO public.memories(tenant_id,room_id,message_id,memory_type,extraction_key,content,active)
+    VALUES(p_tenant_id,p_room_id,msg.id,'commitment',c.extraction_key,public.commitment_summary(c),true);
+  INSERT INTO public.commitment_action_events(tenant_id,room_id,commitment_id,actor_id,action,occurred_at,idempotency_key,
+    expected_version,changed,before,after,backend_actor,source_evidence_id,evidence,outcome)
+    VALUES(p_tenant_id,p_room_id,c.id,p_actor_id,'create',at_time,p_idempotency_key,1,true,'{}',public.commitment_snapshot(c),
+      'switch-ingestion-worker',s.id,s.body,'applied') RETURNING * INTO e;
+  result:=jsonb_build_object('commitment',to_jsonb(c),'reminder',public.commitment_reminder(c),'event',to_jsonb(e),'changed',true);
+  INSERT INTO public.commitment_action_receipts VALUES(p_tenant_id,p_room_id,p_actor_id,p_idempotency_key,c.id,content,result);
+  RETURN result;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.create_owner_commitment(uuid,uuid,text,uuid,uuid,text,timestamptz) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.create_owner_commitment(uuid,uuid,text,uuid,uuid,text,timestamptz) TO service_role;
 
 CREATE OR REPLACE FUNCTION public.commitment_summary(c public.commitments) RETURNS text
 LANGUAGE sql STABLE SECURITY INVOKER SET search_path='' AS $$
     SELECT 'Commitment: '||c.description||E'\nAssignee: '||coalesce(c.owner_switch_user_id,'unresolved: '||c.owner_name,'unassigned')||
       E'\nApproval: '||c.approval_status||E'\nTask: '||c.task_status||E'\nDue (UTC): '||
       coalesce(to_char(c.due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),'unscheduled')||
-      CASE WHEN c.automated_acceptance_at IS NOT NULL THEN E'\nAcceptance: automated owner completion evidence' ELSE '' END;
+      CASE WHEN c.automated_acceptance_at IS NOT NULL THEN E'\nAcceptance: automated owner completion evidence' ELSE '' END||
+      CASE WHEN c.owner_accepted_at IS NOT NULL THEN E'\nAcceptance: explicit owner statement' ELSE '' END;
 $$;
 -- Extend the audit snapshot without losing any existing lifecycle fields.
 ALTER FUNCTION public.commitment_snapshot(public.commitments) RENAME TO commitment_snapshot_before_chat;
 CREATE FUNCTION public.commitment_snapshot(c public.commitments) RETURNS jsonb
 LANGUAGE sql STABLE SECURITY INVOKER SET search_path='' AS $$
     SELECT public.commitment_snapshot_before_chat(c)||jsonb_build_object(
-      'automated_acceptance_at',c.automated_acceptance_at,'automated_acceptance_source_id',c.automated_acceptance_source_id);
+      'automated_acceptance_at',c.automated_acceptance_at,'automated_acceptance_source_id',c.automated_acceptance_source_id,
+      'owner_accepted_at',c.owner_accepted_at,'owner_acceptance_source_id',c.owner_acceptance_source_id);
 $$;
 
 -- Shared transaction engine: unchanged manual rules, explicit internal chat policy.
@@ -155,7 +255,7 @@ DECLARE
     request_content jsonb; result jsonb; changed boolean := false;
     action_time timestamptz := transaction_timestamp(); new_due timestamptz;
     chat_source public.commitment_chat_sources; chat_policy public.commitment_chat_policies;
-    pending_owner_evidence boolean := false;
+    pending_owner_evidence boolean := false; open_mode boolean := false;
 BEGIN
     IF p_action IS NULL OR p_action NOT IN ('approve','reject','start','complete','cancel','reassign','reschedule')
       OR p_expected_version IS NULL OR p_expected_version < 1 OR p_idempotency_key IS NULL
@@ -175,23 +275,27 @@ BEGIN
     SELECT * INTO c FROM public.commitments WHERE tenant_id=p_tenant_id AND room_id=p_room_id AND id=p_commitment_id FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='PT404', MESSAGE='not_found'; END IF;
     IF p_chat_source_id IS NOT NULL THEN
-      IF p_backend_actor IS DISTINCT FROM 'switch-ingestion-worker' OR p_action NOT IN ('complete','cancel','reassign','reschedule') THEN
+      IF p_backend_actor IS DISTINCT FROM 'switch-ingestion-worker' OR p_action NOT IN ('start','complete','cancel','reassign','reschedule') THEN
         RAISE EXCEPTION USING ERRCODE='PT403',MESSAGE='forbidden_action'; END IF;
       SELECT * INTO chat_source FROM public.commitment_chat_sources WHERE id=p_chat_source_id
         AND tenant_id=p_tenant_id AND room_id=p_room_id AND subject_id=p_actor_id FOR UPDATE;
       IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='PT404',MESSAGE='not_found'; END IF;
+      open_mode:=coalesce(chat_source.policy_snapshot->>'mode'='open_mentions',false);
       SELECT * INTO chat_policy FROM public.commitment_chat_policies WHERE tenant_id=p_tenant_id AND room_id=p_room_id AND enabled FOR SHARE;
       IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='PT403',MESSAGE='forbidden_action'; END IF;
-      IF chat_source.policy_snapshot<>jsonb_build_object('timezone',chat_policy.timezone,'handoff',chat_policy.handoff,
-          'accept_pending_owner_completion',chat_policy.accept_pending_owner_completion) THEN
+      IF chat_source.policy_snapshot<>(jsonb_build_object('timezone',chat_policy.timezone,'handoff',chat_policy.handoff,
+          'accept_pending_owner_completion',chat_policy.accept_pending_owner_completion)||
+          CASE WHEN open_mode THEN '{"mode":"open_mentions"}'::jsonb ELSE '{}'::jsonb END) THEN
         RAISE EXCEPTION USING ERRCODE='PT409',MESSAGE='stale_version'; END IF;
+      IF NOT open_mode THEN
       PERFORM 1 FROM public.commitment_chat_identities WHERE tenant_id=p_tenant_id AND room_id=p_room_id
         AND switch_author_id=chat_source.switch_author_id AND external_author_id=chat_source.external_author_id AND subject_id=p_actor_id FOR SHARE;
       IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='PT403',MESSAGE='forbidden_action'; END IF;
+      END IF;
       PERFORM 1 FROM public.messages WHERE id=c.message_id AND tenant_id=p_tenant_id AND room_id=p_room_id
-        AND thread_id IS NOT DISTINCT FROM chat_source.thread_id AND occurred_at<=chat_source.occurred_at;
+        AND (open_mode OR thread_id IS NOT DISTINCT FROM chat_source.thread_id) AND occurred_at<=chat_source.occurred_at;
       IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='PT404',MESSAGE='not_found'; END IF;
-      IF member_role<>'admin' AND (p_action='reassign' OR c.owner_switch_user_id IS DISTINCT FROM p_actor_id) THEN
+      IF (open_mode OR member_role<>'admin') AND (p_action='reassign' OR c.owner_switch_user_id IS DISTINCT FROM p_actor_id) THEN
         RAISE EXCEPTION USING ERRCODE='PT403',MESSAGE='forbidden_action'; END IF;
       pending_owner_evidence := p_action='complete' AND c.approval_status='pending'
         AND c.owner_switch_user_id=p_actor_id AND chat_policy.accept_pending_owner_completion;
@@ -231,7 +335,9 @@ BEGIN
         c.approval_status:='rejected'; c.approval_by_switch_user_id:=p_actor_id; c.approval_at:=action_time;
       END IF;
     WHEN 'start','complete' THEN
-      IF c.approval_status <> 'approved' AND NOT pending_owner_evidence THEN RAISE EXCEPTION USING ERRCODE='PT409', MESSAGE='invalid_transition'; END IF;
+      IF c.approval_status <> 'approved' AND NOT pending_owner_evidence
+        AND NOT (open_mode AND c.approval_status='pending' AND c.owner_accepted_at IS NOT NULL)
+        THEN RAISE EXCEPTION USING ERRCODE='PT409', MESSAGE='invalid_transition'; END IF;
       IF p_action='start' THEN c.task_status:='in_progress';
       ELSE
         IF c.task_status <> 'completed' THEN
@@ -251,6 +357,7 @@ BEGIN
       IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='PT422', MESSAGE='invalid_assignee'; END IF;
       IF c.owner_switch_user_id IS DISTINCT FROM p_payload->>'assignee_id' THEN
         c.owner_switch_user_id:=p_payload->>'assignee_id'; c.owner_name:=NULL;
+        c.owner_accepted_at:=NULL; c.owner_acceptance_source_id:=NULL;
       END IF;
     WHEN 'reschedule' THEN
       IF NOT (p_payload ? 'due_at') OR jsonb_typeof(p_payload->'due_at') NOT IN ('null','string') THEN
@@ -270,6 +377,7 @@ BEGIN
         approval_at=c.approval_at, task_status=c.task_status, completed_at=c.completed_at,cancelled_at=c.cancelled_at,
         owner_switch_user_id=c.owner_switch_user_id,owner_name=c.owner_name,due_at=c.due_at,
         automated_acceptance_at=c.automated_acceptance_at,automated_acceptance_source_id=c.automated_acceptance_source_id,
+        owner_accepted_at=c.owner_accepted_at,owner_acceptance_source_id=c.owner_acceptance_source_id,
         next_reminder_at=NULL,version=version+1 WHERE id=c.id AND tenant_id=p_tenant_id AND room_id=p_room_id RETURNING * INTO c;
     END IF;
     -- Source message/extraction keys are immutable. Updating text invokes the existing

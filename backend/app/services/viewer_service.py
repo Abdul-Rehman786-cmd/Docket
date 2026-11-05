@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from app.core.config import get_settings
 from app.core.security import ingest_token_matches, viewer_origin_matches
+from app.core.feature_logging import feature_event
 from app.models.viewer import ViewerAuthentication
 from app.services.ai_service import response_scope
 from app.services.message_service import get_recent_messages
@@ -201,6 +202,7 @@ async def serve_viewer(websocket: WebSocket):
         except HTTPException:
             raise ViewerClosed(4403) from None
         await send(websocket, snapshot(subscription, current_settings(subscription), websocket.app.state))
+        feature_event('viewer','connected')
         tasks = [asyncio.create_task(read_commands(websocket, subscription)),
                  asyncio.create_task(write_updates(websocket, subscription, websocket.app.state))]
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -208,6 +210,7 @@ async def serve_viewer(websocket: WebSocket):
             task.result()
     except ViewerClosed as error:
         close_code = error.code
+        feature_event('viewer','blocked',reason='viewer_auth_failed' if error.code in (4401,4403) else 'other',status=error.code)
     except TimeoutError:
         close_code = 4408
     except (WebSocketDisconnect, OSError):
@@ -216,6 +219,7 @@ async def serve_viewer(websocket: WebSocket):
         # Malformed/binary frames never reflect their contents into diagnostics.
         close_code = 1008
     finally:
+        feature_event('viewer','disconnected',status=close_code)
         # Remove synchronously before cancellation can interrupt awaited cleanup.
         hub.remove(subscription)
         for task in tasks:

@@ -7,11 +7,13 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.models.commitment_chat import ChatPlan, TaskChangeProposal
+from app.core.chat_participation import without_agent_mention
 
 STOP = {'i','my','the','a','an','task','please','to','by','send','sent','deliver','delivered',
         'finish','finished','complete','completed','prepare','write','submit','submitted'}
 UNSAFE = re.compile(r'\b(if|might|maybe|perhaps|could|would|will|not|never|hypothetically|said|asked|quote|but)\b', re.I)
 PATTERNS = {
+    'start': re.compile(r'i (?:have )?started (?:my|the) (?P<object>[\w -]{2,160})\.?', re.I),
     'complete': re.compile(r"(?:i(?:'ve| have)? (?:sent|finished|completed|delivered|submitted|done) (?:the |my )?(?P<object>[\w -]{2,160})|(?P<bare>done|finished))\.?", re.I),
     'cancel': re.compile(r"cancel (?:my|the) (?P<object>[\w -]{2,160}?)(?: task)?(?:;? (?:it(?:'s| is) no longer needed))?\.?", re.I),
     'reassign': re.compile(r'(?P<assignee>[\w @<>!-]{1,256}?) is taking over (?:the|my) (?P<object>[\w -]{2,160})\.?', re.I),
@@ -22,7 +24,38 @@ PATTERNS = {
 def update_intent(body: str) -> bool:
     """Suppress new task extraction for lifecycle-looking inputs, including uncertainty."""
     return bool(re.search(r"\b(done|finished|completed|sent|delivered|submitted|cancel|taking over|deadline|reschedule)\b"
-        r"|\b(?:might|maybe|could|would)\s+(?:finish|complete|send|deliver|cancel|reschedule)\b", body, re.I))
+        r"|\bstarted\b|\b(?:might|maybe|could|would)\s+(?:finish|complete|send|deliver|cancel|reschedule)\b", body, re.I))
+
+
+def commitment_intent(body):
+    return update_intent(body) or bool(re.search(r"\bI(?:['\u2019]ll| will| commit to)\b|\b(?:what are|list|show) my (?:tasks|commitments)\b",body,re.I))
+
+
+def own_request_kind(body):
+    """Routing only, never mention/identity proof or permission to execute."""
+    text=re.sub(r'^\s*@[\w.-]+[:,]?\s+','',body.replace('\u2019',"'")).strip()
+    if re.fullmatch(r'(?:what are|show|list) my (?:tasks|commitments)\??\.?',text,re.I): return 'list'
+    if '?' not in text and re.match(r"(?:I(?:'ll| will| commit to| started| finished| completed)\b|I(?: have|'ve) (?:sent|finished|completed|delivered|submitted)\b|cancel my\b|(?:move|clear|remove) my .+deadline\b)",text,re.I):
+        return 'action'
+    return None
+
+
+def personal_commitment(body, metadata):
+    """Use Switch addressing, not member verification, for simple capture.
+
+    `addressed` may include follow-ups: still require an explicit mention token.
+    Names/native IDs here are formatting, not ownership or authorization evidence.
+    """
+    if not metadata or not metadata.get('addressed'): return None
+    text=body.strip().replace('\u2019',"'")
+    if any(c in text for c in ('?', '"', '`', '\n')) or text.startswith('>'): return None
+    # Switch handles actual names/aliases and marks the message addressed. This
+    # also accepts the normal native Discord mention syntax delivered by adapters.
+    text,count=re.subn(r'^(?:@[\w.-]+|<@!?[A-Za-z0-9_-]+>)[,:]?\s+', '', text, count=1)
+    if not count: return None
+    match=re.fullmatch(r"I(?:'ll| will| commit to) (?P<task>[\w ,/-]{2,500}?)(?: by (?P<when>[^\n;!?]{1,128}))?\.?",text,re.I)
+    if not match or re.search(r'\b(if|might|maybe|perhaps|not|never|hypothetically|said|quote)\b',text,re.I): return None
+    return match['task'].strip().rstrip('.'), match['when'].rstrip('.') if match['when'] else None
 
 
 def protect_extraction(decision,body,enabled):
@@ -30,9 +63,7 @@ def protect_extraction(decision,body,enabled):
     # Keep legitimate retrieval questions working, but never extract another task
     # from an update-looking message, even when the model misses task_changes.
     if decision.action in ('store_only','store_and_query'):
-        querying=decision.action=='store_and_query'
-        return type(decision)(action='query_only' if querying else 'none',
-                              search_query=decision.search_query if querying else None)
+        return strip_chat_extraction(decision)
     return decision
 
 
@@ -86,6 +117,9 @@ def validate_proposal(plan: ChatPlan, proposal: TaskChangeProposal):
     if proposal.source_message_id!=source.switch_message_id or proposal.evidence!=source.body.strip():
         raise ValueError('unsupported_evidence')
     text=source.body.strip().replace('\u2019',"'")
+    if plan.policy.mode=='open_mentions':
+        if not source.registered_agent_name: raise ValueError('unsupported_evidence')
+        text=without_agent_mention(text,source.registered_agent_name)
     safe_mentions=re.sub(r'<@!?[A-Za-z0-9_-]+>','member',text)
     if ('?' in text or any(c in safe_mentions for c in ('"','`','\n','>'))
         or text.startswith("'") or text.endswith("'") or UNSAFE.search(text)):
@@ -106,10 +140,12 @@ def validate_proposal(plan: ChatPlan, proposal: TaskChangeProposal):
         raise ValueError('invalid_scope')
     if candidate.approval_status=='rejected' or candidate.task_status in ('completed','cancelled'):
         raise ValueError('ineligible_commitment')
-    if plan.role!='admin' and candidate.owner_switch_user_id!=source.actor.subject_id:
+    if (plan.policy.mode=='open_mentions' or plan.role!='admin') and candidate.owner_switch_user_id!=source.actor.subject_id:
         raise PermissionError('sender_not_owner')
     fields={}
+    if proposal.description is not None: raise ValueError('unexpected_description')
     if proposal.action=='reassign':
+        if plan.policy.mode=='open_mentions': raise PermissionError('handoff_requires_admin')
         if plan.role!='admin': raise PermissionError('handoff_requires_admin')
         reference=match['assignee'].casefold()
         members=[m for m in plan.members if (m.label and m.label.casefold()==reference)
@@ -128,3 +164,41 @@ def validate_proposal(plan: ChatPlan, proposal: TaskChangeProposal):
     elif proposal.due_at is not None:
         raise ValueError('unexpected_deadline')
     return candidate,fields
+
+
+def validate_creation(plan, proposal):
+    """Only a single explicit first-person promise can create a sender-owned task."""
+    source=plan.source
+    if (plan.policy.mode!='open_mentions' or proposal.clarification_required or
+        proposal.evidence!=source.body.strip() or proposal.source_message_id!=source.switch_message_id
+        or proposal.commitment_id is not None or proposal.assignee_id is not None):
+        raise ValueError('unsupported_evidence')
+    text=without_agent_mention(source.body.replace('\u2019',"'"),source.registered_agent_name or '')
+    match=re.fullmatch(r"I(?:'ll| will| commit to) (?P<task>[\w -]{2,160}?)(?: by (?P<when>[^\n;!?]{1,128}))?\.?",text,re.I)
+    if not match or re.search(r'\b(if|might|maybe|perhaps|not|never|said|quote|someone)\b',text,re.I):
+        raise ValueError('unsupported_evidence')
+    description=match['task'].strip().rstrip('.')
+    if proposal.description!=description: raise ValueError('unsupported_evidence')
+    from types import SimpleNamespace
+    due=resolved_deadline(match['when'],plan,SimpleNamespace(due_at=None)) if match['when'] else None
+    if proposal.due_at!=due: raise ValueError('unresolved_deadline')
+    return description,due
+
+
+def own_task_query(plan, proposal):
+    text=without_agent_mention(plan.source.body,plan.source.registered_agent_name or '')
+    return (plan.policy.mode=='open_mentions' and not proposal.clarification_required and
+        proposal.source_message_id==plan.source.switch_message_id and proposal.evidence==plan.source.body.strip() and
+        proposal.commitment_id is None and proposal.assignee_id is None and proposal.due_at is None and
+        proposal.description is None and bool(re.fullmatch(r'(?:what are|show|list) my (?:tasks|commitments)\??\.?',text,re.I)))
+
+
+def strip_chat_extraction(decision):
+    """Chat commitments go through lifecycle transactions, never general extraction."""
+    if not decision.commitments: return decision
+    data=decision.model_dump()
+    data['commitments']=[]
+    data['answer']=None  # An AI extraction is never confirmation of a saved task.
+    if not (data['decisions'] or data['memories']):
+        data['action']='query_only' if decision.action=='store_and_query' else 'none'
+    return type(decision).model_validate(data)

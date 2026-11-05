@@ -5,6 +5,7 @@ import asyncio
 import logging
 
 from app.core.config import get_settings
+from app.core.logging import configure_logging
 from app.services.switch_listener import ListenerStopped, SwitchListener
 
 
@@ -31,6 +32,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    configure_logging(get_settings())
     try:
         asyncio.run(execute(args))
     except KeyboardInterrupt:

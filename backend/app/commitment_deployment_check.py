@@ -7,9 +7,9 @@ from app.core.config import get_settings
 from app.core.supabase_auth import backend_headers
 
 FUNCTIONS=('store_message_extraction','claim_memory_embeddings','finish_memory_embedding','read_commitment_lifecycle',
-           'apply_commitment_action','prepare_commitment_chat','apply_commitment_chat_action',
+           'apply_commitment_action','prepare_commitment_chat','apply_commitment_chat_action','create_owner_commitment',
            'read_reminder_work','persist_reminder_intention','claim_reminder_deliveries','begin_reminder_dispatch','finish_reminder_delivery')
-COLUMNS={'commitments':('version','cancelled_at','automated_acceptance_at','automated_acceptance_source_id'),
+COLUMNS={'commitments':('version','cancelled_at','automated_acceptance_at','automated_acceptance_source_id','owner_accepted_at','owner_acceptance_source_id'),
          'memories':('content_hash','embedding_content_hash','embedding_status','embedding_claim_token','embedding_lease_until'),
          'commitment_action_events':('source_evidence_id','backend_actor','outcome'),
          'commitment_chat_policies':('enabled','timezone','accept_pending_owner_completion','reminders_enabled','reminder_policy_version'),

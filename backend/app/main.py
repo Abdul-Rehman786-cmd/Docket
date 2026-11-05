@@ -11,7 +11,8 @@ from app.controllers.records import router as records_router
 from app.controllers.viewer import router as viewer_router
 from app.repositories.message_receipts import MessageReceiptRepository
 from app.controllers.ai import router as ai_router
-from app.services.ai_service import AIService
+from app.services.ai_service import AIService, is_ai_configured
+from app.core.feature_logging import feature_event, startup_events
 from app.core.http_clients import HTTPClients, use_http_clients
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -26,6 +27,7 @@ from app.services.reminder_worker import ReminderWorker
 @asynccontextmanager
 async def lifespan(application):
     configure_logging(get_settings())
+    startup_events(get_settings(),is_ai_configured(get_settings()))
     application.state.http_clients = HTTPClients()
     application.state.ai_service = AIService()
     application.state.viewer_hub = ViewerHub()
@@ -37,14 +39,16 @@ async def lifespan(application):
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             try:
                 await ensure_tenant_and_rooms_provisioned()
-            except Exception as exc:
-                logging.getLogger("uvicorn.error").warning("Startup auto-provision warning: %s", exc)
+            except Exception:
+                feature_event('storage','failed',reason='storage_unavailable')
+                logging.getLogger("uvicorn.error").warning("Startup auto-provision unavailable")
         application.state.ai_service.start_recovery()
         application.state.embedding_worker.start()
         application.state.reminder_worker.start()
     try:
         yield
     finally:
+        feature_event('startup','stopping')
         try:
             await application.state.reminder_worker.close()
             await application.state.ai_service.close()
@@ -54,6 +58,7 @@ async def lifespan(application):
             application.state.message_receipts.on_change = None
             await application.state.http_clients.close()
             application.state.http_clients = None
+            feature_event('startup','stopped')
 
 
 app = FastAPI(title="Team Memory API", version="0.1.0", lifespan=lifespan)

@@ -9,13 +9,14 @@ from app.models.commitments import Actor, CommitmentState, Role, Scope, SubjectI
 
 class TaskChangeProposal(BaseModel):
     model_config = ConfigDict(extra='forbid', hide_input_in_errors=True)
-    action: Literal['complete', 'cancel', 'reassign', 'reschedule']
-    commitment_id: UUID
+    action: Literal['create', 'start', 'complete', 'cancel', 'reassign', 'reschedule', 'list']
+    commitment_id: UUID | None = None
     source_message_id: SubjectId
     evidence: str = Field(min_length=1, max_length=4000, repr=False)
     clarification_required: bool
     assignee_id: SubjectId | None = None
     due_at: AwareDatetime | None = None
+    description: str | None = Field(default=None, min_length=1, max_length=2000)
 
 
 class ChatPolicy(BaseModel):
@@ -23,6 +24,7 @@ class ChatPolicy(BaseModel):
     timezone: str | None = None
     accept_pending_owner_completion: bool = False
     handoff: Literal['admin_only'] = 'admin_only'
+    mode: Literal['mapped', 'open_mentions'] = 'mapped'
 
 
 class ChatMember(BaseModel):
@@ -45,6 +47,7 @@ class ChatSource(BaseModel):
     body: str = Field(max_length=64000, repr=False)
     occurred_at: AwareDatetime
     thread_id: str | None = None
+    registered_agent_name: str | None = None
 
 
 class ChatPlan(BaseModel):
@@ -69,3 +72,4 @@ class ChatOutcome(BaseModel):
     source_ref: str | None = None
     commitment_id: UUID | None = None
     event_id: UUID | None = None
+    reply: str | None = Field(default=None, max_length=4000, repr=False)

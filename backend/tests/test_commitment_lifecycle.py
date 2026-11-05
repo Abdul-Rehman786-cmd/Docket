@@ -77,7 +77,7 @@ class FakeRepository:
                 evidence=chat.source.body if chat else None,outcome='applied' if changed else 'no_change')
             memory=deepcopy(self.memory)
             content=summary_text(record.description,record.owner_name,record.owner_switch_user_id,record.due_at,
-                                 record.approval_status,record.task_status,record.automated_acceptance_at)
+                                 record.approval_status,record.task_status,record.automated_acceptance_at,record.owner_accepted_at)
             if content!=memory['content']: memory.update(content=content,embedding=None,embedding_status='pending')
             memory['active']=record.approval_status!='rejected' and record.task_status not in ('completed','cancelled')
             result=ActionResult(commitment=record,reminder=reminder_state(record),event=event,changed=changed)

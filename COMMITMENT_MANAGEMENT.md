@@ -1,10 +1,12 @@
 # Commitment management contract
 
+For current task creation, see [SIMPLE_COMMITMENT_CAPTURE.md](SIMPLE_COMMITMENT_CAPTURE.md): tagged extraction/storage/indexing does not require these manual lifecycle/authentication/approval prerequisites. This document continues to describe separately controlled lifecycle operations.
+
 Implementation date: 2026-11-05. Local implementation and verification; no hosted deployment or individual-user authentication is claimed.
 
 ## Existing components reused
 
-The later [automatic chat integration](AUTOMATIC_COMMITMENTS.md) adds an internal worker contract with trusted adapter/sender mapping, owner/admin chat policies and separately recorded automated owner acceptance. Rules below continue to describe the public/manual API. Its human-authentication dependency remains closed; chat execution does not unlock those routes. The separate chat migration has not been applied remotely.
+The current [open chat integration](OPEN_COMMITMENTS.md) adds mentioned sender-owned creation/actions without manual member mapping and records explicit owner acceptance separately. Legacy mapped contracts remain for other integrations. Rules below describe the public/manual API; its human-authentication dependency remains closed, and chat does not unlock those routes. The existing chat migration was revised locally by user instruction; no remote reconciliation has been applied.
 
 
 The schema already separates approval from task progress and stores reviewer, approval time, completion time, stable Switch assignee ID, deadline and reminder bookkeeping. Existing `room_members` roles are `member`, `approver` and `admin`. Rooms have internal UUIDs, tenant ownership, an opaque Switch ID and an enabled flag. Commitments retain a composite foreign key to their source message. Extraction continues to create pending, not-started records; it cannot approve work.

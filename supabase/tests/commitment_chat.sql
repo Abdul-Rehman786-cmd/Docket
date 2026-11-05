@@ -124,4 +124,72 @@ BEGIN
     has_column_privilege('service_role','public.commitment_chat_identities','subject_id','UPDATE') OR
     has_table_privilege('service_role','public.commitment_chat_policies','INSERT') THEN RAISE EXCEPTION 'chat_privileges_failed'; END IF;
 END $$;
+-- Open participation: new immutable sender, no configured identity/member row.
+DO $$
+DECLARE
+ t uuid:=gen_random_uuid(); r uuid:=gen_random_uuid(); other_r uuid:=gen_random_uuid();
+ src jsonb; plan jsonb; result jsonb; replay jsonb; source_id uuid; c uuid; actor text;
+ key uuid:=gen_random_uuid(); old_count integer; old_message text;
+BEGIN
+ INSERT INTO public.tenants(id,name) VALUES(t,'Open mention fixture');
+ INSERT INTO public.rooms(id,tenant_id,switch_room_id,platform) VALUES(r,t,'open-fixture','discord'),(other_r,t,'other-open-fixture','discord');
+ INSERT INTO public.commitment_chat_policies(tenant_id,room_id,enabled,timezone) VALUES(t,r,true,'UTC');
+ src:=jsonb_build_object('policy_mode','open_mentions','switch_message_id','open-create','switch_author_id','unknown-puppet',
+   'sender_is_bot',false,'registered_agent_id','fixture-agent','registered_agent_name','fixture-helper',
+   'body','@fixture-helper I will finish report by Friday at 09:00.','occurred_at','2026-11-05T12:00:00Z');
+ EXECUTE 'SET LOCAL ROLE service_role';
+ plan:=public.prepare_commitment_chat(t,'open-fixture',src);
+ actor:=plan#>>'{source,actor,subject_id}'; source_id:=(plan#>>'{source,id}')::uuid;
+ IF actor NOT LIKE 'openchat:%' OR plan#>>'{policy,mode}'<>'open_mentions' OR plan->>'role'<>'member' THEN
+   RAISE EXCEPTION 'automatic_participation_failed'; END IF;
+ IF EXISTS(SELECT 1 FROM public.commitment_chat_identities WHERE tenant_id=t) THEN RAISE EXCEPTION 'manual_mapping_created'; END IF;
+ result:=public.create_owner_commitment(t,r,actor,source_id,key,'finish report','2026-11-06T09:00:00Z');
+ c:=(result#>>'{commitment,id}')::uuid;
+ IF result#>>'{commitment,owner_switch_user_id}'<>actor OR result#>>'{commitment,approval_status}'<>'pending'
+   OR result#>>'{commitment,approval_at}' IS NOT NULL OR result#>>'{commitment,owner_accepted_at}' IS NULL
+   OR result#>>'{reminder,eligible}'<>'true' OR result#>>'{event,action}'<>'create' THEN RAISE EXCEPTION 'owner_acceptance_failed'; END IF;
+ replay:=public.create_owner_commitment(t,r,actor,source_id,key,'finish report','2026-11-06T09:00:00Z');
+ IF replay<>result OR (SELECT count(*) FROM public.commitment_action_events WHERE commitment_id=c)<>1 THEN RAISE EXCEPTION 'open_replay_failed'; END IF;
+ BEGIN
+   PERFORM public.create_owner_commitment(t,r,actor,source_id,key,'different report',NULL);
+   RAISE EXCEPTION 'open_key_reused'; EXCEPTION WHEN SQLSTATE 'PT409' THEN NULL;
+ END;
+ BEGIN
+   PERFORM public.create_owner_commitment(t,other_r,actor,source_id,gen_random_uuid(),'finish report',NULL);
+   RAISE EXCEPTION 'cross_room_creation'; EXCEPTION WHEN SQLSTATE 'PT403' THEN NULL;
+ END;
+ plan:=public.prepare_commitment_chat(t,'open-fixture',src||'{"switch_message_id":"open-start","body":"@fixture-helper I started my report."}');
+ result:=public.apply_commitment_chat_action(t,r,actor,c,'start',1,gen_random_uuid(),'{"reason":null}','switch-ingestion-worker',(plan#>>'{source,id}')::uuid);
+ IF result#>>'{commitment,task_status}'<>'in_progress' THEN RAISE EXCEPTION 'open_start_failed'; END IF;
+ plan:=public.prepare_commitment_chat(t,'open-fixture',src||'{"switch_message_id":"open-other","switch_author_id":"other-puppet"}');
+ IF jsonb_array_length(plan->'candidates')<>0 THEN RAISE EXCEPTION 'other_owner_read'; END IF;
+ BEGIN
+   PERFORM public.apply_commitment_chat_action(t,r,plan#>>'{source,actor,subject_id}',c,'complete',2,gen_random_uuid(),'{"reason":null}',
+     'switch-ingestion-worker',(plan#>>'{source,id}')::uuid);
+   RAISE EXCEPTION 'other_owner_write'; EXCEPTION WHEN SQLSTATE 'PT403' THEN NULL;
+ END;
+ plan:=public.prepare_commitment_chat(t,'open-fixture',src||'{"switch_message_id":"open-complete","body":"@fixture-helper I finished my report."}');
+ BEGIN
+   PERFORM public.apply_commitment_chat_action(t,r,actor,c,'complete',1,gen_random_uuid(),'{"reason":null}','switch-ingestion-worker',(plan#>>'{source,id}')::uuid);
+   RAISE EXCEPTION 'open_stale_version'; EXCEPTION WHEN SQLSTATE 'PT409' THEN NULL;
+ END;
+ result:=public.apply_commitment_chat_action(t,r,actor,c,'complete',2,gen_random_uuid(),'{"reason":null}','switch-ingestion-worker',(plan#>>'{source,id}')::uuid);
+ IF result#>>'{commitment,completed_at}' IS NULL OR result#>>'{reminder,eligible}'<>'false' THEN RAISE EXCEPTION 'open_complete_failed'; END IF;
+ IF (SELECT active FROM public.memories WHERE message_id=(result#>>'{commitment,message_id}')::uuid) THEN RAISE EXCEPTION 'stale_open_memory'; END IF;
+ IF (SELECT body FROM public.messages WHERE id=(result#>>'{commitment,message_id}')::uuid)<>src->>'body' THEN RAISE EXCEPTION 'open_source_rewritten'; END IF;
+ EXECUTE 'RESET ROLE';
+ old_count:=(SELECT count(*) FROM public.commitments WHERE tenant_id=t);
+ plan:=public.prepare_commitment_chat(t,'open-fixture',src||'{"switch_message_id":"open-rollback"}');
+ EXECUTE 'CREATE TRIGGER fixture_chat_fail BEFORE INSERT ON public.commitment_action_receipts FOR EACH ROW EXECUTE FUNCTION public.fixture_chat_fail_receipt()';
+ EXECUTE 'SET LOCAL ROLE service_role';
+ BEGIN
+   PERFORM public.create_owner_commitment(t,r,actor,(plan#>>'{source,id}')::uuid,gen_random_uuid(),'rollback report',NULL);
+   RAISE EXCEPTION 'open_rollback_missing';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'fixture_chat_failure' THEN RAISE; END IF; END;
+ IF (SELECT count(*) FROM public.commitments WHERE tenant_id=t)<>old_count OR
+   EXISTS(SELECT 1 FROM public.messages WHERE tenant_id=t AND switch_message_id='open-rollback') THEN RAISE EXCEPTION 'open_partial_creation'; END IF;
+ EXECUTE 'RESET ROLE';
+ EXECUTE 'DROP TRIGGER fixture_chat_fail ON public.commitment_action_receipts';
+ IF has_function_privilege('anon','public.create_owner_commitment(uuid,uuid,text,uuid,uuid,text,timestamptz)','EXECUTE') THEN RAISE EXCEPTION 'open_creation_public'; END IF;
+END $$;
 ROLLBACK;

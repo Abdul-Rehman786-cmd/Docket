@@ -14,6 +14,7 @@ TaskStatus = Literal["not_started", "in_progress", "completed", "cancelled"]
 
 
 class Action(str, Enum):
+    create = "create"
     approve = "approve"
     reject = "reject"
     start = "start"
@@ -108,6 +109,8 @@ class CommitmentState(BaseModel):
     cancelled_at: AwareDatetime | None = None
     automated_acceptance_at: AwareDatetime | None = None
     automated_acceptance_source_id: UUID | None = None
+    owner_accepted_at: AwareDatetime | None = None
+    owner_acceptance_source_id: UUID | None = None
     next_reminder_at: AwareDatetime | None = None
     last_chased_at: AwareDatetime | None = None
     version: int = Field(default=1, ge=1)
@@ -116,6 +119,8 @@ class CommitmentState(BaseModel):
 
     @model_validator(mode="after")
     def valid_state(self):
+        if (self.owner_accepted_at is None) != (self.owner_acceptance_source_id is None):
+            raise ValueError('Owner acceptance requires its source and timestamp')
         if (self.task_status == "completed") != (self.completed_at is not None):
             raise ValueError("Completion status and timestamp disagree")
         if self.approval_status != "pending" and (not self.approval_by_switch_user_id or self.approval_at is None):

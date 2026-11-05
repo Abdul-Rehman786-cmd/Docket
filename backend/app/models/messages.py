@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, StrictBool
 
 OpaqueId = Annotated[str, StringConstraints(min_length=1, max_length=512, pattern=r"^\S+$")]
 MessageRef = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{24}$")]
@@ -24,6 +24,10 @@ class IncomingMessage(BaseModel):
     channel_id: OpaqueId | None = None
     external_message_id: OpaqueId | None = None
     external_author_id: OpaqueId | None = None
+    registered_agent_id: OpaqueId | None = None
+    registered_agent_name: str | None = Field(default=None, max_length=128)
+    mentioned_agent_ids: list[OpaqueId] | None = Field(default=None, max_length=20)
+    sender_is_bot: StrictBool | None = None
 
 
 class MessageReceipt(BaseModel):

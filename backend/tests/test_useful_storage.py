@@ -69,7 +69,7 @@ def test_invalid_model_output_is_never_none(text, category):
 @pytest.mark.parametrize("body,extraction,counts", [
     ("Planning is Friday", {"memories": [{"content": "Planning is Friday"}]}, (0, 0, 1)),
     ("Good morning, planning is Friday", {"memories": [{"content": "Planning is Friday"}]}, (0, 0, 1)),
-    ("I'll send the report by Friday", {"commitments": [{"description": "Send report by Friday"}]}, (1, 0, 1)),
+    ("I'll send the report by Friday", {"commitments": [{"description": "Send report by Friday"}]}, (0, 0, 0)),
     ("We decided to use FastAPI", {"decisions": [{"summary": "Use FastAPI"}]}, (0, 1, 1)),
     ("Good morning", {}, (0, 0, 0)),
     ("Maybe we should use Redis", {}, (0, 0, 0)),
@@ -102,7 +102,7 @@ def test_automatic_extraction_source_and_acknowledgement(monkeypatch, caplog, bo
             assert posted == []
             job = await service.journal.get(receipt.message_ref)
             assert job["state"] == "done" and job["payload"] is None and job["decision"] is None
-            if extraction:
+            if extraction and not extraction.get('commitments'):
                 kwargs, items = saved[0]
                 assert tuple(len(items[k]) for k in ("commitments", "decisions", "memories")) == counts
                 assert kwargs["source_metadata"]["switch_author_id"] == "human"
@@ -178,12 +178,12 @@ def test_confirmation_flow_yes_commits_and_no_cancels(monkeypatch):
         async def ask(settings, question):
             return json.dumps({
                 "action": "store_only",
-                "commitments": [{"description": "Launch on Friday"}],
+                "memories": [{"content": "Launch on Friday"}],
             })
 
         async def store(settings, **kwargs):
             saved.append(kwargs)
-            return {"messages": 1, "commitments": 1, "decisions": 0, "memories": 1}
+            return {"messages": 1, "commitments": 0, "decisions": 0, "memories": 1}
 
         async def post(self, room_id, body, thread_id=None):
             posted.append({"room_id": room_id, "body": body, "thread_id": thread_id})

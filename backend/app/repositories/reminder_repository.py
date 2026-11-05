@@ -58,7 +58,7 @@ class SupabaseReminderRepository(SupabaseCommitmentRepository):
         return await self.call('begin_reminder_dispatch',**self.reference(delivery),p_body=body) is True
 
     async def defer(self,delivery,until):
-        await self.call('defer_reminder_delivery',**self.reference(delivery),p_until=until.isoformat() if until else None)
+        return await self.call('defer_reminder_delivery',**self.reference(delivery),p_until=until.isoformat() if until else None) is True
 
     async def finish(self,delivery,outcome,message_id=None,error=None):
         saved=await self.call('finish_reminder_delivery',**self.reference(delivery),p_outcome=outcome,p_message_id=message_id,p_error=error)

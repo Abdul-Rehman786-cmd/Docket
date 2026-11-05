@@ -1,6 +1,10 @@
 # Reminder planning and delivery
 
+[Simple tagged capture](SIMPLE_COMMITMENT_CAPTURE.md) saves/indexes tasks without enabling reminders or asserting reminder-policy eligibility. Existing acceptance/approval and delivery controls below remain separate from creation.
+
 Implemented locally on 2026-11-05. Defaults are disabled. Hosted metadata was inspected read-only; commitment/chat/reminder deployment is blocked pending review and approval. No real tasks or external chat messages were changed.
+
+The current [open chat policy](OPEN_COMMITMENTS.md) also permits active commitments with source-backed explicit owner acceptance while human approval stays pending. Automatically materialized participation references satisfy the existing membership check without manual onboarding. Older statements below that only human-approved tasks are eligible are superseded by this addition; existing automated-completion-only acceptance remains terminal/ineligible. Quiet hours, cadence and outbox behavior are unchanged.
 
 ## Current deployment findings
 

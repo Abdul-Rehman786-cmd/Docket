@@ -111,4 +111,34 @@ BEGIN
  has_function_privilege('authenticated','public.begin_reminder_dispatch(uuid,text[],uuid,uuid,text)','EXECUTE') THEN RAISE EXCEPTION 'client_claim_privilege';END IF;
  IF (SELECT body FROM public.messages WHERE id=m)<>'Original source' THEN RAISE EXCEPTION 'source_rewritten';END IF;
 END $$;
+-- Open owner acceptance integrates with the existing durable reminder outbox.
+DO $$
+DECLARE t uuid:=gen_random_uuid();r uuid:=gen_random_uuid();plan jsonb;result jsonb;src jsonb;
+ actor text;c uuid;due timestamptz:=now()+interval '10 minutes';item jsonb;key uuid:=gen_random_uuid();
+BEGIN
+ INSERT INTO public.tenants(id,name) VALUES(t,'Open reminder fixture');
+ INSERT INTO public.rooms(id,tenant_id,switch_room_id,platform) VALUES(r,t,'open-reminder-fixture','discord');
+ INSERT INTO public.commitment_chat_policies(tenant_id,room_id,enabled,timezone,reminders_enabled,reminder_quiet_start,reminder_quiet_end)
+ VALUES(t,r,true,'UTC',true,0,0);
+ src:=jsonb_build_object('policy_mode','open_mentions','switch_message_id','owner-reminder-create','switch_author_id','fresh-owner',
+   'sender_is_bot',false,'registered_agent_id','fixture-agent','registered_agent_name','fixture-helper',
+   'body','@fixture-helper I will finish report.','occurred_at',now());
+ EXECUTE 'SET LOCAL ROLE service_role';
+ plan:=public.prepare_commitment_chat(t,'open-reminder-fixture',src);actor:=plan#>>'{source,actor,subject_id}';
+ result:=public.create_owner_commitment(t,r,actor,(plan#>>'{source,id}')::uuid,gen_random_uuid(),'finish report',due);
+ c:=(result#>>'{commitment,id}')::uuid;
+ IF jsonb_array_length(public.read_reminder_work(t,ARRAY['open-reminder-fixture'],25,NULL)->'items')<>1 THEN
+   RAISE EXCEPTION 'open_owner_not_reminder_eligible'; END IF;
+ item:=jsonb_build_object('occurrence_key',key,'tenant_id',t,'room_id',r,'commitment_id',c,'recipient_id',actor,
+   'commitment_version',1,'policy_version',1,'kind','upcoming','ordinal',0,'occurrence_base',due-interval '30 minutes','scheduled_for',now());
+ IF NOT public.persist_reminder_intention(t,ARRAY['open-reminder-fixture'],item) THEN RAISE EXCEPTION 'open_intention_missing'; END IF;
+ plan:=public.prepare_commitment_chat(t,'open-reminder-fixture',src||'{"switch_message_id":"owner-reminder-cancel","body":"@fixture-helper Cancel my report task."}');
+ result:=public.apply_commitment_chat_action(t,r,actor,c,'cancel',1,gen_random_uuid(),'{"reason":null}',
+   'switch-ingestion-worker',(plan#>>'{source,id}')::uuid);
+ IF NOT EXISTS(SELECT 1 FROM public.reminder_deliveries WHERE occurrence_key=key AND status='superseded') OR
+   jsonb_array_length(public.claim_reminder_deliveries(t,ARRAY['open-reminder-fixture'],1))<>0 OR
+   (result#>>'{reminder,eligible}')::boolean THEN RAISE EXCEPTION 'open_cancel_reminder_not_invalidated'; END IF;
+ IF (SELECT active FROM public.memories WHERE message_id=(result#>>'{commitment,message_id}')::uuid) THEN RAISE EXCEPTION 'open_cancel_stale_memory'; END IF;
+ EXECUTE 'RESET ROLE';
+END $$;
 ROLLBACK;

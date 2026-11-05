@@ -10,6 +10,7 @@ ROOT_DIR = BACKEND_DIR.parent
 
 
 class Settings(BaseSettings):
+    feature_logs_enabled: bool = True
     log_level: str = Field(default="INFO", pattern="^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$")
     admin_api_token: str = Field(default="", repr=False)
     supabase_url: str = Field(
@@ -63,6 +64,7 @@ class Settings(BaseSettings):
     switch_ingest_token: SecretStr = SecretStr("")
     switch_adapter_token: SecretStr = SecretStr("")
     automatic_commitments_enabled: bool = False
+    commitment_timezone: str | None = None  # Confirmed shared room zone; unset means unresolved relative dates.
     reminders_enabled: bool = False
     reminder_delivery_enabled: bool = False
     switch_tenant_id: UUID | None = None
