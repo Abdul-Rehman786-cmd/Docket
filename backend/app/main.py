@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+from importlib.util import find_spec
 from time import perf_counter
 
 from fastapi import FastAPI
@@ -26,6 +27,13 @@ from app.services.document_attachments import DocumentAttachments
 @asynccontextmanager
 async def lifespan(application):
     configure_logging(get_settings())
+    DocumentAttachments.log_configuration(get_settings())
+    if get_settings().local_embeddings_enabled:
+        missing=[name for name in ("onnxruntime","tokenizers") if find_spec(name) is None]
+        if missing:
+            logging.getLogger("team_memory").warning(
+                "document stage=embedding_setup reason=dependencies_missing packages=%s; start FastAPI using backend/.venv/Scripts/python.exe",
+                ",".join(missing))
     application.state.http_clients = HTTPClients()
     application.state.ai_service = AIService()
     application.state.viewer_hub = ViewerHub()

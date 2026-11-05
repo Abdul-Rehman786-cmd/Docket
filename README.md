@@ -4,6 +4,18 @@ A project scaffold for **FastAPI + Supabase + React Native (Expo)** with a Switc
 
 The implemented flow receives Discord messages through Switch, journals human input durably, displays bounded redacted previews, and evaluates useful information through the existing private Codex runtime. Atomic storage and versioned embedding jobs are defined in the single consolidated development baseline. The hosted non-destructive upgrade is prepared for review and approval; never replay the baseline reset on the hosted database. FastAPI and the Switch listener run as separate processes. See [architecture.md](architecture.md) for runtime boundaries, recovery, storage, retrieval and reply behavior.
 
+## Listener startup policy
+
+Each new listener process starts at Switch's current stream head using a fresh
+connection ID. It skips events from before that connection opens, including
+messages and save/skip commands sent while the listener was offline. Send an
+upload or confirmation again after the listener reports connected if necessary.
+Transient reconnects within the same process resume from its acknowledged cursor,
+with duplicate protection. Restarting FastAPI alone does not reset a running
+listener's cursor. Already accepted API jobs, confirmed document imports,
+embedding jobs and document replies recover independently from durable storage.
+Keep `backend/.local/`; do not clear its journals to skip chat history.
+
 ## Structure
 
 Versioned Markdown/text document ingestion is deployed and enabled in the configured
@@ -149,7 +161,7 @@ The API serializes AI execution and permits four running/queued jobs. Automatic 
 
 The four-way parser requires valid, consistent structured output. Invalid output is an explicit extraction failure, never `none`. Commitments/decisions generate one corresponding memory each; additional memories contain facts only. Relative deadlines remain unresolved unless date/timezone evidence supports an exact timestamp. Newly extracted records remain pending human approval. Useful `store_only` results and ordinary chatter remain silent in Discord.
 
-Every request verifies that the internal room has no bridge or external channel and contains only Codex and the client. It also checks Codex's reported sessions for live input-room bindings, and checks that every configured input room contains the listener without Codex. Missing runtime evidence, an active input-room session, or re-invitation causes a diagnostic before another question is posted. Stop the Discord-attached Codex session in Switch Console first, then rerun `python -m app.switch_setup`. Setup refuses to report success while an active input-room session is reported. Requests never fall back to an input room. Codex remains available in the private response room. Ask questions using the viewer's question box or **Ask Codex about this message**. Keep the internal room unbridged. The listener uses `SWITCH_REQUESTER_*`, preserving `SWITCH_AGENT_*` for the actual AI. Restarting the listener after an identity change starts a separate cursor; its old identity's messages are not replayed automatically.
+Every request verifies that the internal room has no bridge or external channel and contains only Codex and the client. It also checks Codex's reported sessions for live input-room bindings, and checks that every configured input room contains the listener without Codex. Missing runtime evidence, an active input-room session, or re-invitation causes a diagnostic before another question is posted. Stop the Discord-attached Codex session in Switch Console first, then rerun `python -m app.switch_setup`. Setup refuses to report success while an active input-room session is reported. Requests never fall back to an input room. Codex remains available in the private response room. Ask questions using the viewer's question box or **Ask Codex about this message**. Keep the internal room unbridged. The listener uses `SWITCH_REQUESTER_*`, preserving `SWITCH_AGENT_*` for the actual AI. Every listener process restart starts at the current stream head; it does not replay offline events.
 
 Automated tests cover sender/thread correlation, responsive heartbeats, authentication, scope isolation, redaction, request deduplication, and setup recovery.
 
@@ -331,3 +343,10 @@ The two `.env` files should be reported as ignored when they exist. Inspect stag
 ## Current limits
 
 Local model inference is verified. The hosted non-destructive schema upgrade, versioned vector storage, and full Discord -> Switch -> Codex -> Supabase -> semantic answer flow remain pending deployment approval and live verification. Human input is durably journaled before acknowledgement; embedding failures preserve useful text. Oversized memories remain explicit failed embedding jobs. Fresh-schema execution is pending the declined disposable-database test dependency installation. Conflict checks, reminders, document workflows and mobile private-data authentication remain outside this task. No hosted data reset or migration-history rewrite was performed.
+
+
+Attachment terminal diagnostics use `document stage=...` with safe request references
+and failure reasons. Both native Switch media handles and legacy MXC handles are
+supported through the authenticated media endpoint. Keep one listener; see
+[terminal tracing and native media fix](supabase/DISCORD_DOCUMENT_INGESTION.md#terminal-tracing-and-native-media-fix-2026-11-06)
+for log stages, room ownership warnings and retry instructions.

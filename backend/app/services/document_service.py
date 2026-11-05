@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 from pathlib import PurePosixPath
 
 from fastapi import HTTPException
@@ -43,7 +44,9 @@ class DocumentService:
             raise HTTPException(422,"document_invalid_metadata")
         try:
             chunks = await self.chunker(text)
-        except EmbeddingError:
+        except EmbeddingError as error:
+            reason=str(error) if str(error) in {"model_not_installed","model_checksum_failed","dependencies_missing"} else "tokenizer_failure"
+            logging.getLogger("team_memory.documents").warning("document stage=tokenizer_failed reason=%s",reason)
             raise HTTPException(503,"document_tokenizer_unavailable") from None
         except ValueError:
             raise HTTPException(422,"document_chunking_limit") from None

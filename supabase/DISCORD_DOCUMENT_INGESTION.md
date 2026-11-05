@@ -320,3 +320,88 @@ or delete hosted records without approval.
 Limits: UTF-8 `.md`/`.txt` only, 262144 bytes per file and four files by default.
 An uncertain outbound send can repeat a reply. Local tests do not prove the full
 Discord/Switch/hosted Supabase flow; that flow remains unverified.
+
+## Live-only listener startup
+
+A new listener process opens at the current Switch stream head and skips offline
+messages, uploads and consent commands. Transient reconnects within that process
+resume from the last acknowledged cursor. A confirmation sent while offline must
+be sent again after connection and before the request expires. Confirmations
+already durably accepted remain queued: attachment imports, chunk embeddings,
+publication and the reply outbox recover without replaying the original events.
+Keep the local consent ledger and existing document processing state intact.
+
+
+## Terminal tracing and native media fix (2026-11-06)
+
+The configured backend now has the attachment flag and bot participant setting
+present. The earlier disabled/missing-setting notes above describe the prior setup.
+User-driven live uploads have reached the attachment route, and the bot has sent
+failure replies. Full consent/download/hosted publication remains unverified.
+
+A fixture Markdown upload failed with `unsafe_media_reference`: the validator
+accepted legacy `mxc://server/id` only, whereas the current Switch PostgreSQL
+transport issues `switch-media://` followed by 32 lowercase hexadecimal digits.
+The validator now accepts that exact native format too. It remains an opaque
+`mxc` query value passed to the configured authenticated Switch media endpoint;
+no URI host is fetched or resolved. Arbitrary URLs, queries and malformed handles
+remain rejected. Verified against pinned public
+`core/switch_core/transport/postgres.py` at revision
+`e84534af637e56c6a0a66c8a0b900200a70c7f5f`.
+
+The old reply operation also supplied unsupported `room_id`. Replies now use
+`post_message` with body/thread only, plus authenticated connection/session headers.
+The existing listener binds one deterministic reply session per enabled room on
+its own live connection with the generation-fenced placements endpoint. It opens
+no separate connection for replies and never falls back to another send route.
+
+API terminal logs include `document stage=api_start`, `api_received`, `receipt`,
+`metadata_rejected`, `processing`, `download`, `published`, `reply_attempt`,
+`reply_failed` and `reply_finished`. Listener logs include `listener_start`,
+`reply_room_binding`, `switch_received`, `api_ack` and `stage=api_forward` HTTP
+errors. These show generated references, states, counts, HTTP statuses and error
+class names, without captions, filenames, sender identities, media handles,
+credentials, remote response bodies or exception tracebacks. Keep HTTP/WebSocket
+wire debugging disabled. API application logs use its existing `LOG_LEVEL` setting;
+listener lifecycle diagnostics are INFO and failures WARNING.
+
+Run exactly one listener. An overlapping diagnostic listener was stopped after
+the user's terminal listener started. Coverage falling below the configured room
+count warns about lost claims/competing connections. Restart the remaining listener
+once after removing competitors to reclaim its rooms. Use `python -m app.switch_listener`
+from the backend environment. Keep the configured API running separately; the
+current local configuration targets port 8001. Uvicorn with `--reload` reloads
+changed Python files; without it, restart that API to load fixes.
+
+Re-upload the harmless fixture after services load the fix, and use the **new**
+reference for consent. A failed request stays terminal: the rejected handle was
+intentionally stripped and is not silently restored, reset or imported. No file
+contents have been downloaded as part of diagnosing the reference issue, and no
+consent has been fabricated. Do not reuse `save 15112b93a1d1` for a fresh upload.
+
+Validation for this fix: 297 backend tests passed with `RUN_LOCAL_MODEL_TESTS=1`,
+including native-reference consent/publication, exact media query routing, strict
+invalid-handle rejection, connection/session reply headers and log privacy checks.
+Switch media downloads in these regression tests are mocked; the real local
+embedding model runs against local fixture repositories. This is not proof of a
+successful hosted import of the user's new fixture. No migration was required.
+
+
+### Download succeeds, import retries: Python environment
+
+The user-confirmed fixture downloaded successfully (159 bytes) but document import
+retried. Diagnosis found the API on port 8001 running system Python without
+`onnxruntime` and `tokenizers`; both packages are installed in the project's venv.
+Startup now warns `stage=embedding_setup reason=dependencies_missing`, and imports
+log the safe tokenizer failure category and HTTP retry reason without payloads.
+
+Stop the API in its terminal, then from `backend` run:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
+```
+
+Keep a single existing listener. If the request has exhausted its three attempts,
+it remains terminal; upload again and explicitly confirm the new reference after
+the API is ready. No consent or completed import is inferred from a successful
+download. No global dependency installation or database migration is needed.

@@ -1,7 +1,19 @@
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
+
+
+def listener_identity(settings):
+    return hashlib.sha256(json.dumps([
+        settings.switch_bridge_url, settings.listener_agent_id,
+        str(settings.switch_tenant_id), sorted(settings.allowed_switch_rooms),
+    ]).encode()).hexdigest()
+
+
+def document_reply_session(room):
+    return "document-reply-" + hashlib.sha256(room.encode()).hexdigest()[:32]
 
 
 @dataclass

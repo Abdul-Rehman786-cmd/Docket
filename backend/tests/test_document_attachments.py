@@ -281,6 +281,29 @@ def test_restart_recovers_consent_and_import_without_redownloading_committed_con
     asyncio.run(run())
 
 
+def test_confirmed_import_survives_live_only_listener_restart(tmp_path):
+    async def run():
+        f=setup(tmp_path)
+        listener_path=tmp_path/'listener.json'
+        listener=SwitchListener(f.settings,state_path=listener_path)
+        listener.state.cursor,listener.state.generation=12,3
+        listener.state.save(listener_path)
+        receipt=await f.feature.accept(event(),f.settings)
+        await f.feature.accept(confirm(receipt.request_ref),f.settings)
+        assert (await f.jobs.get(receipt.request_ref))['state']=='queued'
+
+        restarted_listener=SwitchListener(f.settings,state_path=listener_path)
+        assert restarted_listener.state.cursor is None
+        assert restarted_listener.state.connection_id!=listener.state.connection_id
+        f.feature=DocumentAttachments(AttachmentJobs(f.jobs.path,lambda:f.now[0]),
+            f.repo,scope,lambda settings:f.transport,f.factory)
+        await f.feature.work_once(f.settings)
+        await publish(f)
+        assert (await f.jobs.get(receipt.request_ref))['state']=='published'
+        assert len(f.repo.documents)==1 and len(f.transport.downloads)==1
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('error',[AttachmentFailure('media_unavailable'),AttachmentFailure('media_unavailable',True)])
 def test_missing_media_and_bounded_download_retries(tmp_path,error):
     async def run():
@@ -472,7 +495,8 @@ def test_listener_forwards_metadata_and_commands_without_downloading(tmp_path,se
             assert request.url.path=='/messages/document-attachments'
             assert request.headers['x-document-adapter-token']=='fixture-adapter-token'
             return httpx.Response(200,json={'status':'received','message_ref':message_reference(event()),
-                'received_at':'2026-11-05T00:00:00Z','duplicate':False})
+                'received_at':'2026-11-05T00:00:00Z','duplicate':False,
+                'processing_state':'confirmation_requested','request_ref':'abcdef123456'})
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle),base_url='http://fixture/') as client:
             task=asyncio.create_task(listener._forward_events(queue,client))
             async with asyncio.timeout(2):
@@ -595,16 +619,24 @@ def test_uncertain_send_can_repeat_but_never_authorizes_import(tmp_path):
     asyncio.run(run())
 
 
-def test_reply_attempt_uses_one_documented_operation_without_fallback(monkeypatch):
+def test_reply_attempt_uses_one_documented_operation_without_fallback(monkeypatch,tmp_path):
     async def run():
         from contextlib import asynccontextmanager
         from app.services.switch_api import SwitchError
-        transport=SwitchDocumentTransport(configuration())
+        from app.repositories.listener_state import ListenerState,listener_identity,document_reply_session
+        import app.services.switch_document_media as media
+        settings=configuration()
+        monkeypatch.setattr(media,'BACKEND_DIR',tmp_path)
+        state=ListenerState(listener_identity(settings),'00000000-0000-0000-0000-000000000099',generation=7)
+        state.save(tmp_path/'.local'/'switch-listener.json')
+        transport=SwitchDocumentTransport(settings)
         paths=[]
         def handle(request):
             paths.append(request.url.path)
             body=json.loads(request.content)
-            assert body=={'room_id':'test-room','body':'Safe fixture reply','thread_id':'source-1'}
+            assert body=={'body':'Safe fixture reply','thread_id':'source-1'}
+            assert request.headers['x-switch-connection-id']==state.connection_id
+            assert request.headers['x-switch-session-id']==document_reply_session('test-room')
             return httpx.Response(500,json={'detail':'fixture-private-response'})
         @asynccontextmanager
         async def http():
@@ -697,3 +729,96 @@ def test_missing_or_user_supplied_actor_is_not_identity():
     payload['actor']=SENDER
     with pytest.raises(ValidationError):
         AttachmentMessage(**payload)
+
+
+def test_listener_binds_replies_to_its_existing_connection(tmp_path,monkeypatch):
+    async def run():
+        from app.repositories.listener_state import document_reply_session
+        listener=SwitchListener(configuration(),state_path=tmp_path/'listener.json')
+        listener.state.generation=7
+        requests=[]
+        def handle(request):
+            requests.append(request)
+            payload=json.loads(request.content)
+            assert request.url.path=='/agents/test-agent/connection/placements'
+            assert request.headers['authorization']=='Bearer test-agent-key'
+            assert 'x-ingest-token' not in request.headers
+            assert payload==dict(connection_id=listener.state.connection_id,generation=7,
+                placements={document_reply_session(r):r for r in listener.settings.allowed_switch_rooms})
+            return httpx.Response(200,json=dict(placements=payload['placements']))
+        original=httpx.AsyncClient
+        monkeypatch.setattr(httpx,'AsyncClient',lambda **kwargs:original(transport=httpx.MockTransport(handle),**kwargs))
+        await listener.bind_document_reply_rooms()
+        assert len(requests)==1
+    asyncio.run(run())
+
+
+def test_document_trace_logs_stages_without_private_payloads(tmp_path,caplog,monkeypatch):
+    import logging
+    monkeypatch.setattr(logging.getLogger('team_memory'),'propagate',True)
+    caplog.set_level(logging.INFO)
+    async def run():
+        f=setup(tmp_path)
+        result=await f.feature.accept(event(body='fixture-private-caption',sender_name='fixture-private-name',
+            attachments=[attachment('fixture-private-file.pdf')]),f.settings)
+        f.transport.post_error=True
+        await f.feature.send_once(f.settings)
+        assert result.processing_state=='failed'
+        text=caplog.text
+        for stage in ['stage=api_received','stage=metadata_rejected','stage=receipt','stage=reply_attempt','stage=reply_failed']:
+            assert stage in text
+        assert 'unsupported_format' in text and 'error_type=RuntimeError' in text
+        for private in ['fixture-private-caption','fixture-private-name','fixture-private-file','fixture-sensitive-error','fixture-adapter-token','mxc://']:
+            assert private not in text
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('reference,valid',[
+    ('switch-media://'+'a'*32,True),
+    ('mxc://switch.invalid/fixture_1',True),
+    ('switch-media://'+ 'a'*31,False),
+    ('switch-media://'+ 'g'*32,False),
+    ('switch-media://'+ 'a'*32+'?token=fixture-secret',False),
+    ('switch-media://'+ 'a'*32+'/../private',False),
+    ('https://private.invalid/file',False),
+    ('file:///private',False),
+])
+def test_native_and_legacy_media_reference_contract(reference,valid):
+    from app.services.switch_document_media import valid_media_reference
+    assert valid_media_reference(reference) is valid
+
+
+def test_native_switch_handle_requires_consent_then_publishes(tmp_path):
+    async def run():
+        f=setup(tmp_path)
+        first=await f.feature.accept(event(attachments=[attachment(mxc='switch-media://'+'a'*32)]),f.settings)
+        assert first.processing_state=='confirmation_requested'
+        assert not f.transport.downloads
+        await f.feature.accept(confirm(first.request_ref),f.settings)
+        await f.feature.work_once(f.settings)
+        await publish(f)
+        assert f.transport.downloads==[('test-room','switch-media://'+'a'*32)]
+        assert (await f.jobs.get(first.request_ref))['state']=='published'
+    asyncio.run(run())
+
+
+def test_native_handle_is_a_query_value_never_a_network_destination(monkeypatch):
+    async def run():
+        from contextlib import asynccontextmanager
+        transport=SwitchDocumentTransport(configuration())
+        handle='switch-media://'+'a'*32
+        calls=[]
+        def respond(request):
+            calls.append(request)
+            assert request.url.scheme=='https' and request.url.host=='switch.invalid'
+            assert request.url.path=='/agents/test-agent/rooms/test-room/media'
+            assert request.url.params['mxc']==handle
+            return httpx.Response(200,content=b'Fixture text.')
+        @asynccontextmanager
+        async def http():
+            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+                yield client
+        monkeypatch.setattr(transport.api,'http',http)
+        assert await transport.download('test-room',attachment(mxc=handle))==b'Fixture text.'
+        assert len(calls)==1
+    asyncio.run(run())

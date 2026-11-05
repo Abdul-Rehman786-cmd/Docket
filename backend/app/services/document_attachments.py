@@ -22,6 +22,8 @@ from app.services.document_service import DocumentService
 from app.services.message_service import message_reference, validate_message_scope
 from app.services.switch_document_media import AttachmentFailure, SwitchDocumentTransport, valid_media_reference
 
+logger = logging.getLogger("team_memory.documents")
+
 COMMAND = re.compile(r"(save|skip) ([0-9a-f]{12})",re.IGNORECASE)
 
 
@@ -75,7 +77,16 @@ class DocumentAttachments:
                 and re.fullmatch(r"@[^\s:]+:[^\s:]+",sender) is not None
                 and sender not in settings.switch_ai_senders)
 
+    @staticmethod
+    def log_configuration(settings):
+        logger.info("document stage=api_start enabled=%s ready=%s document_worker=%s embeddings=%s bridge_configured=%s bot_configured=%s adapter_configured=%s",
+            settings.switch_document_attachments_enabled,DocumentAttachments.configured(settings),
+            settings.document_ingestion_enabled,settings.local_embeddings_enabled,bool(settings.document_discord_bridges),
+            bool(settings.switch_document_bot_sender_id),bool(settings.switch_document_adapter_token.get_secret_value()))
+
     def receipt(self,message,row=None,duplicate=False,state="ignored"):
+        logger.info("document stage=receipt ref=%s request=%s state=%s duplicate=%s",
+            message_reference(message),row["ref"] if row else "none",row["state"] if row else state,duplicate)
         return AttachmentReceipt(message_ref=message_reference(message),
             received_at=datetime.fromtimestamp(self.jobs.clock(),timezone.utc).isoformat(),duplicate=duplicate,
             request_ref=row["ref"] if row else None,processing_state=row["state"] if row else state)
@@ -104,8 +115,14 @@ class DocumentAttachments:
             failed=f"Could not finish request {ref} for {names}. {failed}")
 
     async def accept(self,message,settings):
-        validate_message_scope(message,settings)
+        logger.info("document stage=api_received ref=%s files=%d",message_reference(message),len(message.attachments))
+        try:
+            validate_message_scope(message,settings)
+        except HTTPException as error:
+            logger.warning("document stage=scope_rejected ref=%s http_status=%d",message_reference(message),error.status_code)
+            raise
         if not self.configured(settings):
+            logger.warning("document stage=setup_rejected reason=configuration_incomplete")
             raise HTTPException(503,"document_attachment_setup_required")
         if message.sender in settings.switch_ai_senders:
             return self.receipt(message)
@@ -114,7 +131,11 @@ class DocumentAttachments:
             return self.receipt(message,state="not_authorized")
         if not self.eligible_sender(message.sender,settings):
             return self.receipt(message,state="not_authorized")
-        await self.scope_resolver(settings,message.room_id)
+        try:
+            await self.scope_resolver(settings,message.room_id)
+        except HTTPException as error:
+            logger.warning("document stage=scope_resolution http_status=%d",error.status_code)
+            raise
         command=COMMAND.fullmatch(message.body.strip())
         if not message.attachments:
             if command:
@@ -176,6 +197,8 @@ class DocumentAttachments:
                 error=next((e for a in all_items if (e:=attachment_error(a,settings))),None)
             data["ready"]=bool(error) or len(data["parts"])==total
             data["error"]=error
+            if error:
+                logger.warning("document stage=metadata_rejected request=%s reason=%s",ref,error)
             data["replies"]=self.replies(ref,all_items,error)
             updated=await self.jobs.change(row,state="failed" if error else None,data=data,
                 reply=("failed" if error else "prompt") if data["ready"] else None)
@@ -209,6 +232,7 @@ class DocumentAttachments:
         raise HTTPException(503,"document_attachment_retry_delivery")
 
     async def fail(self,row,error):
+        logger.warning("document stage=processing_failed request=%s reason=%s",row["ref"],error)
         data=deepcopy(row["data"])
         data["error"]=error
         data["replies"]=self.replies(row["ref"],data["items"],error)
@@ -220,6 +244,7 @@ class DocumentAttachments:
         row=await self.jobs.claim(settings.switch_tenant_id,settings.allowed_switch_rooms)
         if row is None:
             return False
+        logger.info("document stage=processing request=%s phase=%s attempt=%d",row["ref"],row["data"]["phase"],row["attempts"])
         try:
             if not self.eligible_sender(row["sender"],settings):
                 raise AttachmentFailure("sender_identity_unverified")
@@ -288,6 +313,7 @@ class DocumentAttachments:
                 if not doc["active"] or doc["published_version_id"]!=result["version_id"]:
                     raise AttachmentFailure("document_not_current")
             await self.jobs.change(row,state="published",data=row["data"],reply="published",release=True)
+            logger.info("document stage=published request=%s",row["ref"])
             return True
         except AttachmentFailure as error:
             if error.retryable and row["attempts"]<3:
@@ -295,6 +321,12 @@ class DocumentAttachments:
             else:
                 await self.fail(row,error.code)
         except HTTPException as error:
+            reasons={"document_tokenizer_unavailable","document_database_unavailable","document_scope_denied",
+                     "document_import_busy","document_invalid_import","document_version_conflict"}
+            reason=error.detail if isinstance(error.detail,str) and error.detail in reasons else "ingestion_unavailable"
+            logger.warning("document stage=import_error request=%s phase=%s attempt=%d http_status=%d reason=%s retry=%s",
+                row["ref"],row["data"]["phase"],row["attempts"],error.status_code,reason,
+                error.status_code>=500 and row["attempts"]<3)
             if error.status_code>=500 and row["attempts"]<3:
                 await self.jobs.change(row,state="queued" if row["data"]["phase"]=="importing" else "processing",
                                        release=True,retry_at=self.jobs.clock()+30)
@@ -307,6 +339,7 @@ class DocumentAttachments:
         if row is None:
             return False
         success=False
+        logger.info("document stage=reply_attempt request=%s kind=%s attempt=%d",row["ref"],row["data"]["kind"],row["attempts"])
         try:
             request=await self.jobs.get(row["ref"])
             # A delayed prompt must not invite consent for an already terminal request.
@@ -318,9 +351,13 @@ class DocumentAttachments:
                 await self.scope_resolver(settings,row["room"])
                 await self.transport_factory(settings).post(row["room"],row["data"]["body"],row["data"]["thread_id"])
             success="superseded" if stale else True
-        except Exception:
-            logging.getLogger("team_memory").warning("Document attachment reply reason=delivery_unavailable")
+        except Exception as error:
+            logger.warning("document stage=reply_failed request=%s kind=%s attempt=%d error_type=%s http_status=%s",
+                row["ref"],row["data"]["kind"],row["attempts"],type(error).__name__,
+                error.status_code if isinstance(error,HTTPException) else "unavailable")
         await self.jobs.finish_reply(row,success)
+        if success:
+            logger.info("document stage=reply_finished request=%s outcome=%s",row["ref"],"superseded" if success=="superseded" else "sent")
         return True
 
     async def status(self,ref,settings):
