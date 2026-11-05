@@ -624,7 +624,7 @@ class AIService:
                     final_answer = (decision.answer or "").strip()
                     if not final_answer:
                         final_answer = (
-                            "Stored in team memory database."
+                            "Data has been saved into the database."
                             if decision.action == "store_only"
                             else "No database action was needed."
                         )
@@ -649,8 +649,8 @@ class AIService:
                 and source_meta.get("room_id")
                 and bool(final_answer and final_answer.strip())
                 and (
-                    decision.action in ("query_only", "store_and_query")
-                    or (source_meta.get("addressed") and decision.action != "store_only")
+                    decision.action in ("store_only", "query_only", "store_and_query")
+                    or source_meta.get("addressed")
                 )
             )
             if should_reply:
@@ -673,12 +673,17 @@ class AIService:
                     )
                     reply_room_id = source_meta["room_id"]
                     reply_thread_id = source_meta.get("thread_id")
+                    reply_body = (
+                        "Data has been saved into the database."
+                        if decision.action == "store_only"
+                        else final_answer
+                    )
                     # Record before posting: the echo can arrive before the HTTP call returns.
-                    self.posted_replies.append(self._reply_fingerprint(reply_room_id, final_answer))
-                    await self.journal.remember_reply(self._reply_fingerprint(reply_room_id, final_answer))
+                    self.posted_replies.append(self._reply_fingerprint(reply_room_id, reply_body))
+                    await self.journal.remember_reply(self._reply_fingerprint(reply_room_id, reply_body))
                     await requester_api.post_room_message(
                         room_id=reply_room_id,
-                        body=final_answer,
+                        body=reply_body,
                         thread_id=reply_thread_id,
                     )
                     msg_timestamp = source_meta.get("timestamp_ms")

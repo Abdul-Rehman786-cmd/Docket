@@ -124,7 +124,7 @@ Incoming user messages supply their current body for redaction during admission.
 - **Dual Loop Guard**:
   1. *Sender-based*: `switch_ai_senders` automatically includes `SWITCH_REQUESTER_AGENT_ID`, `SWITCH_AGENT_ID`, and configured `SWITCH_AI_SENDER_IDS`.
   2. *Content-fingerprint based*: Switch sender IDs are opaque participant IDs that can differ from agent IDs. FastAPI maintains a bounded rolling cache (`posted_replies`) of SHA-256 fingerprints of recently posted replies keyed by `(room_id, body)`. When an echo of our own reply arrives via the WebSocket listener, FastAPI identifies the fingerprint and skips evaluation, completely preventing infinite response loops.
-- **Reply Policy Control**: Governed by `SWITCH_REPLY_TO_DISCORD=true` (default). `store_only` (extracting commitments into Supabase) and `none` (casual greetings) remain silent in chat; `query_only`, `store_and_query`, and addressed questions post back to Discord.
+- **Reply Policy Control**: Governed by `SWITCH_REPLY_TO_DISCORD=true` (default). `store_only` (extracting commitments into Supabase) sends a verification message ("Data has been saved into the database.") back to Discord; `none` (casual greetings) remains silent in chat; `query_only`, `store_and_query`, and addressed questions post answers back to Discord.
 
 ### Current runtime and message flow
 
@@ -275,7 +275,7 @@ Every message is ingested into the authenticated preview feed (`POST /messages`)
 
 | Event / LLM Decision | FastAPI Database Action | Discord Reply Behavior |
 |-----------------------|-------------------------|------------------------|
-| `store_only` (new commitment, decision, or team fact) | Stores message and extracts commitments, decisions, and memories into Supabase. | **Silent in Discord.** Ingestion is quiet; no response message is posted. |
+| `store_only` (new commitment, decision, or team fact) | Stores message and extracts commitments, decisions, and memories into Supabase. | **Replies in Discord.** Sends verification: "Data has been saved into the database." |
 | `query_only` (question requiring team memory) | Queries Supabase (`memories`, `commitments`, `decisions`, `messages`) for relevant team records. | **Replies in Discord.** Codex synthesizes a plain-text answer from Supabase records; FastAPI posts to origin room & thread via `SwitchAPI.post_room_message()`. |
 | `store_and_query` (new information + question) | Stores extracted records in Supabase, then queries Supabase records. | **Replies in Discord.** Codex synthesizes an answer incorporating newly stored and historical records; FastAPI posts to origin room & thread. |
 | `none` (casual chatter, greetings, or off-topic) | Neither stores nor reads from Supabase. | **Silent in Discord** unless the message was explicitly addressed to the bot. |

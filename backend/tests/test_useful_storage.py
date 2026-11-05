@@ -56,7 +56,7 @@ def test_invalid_model_output_is_never_none(text, category):
     ("Good morning", {}, (0, 0, 0)),
     ("Maybe we should use Redis", {}, (0, 0, 0)),
 ])
-def test_automatic_extraction_source_and_silence(monkeypatch, caplog, body, extraction, counts):
+def test_automatic_extraction_source_and_acknowledgement(monkeypatch, caplog, body, extraction, counts):
     async def run():
         settings, service, receipts = config(), AIService(), MessageReceiptRepository()
         saved, posted = [], []
@@ -81,7 +81,13 @@ def test_automatic_extraction_source_and_silence(monkeypatch, caplog, body, extr
             await service.queue.join()
             result = service.repository.recent(response_scope(settings))[0]
             assert result.status == "answered"
-            assert posted == []
+            if extraction:
+                assert len(posted) == 1
+                assert posted[0]["body"] == "Data has been saved into the database."
+                assert posted[0]["room_id"] == "test-room"
+                assert posted[0]["thread_id"] == "thread-1"
+            else:
+                assert posted == []
             job = await service.journal.get(receipt.message_ref)
             assert job["state"] == "done" and job["payload"] is None and job["decision"] is None
             if extraction:
