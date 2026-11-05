@@ -99,13 +99,7 @@ def test_automatic_extraction_source_and_acknowledgement(monkeypatch, caplog, bo
             await service.queue.join()
             result = service.repository.recent(response_scope(settings))[0]
             assert result.status == "answered"
-            if extraction:
-                assert len(posted) == 1
-                assert posted[0]["body"] == "Data has been saved into the database."
-                assert posted[0]["room_id"] == "test-room"
-                assert posted[0]["thread_id"] == "thread-1"
-            else:
-                assert posted == []
+            assert posted == []
             job = await service.journal.get(receipt.message_ref)
             assert job["state"] == "done" and job["payload"] is None and job["decision"] is None
             if extraction:
@@ -153,7 +147,7 @@ def test_unclear_message_triggers_clarification_reply_and_no_storage(monkeypatch
         monkeypatch.setattr(ai_service.SwitchAPI, "post_room_message", post)
 
         try:
-            msg = message(settings, "set up a meeting")
+            msg = message(settings, "set up a meeting", addressed=True)
             receipt = await service.ingest(msg, settings, receipts)
             await service.queue.join()
             result = service.repository.recent(response_scope(settings))[0]
@@ -198,7 +192,7 @@ def test_confirmation_flow_yes_commits_and_no_cancels(monkeypatch):
         monkeypatch.setattr(ai_service.SwitchAPI, "post_room_message", post)
 
         try:
-            msg1 = message(settings, "I'll handle the launch on Friday")
+            msg1 = message(settings, "I'll handle the launch on Friday", addressed=True)
             await service.ingest(msg1, settings, receipts)
             await service.queue.join()
 
@@ -225,7 +219,7 @@ def test_confirmation_flow_yes_commits_and_no_cancels(monkeypatch):
             assert posted[1]["body"] == "Data has been saved into the database."
             assert await service.pending_confirmations.get("test-room:thread-1") is None
 
-            msg3 = message(settings, "Launch on Friday", message_id="msg-3", timestamp_ms=1793872802000)
+            msg3 = message(settings, "Launch on Friday", message_id="msg-3", timestamp_ms=1793872802000, addressed=True)
             await service.ingest(msg3, settings, receipts)
             await service.queue.join()
             assert len(posted) == 3
@@ -381,14 +375,14 @@ def test_delivery_failure_does_not_repeat_extraction_and_echo_guard_survives_res
         monkeypatch.setattr(ai_service, "ask_switch", ask)
         monkeypatch.setattr(ai_service, "query_team_memory", query)
         monkeypatch.setattr(ai_service.SwitchAPI, "post_room_message", post)
-        receipt = await service.ingest(message(settings), settings, MessageReceiptRepository())
+        receipt = await service.ingest(message(settings, addressed=True), settings, MessageReceiptRepository())
         await service.queue.join()
         assert (await service.journal.get(receipt.message_ref))["state"] == "done"
         assert service.repository.recent(response_scope(settings))[0].status == "answered"
         await service.close()
         restarted = AIService()
-        await restarted.ingest(message(settings), settings, MessageReceiptRepository())
-        echo = message(settings, "Fixture answer").model_copy(update={"message_id": "echo-with-opaque-sender"})
+        await restarted.ingest(message(settings, addressed=True), settings, MessageReceiptRepository())
+        echo = message(settings, "Fixture answer", addressed=True).model_copy(update={"message_id": "echo-with-opaque-sender"})
         await restarted.ingest(echo, settings, MessageReceiptRepository())
         assert restarted.pending == 0 and len(calls) == 2
         assert calls[1][1] == {"synthesis": True}

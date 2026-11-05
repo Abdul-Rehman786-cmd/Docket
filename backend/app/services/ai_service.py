@@ -54,6 +54,21 @@ def clean_confirmation_text(body: str) -> str:
     return cleaned.strip(" .,!?:;")
 
 
+def is_bot_mentioned(text: str | None, settings: Settings) -> bool:
+    if not text:
+        return False
+    lower = text.lower()
+    if re.search(r"<@!?\w+>", text):
+        return True
+    if "@team-memory" in lower or "@codex" in lower:
+        return True
+    if settings.switch_ai_agent_name and f"@{settings.switch_ai_agent_name.lower()}" in lower:
+        return True
+    if settings.switch_requester_agent_id and f"@{settings.switch_requester_agent_id.lower()}" in lower:
+        return True
+    return False
+
+
 def format_draft_preview(decision: LLMDecision) -> str:
     lines = ["I extracted the following data to save:"]
     for c in decision.commitments:
@@ -515,54 +530,53 @@ class AIService:
             and self._reply_fingerprint(message.room_id, message.body) not in self.posted_replies
         )
         ref = message_reference(message)
-        if eligible and settings.require_save_confirmation:
-            draft_key = f"{message.room_id}:{message.thread_id or 'main'}"
-            staged = await self.pending_confirmations.get(draft_key)
-            if staged:
-                cleaned = clean_confirmation_text(message.body)
-                if cleaned in CONFIRMATION_YES_WORDS:
-                    try:
-                        stored_counts = await store_ai_memory(
-                            settings,
-                            tenant_id=settings.switch_tenant_id,
-                            switch_room_id=staged["room_id"],
-                            switch_message_id=staged["switch_message_id"],
-                            author_name=staged["author_name"],
-                            body=staged["body"],
-                            occurred_at=staged["occurred_at"],
-                            decision=staged["decision"],
-                            source_metadata=staged["source_metadata"],
-                        )
-                        reply_text = "Data has been saved into the database."
-                        logger.info("Pending extraction confirmed room=%s stored=%s", message.room_id, stored_counts)
-                    except Exception as e:
-                        logger.exception("Failed to store confirmed extraction: %s", e)
-                        reply_text = "Failed to save data into the database. Please try again."
-                    await self.pending_confirmations.remove(draft_key)
-                    if settings.switch_reply_to_discord:
-                        await self._send_discord_reply(
-                            settings,
-                            message.room_id,
-                            reply_text,
-                            message.thread_id,
-                            message.timestamp_ms,
-                            message.message_id,
-                        )
-                    return receive_message(message, settings, receipts)
-                elif cleaned in CONFIRMATION_NO_WORDS:
-                    await self.pending_confirmations.remove(draft_key)
-                    reply_text = "Cancelled. Data was not saved."
-                    logger.info("Pending extraction cancelled room=%s", message.room_id)
-                    if settings.switch_reply_to_discord:
-                        await self._send_discord_reply(
-                            settings,
-                            message.room_id,
-                            reply_text,
-                            message.thread_id,
-                            message.timestamp_ms,
-                            message.message_id,
-                        )
-                    return receive_message(message, settings, receipts)
+        draft_key = f"{message.room_id}:{message.thread_id or 'main'}"
+        staged = await self.pending_confirmations.get(draft_key)
+        if staged:
+            cleaned = clean_confirmation_text(message.body)
+            if cleaned in CONFIRMATION_YES_WORDS:
+                try:
+                    stored_counts = await store_ai_memory(
+                        settings,
+                        tenant_id=settings.switch_tenant_id,
+                        switch_room_id=staged["room_id"],
+                        switch_message_id=staged["switch_message_id"],
+                        author_name=staged["author_name"],
+                        body=staged["body"],
+                        occurred_at=staged["occurred_at"],
+                        decision=staged["decision"],
+                        source_metadata=staged["source_metadata"],
+                    )
+                    reply_text = "Data has been saved into the database."
+                    logger.info("Pending extraction confirmed room=%s stored=%s", message.room_id, stored_counts)
+                except Exception as e:
+                    logger.exception("Failed to store confirmed extraction: %s", e)
+                    reply_text = "Failed to save data into the database. Please try again."
+                await self.pending_confirmations.remove(draft_key)
+                if settings.switch_reply_to_discord:
+                    await self._send_discord_reply(
+                        settings,
+                        message.room_id,
+                        reply_text,
+                        message.thread_id,
+                        message.timestamp_ms,
+                        message.message_id,
+                    )
+                return receive_message(message, settings, receipts)
+            elif cleaned in CONFIRMATION_NO_WORDS:
+                await self.pending_confirmations.remove(draft_key)
+                reply_text = "Cancelled. Data was not saved."
+                logger.info("Pending extraction cancelled room=%s", message.room_id)
+                if settings.switch_reply_to_discord:
+                    await self._send_discord_reply(
+                        settings,
+                        message.room_id,
+                        reply_text,
+                        message.thread_id,
+                        message.timestamp_ms,
+                        message.message_id,
+                    )
+                return receive_message(message, settings, receipts)
         job = None
         if eligible:
             try:
@@ -665,7 +679,15 @@ class AIService:
                     if not meta.get("switch_message_id"):
                         raise HTTPException(422, "Source evidence is no longer available")
 
-                    if settings.require_save_confirmation and source_meta and source_meta.get("origin") == "discord":
+                    is_addressed = bool(
+                        source_meta
+                        and (
+                            source_meta.get("addressed")
+                            or is_bot_mentioned(source_meta.get("body"), settings)
+                        )
+                    )
+
+                    if is_addressed and source_meta and source_meta.get("origin") == "discord":
                         draft_key = f"{meta['room_id']}:{meta.get('thread_id') or 'main'}"
                         occurred = meta["occurred_at"].isoformat() if isinstance(meta["occurred_at"], datetime) else str(meta["occurred_at"])
                         await self.pending_confirmations.stage(
@@ -760,18 +782,20 @@ class AIService:
                 # Commit processing before outbound delivery. Failed posting never re-extracts.
                 await self.journal.finish(msg_ref)
             # Reply pipeline: Discord -> Switch -> FastAPI -> Switch -> Discord
+            is_addressed = bool(
+                source_meta
+                and (
+                    source_meta.get("addressed")
+                    or is_bot_mentioned(source_meta.get("body"), settings)
+                )
+            )
             should_reply = (
                 settings.switch_reply_to_discord
+                and is_addressed
                 and source_meta
                 and source_meta.get("origin") == "discord"
                 and source_meta.get("room_id")
                 and bool(final_answer and final_answer.strip())
-                and (
-                    staged_for_confirmation
-                    or decision.action in ("store_only", "query_only", "store_and_query", "clarify")
-                    or source_meta.get("addressed")
-                    or (decision.action == "none" and bool(decision.answer and decision.answer.strip()))
-                )
             )
             if should_reply:
                 msg_timestamp = source_meta.get("timestamp_ms")

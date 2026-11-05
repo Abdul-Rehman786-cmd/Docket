@@ -66,7 +66,6 @@ class Settings(BaseSettings):
     switch_ai_sender_ids: str = Field(default="", repr=False)
     switch_backend_url: str = Field(default="http://127.0.0.1:8000", repr=False)
     switch_reply_to_discord: bool = Field(default=True, validation_alias=AliasChoices("SWITCH_REPLY_TO_DISCORD"))
-    require_save_confirmation: bool = Field(default=True, validation_alias=AliasChoices("REQUIRE_SAVE_CONFIRMATION", "CONFIRM_BEFORE_SAVE"))
     database_engine: str = Field(default="sqlite", validation_alias=AliasChoices("DATABASE_ENGINE", "DB_ENGINE"))
     sqlite_db_path: str = Field(default="backend/.local/team_memory.db", validation_alias=AliasChoices("SQLITE_DB_PATH", "SQLITE_PATH"))
     log_discord_messages: bool = False
