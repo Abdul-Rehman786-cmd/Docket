@@ -29,7 +29,7 @@ These are real local inference/database results behind a **mocked HTTP transport
 
 ## Schema and deployment boundary
 
-New additive `migrations/20261106000100_simple_commitment_capture.sql` adds a five-argument overload of existing `store_message_extraction`, required because the old four-argument function does not initialize stable owner columns. It delegates to that existing function and initializes ownership in the same transaction. No table, column, embedding dimension, model or infrastructure was added. Anonymous/authenticated client grants are revoked. The migration was tested only in fresh disposable local databases; it was **not applied remotely**.
+New additive `migrations/history/20261106000100_simple_commitment_capture.sql` adds a five-argument overload of existing `store_message_extraction`, required because the old four-argument function does not initialize stable owner columns. It delegates to that existing function and initializes ownership in the same transaction. No table, column, embedding dimension, model or infrastructure was added. Anonymous/authenticated client grants are revoked. The migration was tested only in fresh disposable local databases; it was **not applied remotely**.
 
 Simple capture requires the reviewed storage/embedding prerequisites and this overload, not the advanced lifecycle/chat/reminder migrations. Existing local work in those modules was preserved. Prior applied migration history was not rewritten for this task; never replay the destructive initial schema on the host.
 

@@ -36,6 +36,15 @@ BEGIN
     IF public.document_operation(tenant,ARRAY[room],'finish',job||jsonb_build_object('vector',vector))<>'true' THEN RAISE EXCEPTION 'finish rejected'; END IF;
     hits:=public.document_operation(tenant,ARRAY[room],'search',jsonb_build_object('vector',vector,'model_recipe','model-v1','limit',5));
     IF jsonb_array_length(hits)<>1 OR hits->0->>'text'<>source OR hits->0->>'version_id'<>first->>'version_id' THEN RAISE EXCEPTION 'published retrieval/citation'; END IF;
+    -- Metadata-only catalog join used by chat; no source/chunk text is needed.
+    IF (SELECT count(*) FROM public.documents a
+        JOIN public.rooms r ON (r.tenant_id,r.id)=(a.tenant_id,a.room_id)
+        JOIN public.document_versions z ON (z.tenant_id,z.room_id,z.document_id,z.id)=
+            (a.tenant_id,a.room_id,a.id,a.published_version_id)
+        WHERE a.tenant_id=tenant AND a.room_id=room AND a.active AND r.enabled
+            AND z.status='completed' AND z.filename='design.md')<>1 THEN
+        RAISE EXCEPTION 'published catalog filename join';
+    END IF;
     IF jsonb_array_length(public.document_operation(tenant,ARRAY[other_room],'search',jsonb_build_object('vector',vector,'model_recipe','model-v1','limit',5)))<>0 THEN RAISE EXCEPTION 'room isolation'; END IF;
     failed:=false;
     BEGIN PERFORM public.document_operation(tenant,ARRAY[other_room],'document',jsonb_build_object('document_id',fixture_document_id));

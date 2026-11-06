@@ -457,7 +457,8 @@ def test_incoming_message_replies_to_switch_discord_room(ai_config, monkeypatch,
 
     async def fake_post_room_message(self, room_id, body, thread_id=None):
         posted_messages.append({"room_id": room_id, "body": body, "thread_id": thread_id})
-        delivered.set()
+        if body != "Processing your request...":
+            delivered.set()
         return {"status": "ok"}
 
     monkeypatch.setattr(ai_service, "ask_switch", fake_ask_switch)

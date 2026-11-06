@@ -42,7 +42,7 @@ def configuration(**changes):
         switch_document_discord_bridge_ids='fixture-bridge',
         switch_document_bot_sender_id='@fixture-client:switch.invalid',
         admin_api_token='fixture-admin',switch_bridge_url='https://switch.invalid',
-        switch_document_confirmation_seconds=60)
+        switch_document_confirmation_seconds=60,switch_document_max_bytes=262144)
     values.update(changes)
     return Settings(_env_file=None).model_copy(update=values)
 
@@ -104,7 +104,7 @@ def setup(tmp_path):
 
 
 def confirm(ref,decision='save',**changes):
-    return event(message_id='decision-'+decision,attachments=[],body=decision+' '+ref,**changes)
+    return event(**dict(dict(message_id='decision-'+decision+'-'+ref+'-'+changes.get('sender',SENDER),attachments=[],body=decision+' '+ref),**changes))
 
 
 async def publish(f):
@@ -120,20 +120,20 @@ def test_confirm_import_publish_search_citation_and_provenance(tmp_path):
         assert received.processing_state=='confirmation_requested'
         assert f.transport.downloads==[] and f.repo.documents=={}
         assert await f.feature.send_once(f.settings)
-        assert 'design.md' in f.transport.posts[0][1] and 'save '+received.request_ref in f.transport.posts[0][1]
-        assert f.transport.posts[0][2]=='thread-root'
+        assert 'design.md' in f.transport.posts[0][1] and 'Reply yes or save' in f.transport.posts[0][1] and received.request_ref not in f.transport.posts[0][1]
+        assert f.transport.posts[0][2] is None
         queued=await f.feature.accept(confirm(received.request_ref,thread_id='thread-root'),f.settings)
         assert queued.processing_state=='queued' and f.transport.downloads==[]
         await f.feature.work_once(f.settings)
         assert len(f.transport.downloads)==1 and len(f.repo.documents)==1
         assert next(iter(f.repo.documents.values()))['created_by']=='switch:'+SENDER
         assert (await f.jobs.get(received.request_ref))['state']=='processing'
-        assert not any('Saved to searchable' in p[1] for p in f.transport.posts)
+        assert not any('Saved design.md to team memory' in p[1] for p in f.transport.posts)
         await publish(f)
         assert (await f.jobs.get(received.request_ref))['state']=='published'
         for _ in range(5):
             await f.feature.send_once(f.settings)
-        assert sum('Saved to searchable' in p[1] for p in f.transport.posts)==1
+        assert sum('Saved design.md to team memory' in p[1] for p in f.transport.posts)==1
         matches=await f.factory(f.repo).search(DocumentScope(TENANT,(ROOM,)),DocumentSearch(query='API framework?'))
         assert matches[0].text=='The backend API uses FastAPI.' and matches[0].citation.startswith('document:')
         status=await f.feature.status(received.request_ref,f.settings)
@@ -165,7 +165,7 @@ def test_no_content_access_on_decline_or_expiry(tmp_path,decision):
 
 
 @pytest.mark.parametrize('changes',[{'sender':'@someone-else:switch.invalid'},{'room_id':'second-room'},
-                                   {'thread_id':'wrong-thread'},{'bridge_id':'another-bridge'}])
+                                   {'bridge_id':'another-bridge'}])
 def test_confirmation_binding(tmp_path,changes):
     async def run():
         f=setup(tmp_path)
@@ -177,7 +177,7 @@ def test_confirmation_binding(tmp_path,changes):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('body',['yes','yes please','save all','save 123','The document says save abcdef123456'])
+@pytest.mark.parametrize('body',['yes, do the other thing','yes please schedule a meeting','save all','save 123','The document says save abcdef123456'])
 def test_ambiguous_text_never_authorizes(tmp_path,body):
     async def run():
         f=setup(tmp_path)
@@ -209,7 +209,7 @@ def test_grouped_events_wait_for_all_parts_and_list_exact_files(tmp_path):
         group=lambda index:dict(id='group-one',index=index,total=2)
         first=await f.feature.accept(event(attachment_group=group(1)),f.settings)
         assert not await f.feature.send_once(f.settings)
-        assert (await f.feature.accept(confirm(first.request_ref),f.settings)).processing_state=='not_authorized'
+        assert (await f.feature.accept(confirm(first.request_ref,message_id='incomplete-command'),f.settings)).processing_state=='not_authorized'
         second=await f.feature.accept(event(message_id='source-2',attachments=[attachment('notes.txt','mxc://switch.invalid/file_2')],attachment_group=group(0)),f.settings)
         assert second.request_ref==first.request_ref and not second.duplicate
         await f.feature.send_once(f.settings)
@@ -230,7 +230,7 @@ def test_malformed_group_degrades_to_single_event(marker):
     assert event(attachment_group=marker).attachment_group is None
 
 
-@pytest.mark.parametrize('file,error',[(attachment('x.pdf'),'unsupported_format'),
+@pytest.mark.parametrize('file,error',[(attachment('x.doc'),'unsupported_format'),
     (attachment('../x.md'),'unsafe_filename'),(attachment('C:\\x.md'),'unsafe_filename'),
     (attachment(mxc='http://127.0.0.1/private'),'unsafe_media_reference'),
     (dict(attachment(),size=262145),'attachment_too_large')])
@@ -573,7 +573,7 @@ def test_slow_import_does_not_block_another_confirmation_prompt(tmp_path,monkeyp
         try:
             async with asyncio.timeout(3):
                 await entered.wait()
-                while not any(second.request_ref in p[1] and 'Should I save' in p[1] for p in f.transport.posts):
+                while not any('second.txt' in p[1] and 'Reply yes or save' in p[1] for p in f.transport.posts):
                     await asyncio.sleep(.01)
         finally:
             await f.feature.close()
@@ -634,7 +634,7 @@ def test_reply_attempt_uses_one_documented_operation_without_fallback(monkeypatc
         def handle(request):
             paths.append(request.url.path)
             body=json.loads(request.content)
-            assert body=={'body':'Safe fixture reply','thread_id':'source-1'}
+            assert body=={'body':'Safe fixture reply'}
             assert request.headers['x-switch-connection-id']==state.connection_id
             assert request.headers['x-switch-session-id']==document_reply_session('test-room')
             return httpx.Response(500,json={'detail':'fixture-private-response'})
@@ -760,7 +760,7 @@ def test_document_trace_logs_stages_without_private_payloads(tmp_path,caplog,mon
     async def run():
         f=setup(tmp_path)
         result=await f.feature.accept(event(body='fixture-private-caption',sender_name='fixture-private-name',
-            attachments=[attachment('fixture-private-file.pdf')]),f.settings)
+            attachments=[attachment('fixture-private-file.doc')]),f.settings)
         f.transport.post_error=True
         await f.feature.send_once(f.settings)
         assert result.processing_state=='failed'

@@ -41,8 +41,8 @@ BEGIN
       VALUES(t1,r1,m1,'fact','inactive','Synthetic inactive fact',v1,false);
     INSERT INTO public.memories(tenant_id,room_id,message_id,memory_type,extraction_key,content)
       VALUES(t1,r1,m1,'fact','no-vector','Synthetic pending embedding');
-    INSERT INTO public.reminder_deliveries(tenant_id,room_id,commitment_id,scheduled_for,updated_at)
-      VALUES(t1,r1,c1,'2099-01-01','2000-01-01') RETURNING id INTO delivery1;
+    INSERT INTO public.reminder_deliveries(tenant_id,room_id,commitment_id,scheduled_for,updated_at,occurrence_key,recipient_id,commitment_version,policy_version,reminder_type,ordinal,occurrence_base)
+      VALUES(t1,r1,c1,'2099-01-01','2000-01-01',gen_random_uuid(),prefix,1,1,'upcoming',0,'2099-01-01') RETURNING id INTO delivery1;
     passed := passed || jsonb_build_array('Service-role inserts across all eight tables');
     BEGIN
         INSERT INTO public.messages(tenant_id,room_id,switch_message_id,body) VALUES(t1,r1,'audit-event-1','duplicate');
@@ -123,11 +123,12 @@ BEGIN
     END;
     passed := passed || jsonb_build_array('Decision cannot supersede another room decision');
     BEGIN
-        INSERT INTO public.reminder_deliveries(tenant_id,room_id,commitment_id,scheduled_for) VALUES(t1,r1,c1,'2099-01-01');
-        RAISE EXCEPTION 'Expected 23505: Duplicate reminder schedule rejected';
+        INSERT INTO public.reminder_deliveries(tenant_id,room_id,commitment_id,scheduled_for,occurrence_key,recipient_id,commitment_version,policy_version,reminder_type,ordinal,occurrence_base)
+          SELECT tenant_id,room_id,commitment_id,scheduled_for,occurrence_key,recipient_id,commitment_version,policy_version,reminder_type,ordinal,occurrence_base FROM public.reminder_deliveries WHERE id=delivery1;
+        RAISE EXCEPTION 'Expected 23505: Duplicate reminder occurrence rejected';
     EXCEPTION WHEN SQLSTATE '23505' THEN NULL;
     END;
-    passed := passed || jsonb_build_array('Duplicate reminder schedule rejected');
+    passed := passed || jsonb_build_array('Duplicate reminder occurrence rejected');
     BEGIN
         INSERT INTO public.reminder_deliveries(tenant_id,room_id,commitment_id,scheduled_for) VALUES(t1,r2,c1,'2099-01-02');
         RAISE EXCEPTION 'Expected 23503: Reminder cannot reference another room commitment';
@@ -213,8 +214,8 @@ BEGIN
     UPDATE public.reminder_deliveries SET status='sent',sent_at=now() WHERE id=delivery1;
     UPDATE public.messages SET extraction_status='completed',extraction_completed_at=now() WHERE id=m1;
     passed := passed || jsonb_build_array('Valid approval, task completion, reminder delivery and extraction transitions');
-    DELETE FROM public.memories WHERE id=memory1;
-    IF EXISTS(SELECT 1 FROM public.memories WHERE id=memory1) THEN RAISE EXCEPTION 'Service-role delete failed'; END IF;
+    DELETE FROM public.memories WHERE tenant_id=t1 AND message_id=m1 AND extraction_key='no-vector';
+    IF EXISTS(SELECT 1 FROM public.memories WHERE tenant_id=t1 AND message_id=m1 AND extraction_key='no-vector') THEN RAISE EXCEPTION 'Service-role delete failed'; END IF;
     passed := passed || jsonb_build_array('Service-role read, update and delete');
 
     RESET ROLE;

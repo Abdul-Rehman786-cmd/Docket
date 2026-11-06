@@ -54,7 +54,7 @@ This is real SQL execution, **not hosted Supabase**. PGlite's single connection 
 - Existing AI schema/prompt/worker and durable ingestion journal gain proposals, frozen plans, outcomes and recovery integration.
 - Ingestion controller, security, listener/configuration add separate adapter attestation. Unsafe viewer environment routes are disabled.
 - `requirements.txt` / local lock add timezone data; `.env.example` adds non-secret placeholders and a false feature flag.
-- Additive `migrations/20261105000200_commitment_chat.sql` introduces policy/identity/source tables, separate automated-acceptance fields, audit provenance/outcomes, source uniqueness and shared transactional functions. Earlier migrations are preserved.
+- Additive `migrations/history/20261105000200_commitment_chat.sql` introduces policy/identity/source tables, separate automated-acceptance fields, audit provenance/outcomes, source uniqueness and shared transactional functions. Earlier migrations are preserved.
 - README, architecture, lifecycle and deployment documents link the [complete automatic policy/API contract](../AUTOMATIC_COMMITMENTS.md).
 
 ## Remaining deployment requirements and limits

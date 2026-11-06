@@ -1,0 +1,4 @@
+# Preserve byte offsets and package contents across Windows/Linux checkouts.
+*.pdf binary
+*.docx binary
+*.pptx binary

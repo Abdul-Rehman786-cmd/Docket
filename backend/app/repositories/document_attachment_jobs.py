@@ -40,6 +40,9 @@ class AttachmentJobs:
                   id TEXT PRIMARY KEY, ref TEXT NOT NULL, tenant TEXT NOT NULL, room TEXT NOT NULL,
                   data TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
                   retry_at REAL NOT NULL DEFAULT 0, lease_until REAL NOT NULL DEFAULT 0, token TEXT);
+                CREATE TABLE IF NOT EXISTS attachment_confirmations (
+                  identity TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, request_ref TEXT, outcome TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS attachment_request_consent ON attachment_requests(tenant,room,sender,state);
                 CREATE INDEX IF NOT EXISTS attachment_request_queue ON attachment_requests(tenant,room,state,retry_at);
                 CREATE INDEX IF NOT EXISTS attachment_outbox_queue ON attachment_outbox(tenant,room,state,retry_at);
                 """)
@@ -53,7 +56,7 @@ class AttachmentJobs:
 
     @staticmethod
     def _enqueue(db,row,kind):
-        payload={"kind":kind,"body":row["data"]["replies"][kind],"thread_id":row["data"]["reply_thread"]}
+        payload={"kind":kind,"body":row["data"]["replies"][kind],"thread_id":None}
         db.execute("INSERT OR IGNORE INTO attachment_outbox(id,ref,tenant,room,data) VALUES(?,?,?,?,?)",
                    (row["ref"]+":"+kind,row["ref"],row["tenant"],row["room"],json.dumps(payload)))
 
@@ -89,6 +92,36 @@ class AttachmentJobs:
             if reply:
                 self._enqueue(db,result,reply)
             return result
+        return await self._execute(run)
+
+    async def decide_once(self,identity,fingerprint,tenant,room,sender,choose,include_ref=None):
+        """Select via domain callback while holding the same transaction as decision/outbox/replay binding."""
+        def run(db):
+            prior=db.execute("SELECT * FROM attachment_confirmations WHERE identity=?",(identity,)).fetchone()
+            if prior:
+                if prior["fingerprint"]!=fingerprint:
+                    return None,"not_authorized",True
+                row=self._row(db.execute("SELECT * FROM attachment_requests WHERE ref=?",(prior["request_ref"],)).fetchone())
+                return row,prior["outcome"],True
+            if db.execute("SELECT count(*) FROM attachment_confirmations").fetchone()[0]>=100000:
+                from fastapi import HTTPException
+                raise HTTPException(429,"document_confirmation_journal_full")
+            candidates=[self._row(r) for r in db.execute(
+                "SELECT * FROM attachment_requests WHERE tenant=? AND room=? AND sender=? AND (state='confirmation_requested' OR ref=?)",(str(tenant),room,sender,include_ref))]
+            row,outcome,data,reply,clarification=choose(candidates)
+            if row and data is not None:
+                db.execute("UPDATE attachment_requests SET state=?,data=?,revision=revision+1,lease_until=0,retry_at=0 WHERE ref=? AND revision=?",
+                    (outcome,json.dumps(data),row["ref"],row["revision"]))
+                row={**row,"state":outcome,"data":data,"revision":row["revision"]+1}
+                if reply:
+                    self._enqueue(db,row,reply)
+            if row and clarification:
+                payload=dict(kind="clarify",body=clarification,thread_id=None)
+                db.execute("INSERT OR IGNORE INTO attachment_outbox(id,ref,tenant,room,data) VALUES(?,?,?,?,?)",
+                    ("confirmation:"+identity,row["ref"],row["tenant"],row["room"],json.dumps(payload)))
+            db.execute("INSERT INTO attachment_confirmations(identity,fingerprint,request_ref,outcome) VALUES(?,?,?,?)",
+                       (identity,fingerprint,row["ref"] if row else None,outcome))
+            return row,outcome,False
         return await self._execute(run)
 
     async def due(self,tenant,rooms):

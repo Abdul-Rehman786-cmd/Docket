@@ -22,9 +22,10 @@ from app.services.document_service import DocumentService
 from app.services.message_service import message_reference, validate_message_scope
 from app.services.switch_document_media import AttachmentFailure, SwitchDocumentTransport, valid_media_reference
 
-logger = logging.getLogger("team_memory.documents")
+from app.services.document_commands import document_command
+from app.services.document_extraction import FORMATS, ExtractionError
 
-COMMAND = re.compile(r"(save|skip) ([0-9a-f]{12})",re.IGNORECASE)
+logger = logging.getLogger("team_memory.documents")
 
 
 def reference(values):
@@ -41,7 +42,7 @@ def attachment_error(attachment,settings):
     if (len(name)>200 or name!=PurePosixPath(name).name or any(c in name for c in ('\\','/',':','\x00'))
         or any(ord(c)<32 or ord(c)==127 for c in name)):
         return "unsafe_filename"
-    if PurePosixPath(name).suffix.lower() not in (".md",".txt"):
+    if PurePosixPath(name).suffix.lower() not in FORMATS:
         return "unsupported_format"
     if attachment.get("size") and attachment["size"]>settings.switch_document_max_bytes:
         return "attachment_too_large"
@@ -95,24 +96,32 @@ class DocumentAttachments:
         names=", ".join(display_name(i["filename"]) for i in items[:8]) or "this attachment group"
         if len(items)>8:
             names+=f" (and {len(items)-8} more)"
-        failures={"unsupported_format":"Only UTF-8 Markdown (.md) and plain-text (.txt) files are supported.",
+        failures={"unsupported_format":"Supported files: Markdown, text, text-based PDF, DOCX and PPTX.",
                   "attachment_too_large":"The file exceeds the configured size limit.",
                   "too_many_files":"Too many files were attached.",
                   "sender_identity_unverified":"The uploader identity is missing, invalid or a known bot. No file was imported.",
                   "media_unavailable":"The attachment is unavailable or expired. Please upload it again.",
                   "media_access_denied":"The Switch client cannot download this file. Ask an administrator to verify its room and media permissions.",
-                  "unsafe_media_reference":"The attachment reference is unsupported. Please upload the file through Discord again.",
+                  "unsafe_media_reference":"The file could not be accessed. Please upload it through Discord again.",
                   "unsafe_filename":"The filename is unsafe. Rename the file and upload again.",
                   "invalid_utf8":"The file must contain UTF-8 text. Please upload it again.",
                   "invalid_text":"The file is empty or contains binary data. Upload a UTF-8 text file.",
                   "publication_timeout":"Processing has not finished. Check the request status before uploading again."}
         failed=failures.get(error,"The import could not finish. Any files already accepted keep their own processing state; check this request before retrying.")
-        return dict(prompt=f"Should I save this document to team memory? Files: {names}. Reply exactly save {ref} or skip {ref}. Only the uploader can confirm.",
-            queued=f"Request {ref} queued for import.",processing=f"Request {ref} accepted; document processing is underway.",
-            published=f"Saved to searchable team memory: {names}. Request {ref}.",
-            declined=f"Request {ref} declined. No files will be imported.",
-            expired=f"Request {ref} expired without confirmation. Please upload again if you want it saved.",
-            failed=f"Could not finish request {ref} for {names}. {failed}")
+        failures.update({"no_searchable_text":"No searchable text was found. Scanned PDFs need OCR, which is not supported.",
+            "encrypted_document":"Password-protected files are not supported.","invalid_document":"The file is malformed or its contents do not match its format.",
+            "unsafe_document":"Macros, embedded objects or unsafe document structure are not supported.",
+            "archive_expansion_limit":"The archive exceeds safe extraction limits.","page_slide_limit":"The file exceeds the page or slide limit.",
+            "extracted_text_too_large":"The extracted text exceeds the 256 KiB limit.",
+            "chunking_limit":"The document text could not be split within the supported limits.","parser_timeout":"Document extraction exceeded its time limit.",
+            "parser_resource_limit":"Document extraction exceeded its memory limit.","parser_dependencies_missing":"The document parser is not installed on the backend.",
+            "parser_resource_unavailable":"The backend could not start an isolated document parser."})
+        failed=failures.get(error,failed)
+        return dict(prompt=f"Save {names} to team memory? Reply yes or save, or no to skip. Only the uploader can confirm.",
+            queued=f"Processing {names}…",processing=f"Processing {names}…",
+            published=f"Saved {names} to team memory.",declined=f"Skipped {names}. No files will be imported.",
+            expired=f"The save request for {names} expired. Please upload again if you want it saved.",
+            failed=f"Could not save {names}. {failed}")
 
     async def accept(self,message,settings):
         logger.info("document stage=api_received ref=%s files=%d",message_reference(message),len(message.attachments))
@@ -136,10 +145,10 @@ class DocumentAttachments:
         except HTTPException as error:
             logger.warning("document stage=scope_resolution http_status=%d",error.status_code)
             raise
-        command=COMMAND.fullmatch(message.body.strip())
+        command=document_command(message.body)
         if not message.attachments:
             if command:
-                return await self.decide(message,settings,command.group(1).lower(),command.group(2).lower())
+                return await self.decide(message,settings,*command)
             return self.receipt(message)
 
         group=message.attachment_group
@@ -160,7 +169,7 @@ class DocumentAttachments:
                 attachment["mimetype"]=""
         incoming=dict(metadata=metadata,attachments=attachments)
         data=dict(parts={},total=total,ready=False,items=[],phase="importing",error=None,
-                  reply_thread=message.thread_id or message.message_id,replies=self.replies(ref,[]))
+                  reply_thread=None,replies=self.replies(ref,[]))
         row,_=await self.jobs.insert(dict(ref=ref,event_key=event_key,tenant=str(message.tenant_id),
             room=message.room_id,sender=message.sender,state="confirmation_requested",data=data,
             expires=self.jobs.clock()+settings.switch_document_confirmation_seconds),settings.switch_document_max_pending,settings.switch_document_max_records)
@@ -207,29 +216,45 @@ class DocumentAttachments:
             row=await self.jobs.get(ref)
         raise HTTPException(503,"document_attachment_retry_delivery")
 
-    async def decide(self,message,settings,decision,ref):
-        for _ in range(8):
-            row=await self.jobs.get(ref)
-            if (not row or row["tenant"]!=str(message.tenant_id) or row["room"]!=message.room_id
-                or row["sender"]!=message.sender
-                or not self.eligible_sender(message.sender,settings) or not row["data"]["ready"]):
-                return self.receipt(message,state="not_authorized")
-            original=next(iter(row["data"]["parts"].values()))["metadata"]
-            if message.bridge_id!=original["bridge_id"]:
-                return self.receipt(message,state="not_authorized")
-            if original["thread_id"] and message.thread_id!=original["thread_id"]:
-                return self.receipt(message,state="not_authorized")
+    async def decide(self,message,settings,decision,qualifier):
+        def choose(rows):
+            scoped=[r for r in rows if all(p["metadata"].get("bridge_id")==message.bridge_id
+                    for p in r["data"]["parts"].values())]
+            legacy=qualifier and re.fullmatch("[0-9a-f]{12}",qualifier)
+            if legacy:
+                matching=[r for r in scoped if r["ref"]==qualifier]
+            else:
+                matching=[r for r in scoped if r["state"]=="confirmation_requested" and r["data"]["ready"]
+                          and r["expires"]>self.jobs.clock()]
+                if qualifier:
+                    matching=[r for r in matching if any(i["filename"].casefold()==qualifier for i in r["data"]["items"])]
+            if not matching:
+                return None,"not_authorized" if qualifier else "ignored",None,None,None
+            if len(matching)>1:
+                filenames=[display_name(i["filename"]) for r in matching for i in r["data"]["items"]]
+                names=", ".join(filenames[:12])+(f" (and {len(filenames)-12} more)" if len(filenames)>12 else "")
+                clarification=("More than one pending upload has that filename. Wait for these requests to expire, then upload one copy and reply save."
+                    if qualifier else f"Which file should I save or skip? Pending files: {names}. Reply save followed by the exact filename, or skip followed by the filename.")
+                return matching[0],"needs_filename",None,None,clarification
+            row=matching[0]
+            if not row["data"]["ready"]:
+                return None,"not_authorized",None,None,None
             if row["state"]!="confirmation_requested":
-                return self.receipt(message,row,True)
-            expired=row["expires"]<=self.jobs.clock()
-            state="expired" if expired else ("queued" if decision=="save" else "declined")
+                return row,row["state"],None,None,None
+            state="expired" if row["expires"]<=self.jobs.clock() else "queued" if decision=="save" else "declined"
             data=deepcopy(row["data"])
             data["confirmation_message_id"]=message.message_id
             data["confirmed_at"]=self.jobs.clock() if state=="queued" else None
-            updated=await self.jobs.change(row,state=state,data=data,reply=state,release=True)
-            if updated:
-                return self.receipt(message,updated)
-        raise HTTPException(503,"document_attachment_retry_delivery")
+            data["replies"]=self.replies(row["ref"],data["items"],data.get("error"))
+            return row,state,data,state,None
+        identity=reference([str(message.tenant_id),message.room_id,message.message_id])
+        fingerprint=reference([message.sender,message.bridge_id,decision,qualifier])
+        row,state,duplicate=await self.jobs.decide_once(identity,fingerprint,message.tenant_id,message.room_id,message.sender,choose,
+            include_ref=qualifier if qualifier and re.fullmatch("[0-9a-f]{12}",qualifier) else None)
+        # Ambiguity is an outcome, not a change to the request's pending state.
+        if state in ("needs_filename","not_authorized","ignored"):
+            return self.receipt(message,duplicate=duplicate,state=state)
+        return self.receipt(message,row,duplicate,state)
 
     async def fail(self,row,error):
         logger.warning("document stage=processing_failed request=%s reason=%s",row["ref"],error)
@@ -274,18 +299,9 @@ class DocumentAttachments:
                         try:
                             if len(raw)>settings.switch_document_max_bytes:
                                 raise AttachmentFailure("attachment_too_large")
-                            if raw.removeprefix(b'\xef\xbb\xbf').lstrip().startswith((b'%PDF-',b'PK\x03\x04',b'\xd0\xcf\x11\xe0')):
-                                raise AttachmentFailure("unsupported_format")
-                            try:
-                                text=raw.decode("utf-8")
-                            except UnicodeError:
-                                raise AttachmentFailure("invalid_utf8") from None
-                            if len(text)>settings.switch_document_max_text_chars:
-                                raise AttachmentFailure("attachment_too_large")
-                            if not text.strip() or '\x00' in text:
-                                raise AttachmentFailure("invalid_text")
-                            del text
-                            result=await self.service_factory(self.repository).import_bytes(scope,ImportMetadata(
+                            service=self.service_factory(self.repository)
+                            service.max_text_chars=min(settings.switch_document_max_text_chars,getattr(service,"max_text_chars",262144))
+                            result=await service.import_bytes(scope,ImportMetadata(
                                 import_id=item["import_id"],source_key=item["source_key"],filename=item["filename"],
                                 title=item["filename"],expected_version=0),raw)
                             item["result"]=result.model_dump(mode="json")
@@ -315,6 +331,8 @@ class DocumentAttachments:
             await self.jobs.change(row,state="published",data=row["data"],reply="published",release=True)
             logger.info("document stage=published request=%s",row["ref"])
             return True
+        except ExtractionError as error:
+            await self.fail(row,str(error))
         except AttachmentFailure as error:
             if error.retryable and row["attempts"]<3:
                 await self.jobs.change(row,state="queued",release=True,retry_at=self.jobs.clock()+30)
@@ -326,12 +344,16 @@ class DocumentAttachments:
             reason=error.detail if isinstance(error.detail,str) and error.detail in reasons else "ingestion_unavailable"
             logger.warning("document stage=import_error request=%s phase=%s attempt=%d http_status=%d reason=%s retry=%s",
                 row["ref"],row["data"]["phase"],row["attempts"],error.status_code,reason,
-                error.status_code>=500 and row["attempts"]<3)
-            if error.status_code>=500 and row["attempts"]<3:
+                (error.status_code>=500 or error.status_code==429) and row["attempts"]<3)
+            if (error.status_code>=500 or error.status_code==429) and row["attempts"]<3:
                 await self.jobs.change(row,state="queued" if row["data"]["phase"]=="importing" else "processing",
                                        release=True,retry_at=self.jobs.clock()+30)
             else:
-                await self.fail(row,"ingestion_unavailable")
+                codes={"no_searchable_text","encrypted_document","invalid_document","unsafe_document","archive_expansion_limit",
+                       "page_slide_limit","extracted_text_too_large","parser_timeout","parser_resource_limit",
+                       "parser_resource_unavailable","parser_dependencies_missing","invalid_text","unsupported_format","chunking_limit"}
+                code=error.detail.removeprefix("document_") if isinstance(error.detail,str) else ""
+                await self.fail(row,code if code in codes else "ingestion_unavailable")
         return True
 
     async def send_once(self,settings):
@@ -343,13 +365,16 @@ class DocumentAttachments:
         try:
             request=await self.jobs.get(row["ref"])
             # A delayed prompt must not invite consent for an already terminal request.
-            stale=row["data"]["kind"]=="prompt" and (request["state"]!="confirmation_requested" or request["expires"]<=self.jobs.clock())
+            stale=row["data"]["kind"] in ("prompt","clarify") and (request["state"]!="confirmation_requested" or request["expires"]<=self.jobs.clock())
             stale=stale or (row["data"]["kind"] in ("queued","processing") and request["state"] in ("declined","expired","failed","published"))
             if not stale:
                 if any(part["metadata"]["bridge_id"] not in settings.document_discord_bridges for part in request["data"]["parts"].values()):
                     raise AttachmentFailure("source_not_authorized")
                 await self.scope_resolver(settings,row["room"])
-                await self.transport_factory(settings).post(row["room"],row["data"]["body"],row["data"]["thread_id"])
+                kind=row["data"]["kind"]
+                body=(row["data"]["body"] if kind=="clarify" else
+                      self.replies(request["ref"],request["data"]["items"],request["data"].get("error"))[kind])
+                await self.transport_factory(settings).post(row["room"],body,None)
             success="superseded" if stale else True
         except Exception as error:
             logger.warning("document stage=reply_failed request=%s kind=%s attempt=%d error_type=%s http_status=%s",
@@ -395,8 +420,8 @@ class DocumentAttachments:
             if self.configured(settings):
                 try:
                     await self.work_once(settings)
-                except Exception:
-                    logging.getLogger("team_memory").warning("Document attachment worker reason=processing_unavailable")
+                except Exception as error:
+                    logging.getLogger("team_memory").warning("document stage=worker_error reason=processing_unavailable error_type=%s",type(error).__name__)
             await asyncio.sleep(2)
 
     async def reply_loop(self):

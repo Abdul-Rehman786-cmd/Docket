@@ -1,4 +1,16 @@
+> Local format/consent revision (2026-11-06): PDF, DOCX and PPTX extraction,
+> channel-only replies and simple consent are implemented locally. The approved
+> binary-format constraint migration is applied; service reload and live binary
+> verification remain outstanding.
+> [Current limits, citation semantics and rollout](DISCORD_DOCUMENT_INGESTION.md)
+> supersede the original Markdown/text-only limits below.
+
 # Versioned document ingestion
+
+Document discovery and cited questions now reuse this module through the existing
+authenticated Discord/Switch pipeline. See [document chat](DOCUMENT_CHAT.md) for
+commands, sender-scoped selection, bounded retrieval, verification and rollout.
+The standalone HTTP document API below retains its existing authentication.
 
 The optional consent-based Discord collection adapter is now implemented locally
 and disabled pending trusted setup/live approval. It reuses this deployed document
@@ -42,15 +54,17 @@ Two imports may process concurrently; further admissions receive `429`.
 
 Repository operations: `import`, `import_status`, `documents`, `document`,
 `versions`, `version`, `chunks`, `chunk`, `archive`, `claim`, `finish`, `search`.
+The chat-only `catalog` adapter operation adds a scoped metadata read; it is not
+a new SQL RPC operation.
 Runtime uses `SupabaseDocumentRepository`. `MemoryDocumentRepository` is for tests
 only and does not acknowledge durable production storage.
 
 Reused components: admin auth, trusted room resolution, privileged-key headers,
 HTTP pool, pinned actual tokenizer, 384-D vector validation, loaded local model,
 model lock and single inference executor. No new dependency or second model
-session is added. The adapter is independently callable through the search API;
-existing message retrieval and Discord synthesis are not changed. Future callers
-can combine these explicit document results with memory results.
+session is added. The adapter remains independently callable through the search
+API. The document chat service also uses it for explicit document questions;
+general room-memory retrieval remains separate.
 
 ## Identity, chunking, recovery and publication
 
@@ -132,7 +146,7 @@ Benchmark realistic scoped latency/recall before adding HNSW `vector_cosine_ops`
 
 Read-only hosted inspection found existing memory embedding functions but no
 document/version/chunk tables. The additive migration is
-`migrations/20261105163303_versioned_documents.sql`: four new tables, composite
+`migrations/history/20261105163303_versioned_documents.sql`: four new tables, composite
 scope/source constraints, queue/scope indexes and backend-only `document_operation`
 RPC. It changes no existing message or commitment object. All document tables
 enable RLS and revoke `PUBLIC`/`anon`/`authenticated` privileges. Backend

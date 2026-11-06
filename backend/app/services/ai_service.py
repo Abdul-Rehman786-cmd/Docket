@@ -30,6 +30,7 @@ from app.repositories.ai_requests import AIRequestRepository
 from app.repositories.ingestion_jobs import IngestionJobs
 from app.repositories.pending_confirmation import PendingConfirmationRepository
 from app.services.retrieval_service import query_team_memory
+from app.services.document_chat import DocumentChat
 from app.services.extraction_service import redact_decision, store_ai_memory, capture_decision
 from app.services.profile_service import (
     PROFILE_PROMPT, filter_profile_decision, redact_profile_answer,
@@ -349,6 +350,7 @@ class AIService:
         self.recovery = None
         self.active_refs: set[str] = set()
         self.admission_lock = asyncio.Lock()
+        self.document_chat = DocumentChat()
         self.reply_state_path = reply_state_path or DEFAULT_REPLY_STATE_PATH
         self.reply_state = (
             ReplyState()
@@ -780,6 +782,7 @@ class AIService:
                 )
             )
             msg_timestamp = source_meta.get("timestamp_ms") if source_meta else None
+            document_followup = self.document_chat.has_active_conversation(settings, source_meta)
             job = await self.journal.get(msg_ref) if source_meta and source_meta.get("durable") else None
             if (source_meta and source_meta.get('origin')=='discord' and source_meta.get('durable')
                 and source_meta.get('switch_author_id') and source_meta.get('room_id') in settings.allowed_switch_rooms):
@@ -806,6 +809,35 @@ class AIService:
                 )
 
             async with asyncio.timeout(settings.switch_ai_timeout_seconds):
+                if ((is_addressed or document_followup) and source_meta and source_meta.get('origin') == 'discord'
+                    and not capture_input and not profile_question and not own_request_kind(row.question)
+                    and not self.is_message_older_than_last_reply(msg_timestamp)):
+                    async def document_synthesis(prompt):
+                        safe_prompt = json.loads(message_text_for_log(prompt, settings, max_length=40000))
+                        raw = await ask_switch(settings, safe_prompt, synthesis=True)
+                        try:
+                            fence = JSON_FENCE.fullmatch(raw.strip())
+                            parsed = json.loads(fence[1] if fence else raw) if len(raw) <= 16000 else None
+                        except (ValueError, TypeError):
+                            return None
+                        if isinstance(parsed, dict) and isinstance(parsed.get('answer'), str):
+                            parsed['answer'] = json.loads(message_text_for_log(parsed['answer'], settings, max_length=1000))
+                        return parsed
+                    document_answer = await self.document_chat.handle(settings, source_meta, row.question, document_synthesis,
+                                                                      continuation_only=not is_addressed)
+                    if document_answer is not None:
+                        logger.info('document stage=chat_reply ref=%s adapter_verified=%s', msg_ref,
+                                    bool(source_meta.get('adapter_verified')))
+                        safe_answer = clean_reply_text(json.loads(message_text_for_log(document_answer, settings)))
+                        if job:
+                            await self.journal.finish(msg_ref)
+                        if settings.switch_reply_to_discord:
+                            await self._send_discord_reply(settings, source_meta['room_id'], safe_answer,
+                                thread_id=None, timestamp_ms=msg_timestamp,
+                                switch_message_id=source_meta.get('switch_message_id'))
+                        self.repository.update(scope, row.request_id, status='answered', answer=safe_answer)
+                        feature_event('retrieval', 'succeeded', reference=row.source_message_ref or row.request_id)
+                        return
                 chat=CommitmentChatService(SupabaseCommitmentRepository(settings))
                 plan=ChatPlan.model_validate_json(job['chat_plan']) if job and job.get('chat_plan') else None
                 if (not settings.automatic_commitments_enabled or not source_meta

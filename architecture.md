@@ -1,6 +1,60 @@
 # Team Memory Agent: Architecture and Implementation Plan
 
+## Consolidated fresh-install database
+
+`supabase/migrations/20261104000100_initial_schema.sql` is the sole active Supabase
+setup script. It contains core storage/embedding recovery, lifecycle/audit, chat,
+reminder outbox, versioned documents with all five formats, simple capture and
+person profiles. One outer transaction commits or rolls back the whole schema.
+Definitions already in the original are not replayed or duplicated.
+
+The original retains its explicit reset behavior for fresh/disposable databases,
+with cleanup of named project dependencies. Never execute it on existing hosted
+team data. Historical additive SQL is preserved under `supabase/migrations/history/`;
+it is not an active fresh-install chain. No hosted schema/history was changed by
+this local consolidation. SQL test harnesses now load only the standalone original.
+
 ## Versioned document module
+
+### Document discovery and answer routing
+
+The existing authenticated Discord ingestion worker invokes `DocumentChat` before
+general reasoning for addressed messages while document ingestion is enabled,
+or for unmentioned input from the same verified sender within an active document
+conversation. The active-conversation check uses tenant, room, stable sender and
+expiry; a new sender/scope, restart or expired state cannot opt into this path.
+The existing private AI gateway classifies a bounded message and sender-scoped
+selection context into a strict `DocumentIntent` (none/list/more/find/select/ask/
+summarize/clear/clarify). This replaces phrase and keyword intent matching. Known
+commitment/profile workflows and the deterministic save/skip consent protocol
+retain their existing paths. A `none` proposal continues ordinary reasoning;
+malformed, unsupported or ungrounded routing proposals ask for clarification.
+Unmentioned classification is marked continuation-only: combined choice/questions
+can select and answer in one turn, while a none proposal resumes ordinary
+processing without a channel reply. Save/skip consent remains separately routed.
+It reuses read-only scope resolution, the document repository, existing semantic
+search/model and the private Switch synthesis gateway. Listing is metadata-based;
+discovery groups chunk hits into document choices. The backend validates model
+source references and renders readable stored-text-line citations. Retrieval
+and post-synthesis checks restrict answers to current, active published versions.
+An explicit document path never falls back to room-memory retrieval.
+AI-routed inventory requests use metadata listing. Model-supplied names must be
+grounded in the current message; displayed choice indexes are revalidated against
+the sender's current list. The model cannot supply tenant/room/document IDs,
+authorize writes or bypass current publication/scope checks. Missing trusted adapter identity returns a configuration
+explanation before general reasoning; upload and ordinary-chat adapter credentials
+are separate, and listener startup reports their readiness separately.
+
+A bounded process-local cache holds selected IDs, choices and two short context
+turns by tenant/room/stable sender, with 15-minute expiry and 200-scope capacity.
+Source-message replay guards prevent stale selection commands acting on new
+choices; durable ingestion deduplication remains unchanged. No schema changes
+or new dependencies/models are introduced. API restart loses selection, not
+documents. Deploy one API process for consistent selections. Summaries sample
+at most eight source-order chunks and always disclose partial coverage. See
+[document chat contracts, verification and rollout](supabase/DOCUMENT_CHAT.md).
+
+### Imports, storage and publication
 
 Document-specific controllers/models/services/repositories implement restricted
 development-admin UTF-8 Markdown/text imports. Scope comes from backend tenant
@@ -19,27 +73,36 @@ authorization, API, retention, verification distinctions and remaining limits.
 See [hosted deployment evidence](supabase/DOCUMENT_DEPLOYMENT_VERIFICATION.md) for
 the genuine migration version, cloud results and safe restart checks.
 
-### Optional Switch/Discord attachment consent
+### Switch/Discord document consent revision
 
-The existing listener now forwards attachment references/group metadata and exact
-`save|skip REF` commands to a separate FastAPI adapter route, gated by both the
-existing ingest token and a distinct listener-only credential. Positive per-person origin checks, Discord-bridge allow-lists and enabled room mappings establish
-scope; names, captions, file contents and model output cannot authorize imports.
-The posting client's exact participant ID joins the existing self-sender filter
-so its prompts/statuses cannot re-enter normal AI ingestion.
-FastAPI owns atomic consent, expiry and request state in a separate full-sync
-SQLite metadata ledger, with a bounded durable reply outbox. No file contents
-are downloaded or persisted before consent. Independent bounded importer/sender
-loops keep prompt delivery responsive during downloads. Confirmed files reuse
-DocumentService, the current Supabase schema and the shared local embedding worker.
-Only completed active publication queues a success reply through Switch.
-Document source keys bind immutable upload identities, not matching filenames.
-The new workflow is disabled because the exact bot participant ID is unresolved.
-Human-versus-agent classification is not required; known bots remain excluded. No personal
-uploader registration is required. Unsupported identities fail closed. No approved
-live Discord fixture has run. No remote schema/configuration or existing message journal is changed.
-Environment read/write viewer routes are disabled to protect backend credentials.
-See [attachment contracts and setup](supabase/DISCORD_DOCUMENT_INGESTION.md).
+The authenticated listener and FastAPI adapter share a complete-phrase consent
+parser. Channel replies contain filenames and no internal references or thread
+metadata, including recovered outbox messages. Source/thread metadata is preserved
+only for provenance. Existing per-room connection/session bindings route Switch
+`post_message` calls with body only; conversational replies remain unchanged.
+
+SQLite transactions atomically select an uploader/tenant/room/bridge-scoped pending
+request, bind the confirmation message to that request/outcome, transition state
+and queue its reply. Replays never select a later upload. Multiple uploads require
+a filename; duplicate filenames remain pending until ambiguity is resolved by
+expiry and a single fresh upload. Known bots remain excluded; no individual
+registration or human classification is introduced. Live-only startup is unchanged.
+
+Confirmed binary files run through bounded disposable extraction processes before
+DocumentService's existing chunking/import RPC. PDF uses pypdf; Office ZIP/XML uses
+stdlib, with structural, expansion, external-resource and macro guards. The same
+Supabase transaction stores original format/name, extracted source, versions,
+chunks and idempotency. Existing embedding jobs atomically publish only complete
+versions. Previous published versions survive replacement failure. Search citations
+identify stored-text lines, not invented original page/slide coordinates.
+
+Limits: original bytes 8 MiB, extracted UTF-8 256 KiB, PDF 100 pages, PPTX 200
+slides, archives 1024 members/32 MiB expansion/4 MiB per member, 1024 chunks,
+and two parser processes with 20-second wall time and 512 MiB memory each.
+The approved additive format-constraint migration is applied to the configured
+Supabase project. The original consolidated SQL is synchronized for fresh installs
+under explicit user instruction; it was not replayed remotely. No deployment flag
+changes, shared-service restarts or live tests were performed for this revision. See [document contracts](supabase/DISCORD_DOCUMENT_INGESTION.md).
 
 This document describes the system architecture, component boundaries, Switch agent integration, and database schema for the Team Memory backend.
 
@@ -75,7 +138,7 @@ replay does not recreate pruned evidence. No automatic backfill of existing stor
 messages occurs. Profile writes keep the existing four-count acknowledgement contract.
 
 The additive PostgreSQL migration is
-`supabase/migrations/20261106000200_person_profiles.sql`; it requires the existing
+`supabase/migrations/history/20261106000200_person_profiles.sql`; it requires the existing
 atomic storage and simple-capture functions. The separate SQLite migration is under
 `supabase/migrations/sqlite/` and is applied once to the explicitly configured local
 database by the SQLite schema runner. Ship that directory with the backend. No
@@ -711,3 +774,9 @@ They send no unsupported room argument and open no competing reply connection.
 Native `switch-media://<32 lowercase hex>` and legacy MXC handles remain opaque
 query values for authenticated Switch downloads. Safe stage logs trace routing,
 consent, processing and delivery without payloads, media handles or credentials.
+
+
+Windows parser launching uses a bounded thread around a disposable synchronous
+subprocess, because Uvicorn's reload Selector loop cannot create asyncio subprocess
+transports. The same parser memory/time/concurrency limits apply. Cancelled imports
+retain their process slot until bounded cleanup and never proceed to persistence.
