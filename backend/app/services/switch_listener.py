@@ -1,7 +1,7 @@
 import asyncio
-import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
@@ -14,7 +14,8 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketExce
 from app.core.config import BACKEND_DIR, Settings
 from app.models.messages import IncomingMessage, MessageReceipt, MessageStatus
 from app.core.feature_logging import feature_event
-from app.repositories.listener_state import ListenerState
+from app.models.document_attachments import AttachmentMessage, AttachmentReceipt
+from app.repositories.listener_state import ListenerState, listener_identity, document_reply_session
 from app.services.message_service import message_reference
 
 logger = logging.getLogger(__name__)
@@ -67,13 +68,31 @@ class SwitchListener:
         validate_settings(settings)
         self.settings = settings
         self.state_path = state_path or BACKEND_DIR / ".local" / "switch-listener.json"
-        identity = json.dumps([
-            settings.switch_bridge_url, settings.listener_agent_id,
-            str(settings.switch_tenant_id), sorted(settings.allowed_switch_rooms),
-        ])
-        identity_ref = hashlib.sha256(identity.encode()).hexdigest()
-        self.state = ListenerState.load(self.state_path, identity_ref)
+        # Each process starts live-only. Persisted state still supports document
+        # reply bindings, but must never replay offline events after a restart.
+        self.state = ListenerState(identity=listener_identity(settings), connection_id=str(uuid4()))
+        self.connected = asyncio.Event()
         self.registered_agent_name = None
+
+    async def bind_document_reply_rooms(self):
+        if not self.settings.switch_document_attachments_enabled:
+            return
+        placements={document_reply_session(room):room for room in self.settings.allowed_switch_rooms}
+        url=(self.settings.switch_bridge_url.rstrip("/")+"/agents/"
+             +quote(self.settings.listener_agent_id,safe="")+"/connection/placements")
+        async with httpx.AsyncClient(timeout=10,trust_env=False,follow_redirects=False) as client:
+            response=await client.post(url,headers={"Authorization":"Bearer "+self.settings.listener_api_key.get_secret_value()},
+                json=dict(connection_id=self.state.connection_id,generation=self.state.generation,placements=placements))
+        if response.status_code!=200:
+            logger.warning("document stage=reply_room_binding http_status=%d",response.status_code)
+            raise ListenerStopped("Switch could not bind reply sessions to this listener; no separate connection was opened.")
+        try:
+            valid=response.json().get("placements")==placements
+        except ValueError:
+            valid=False
+        if not valid:
+            raise ListenerStopped("Switch returned invalid reply room bindings.")
+        logger.info("document stage=reply_room_binding state=ready rooms=%d",len(placements))
 
     def socket_url(self, state: ListenerState | None = None, *, claim_rooms: bool = True) -> str:
         state = state or self.state
@@ -163,6 +182,7 @@ class SwitchListener:
                 if self.state.cursor is None:
                     self.state.cursor = cursor
                 self.state.save(self.state_path)
+                self.connected.set()
                 covered = self.settings.allowed_switch_rooms.intersection(data.get("rooms", []))
                 logger.info("Switch connected; configured rooms covered=%d", len(covered))
                 feature_event('switch_listener','connected',rooms=len(covered))
@@ -188,6 +208,8 @@ class SwitchListener:
             elif kind == "subscription_changed":
                 covered = self.settings.allowed_switch_rooms.intersection(data.get("rooms", []))
                 logger.info("Switch room coverage changed; configured rooms covered=%d", len(covered))
+                if covered != self.settings.allowed_switch_rooms:
+                    logger.warning("stage=room_coverage reason=room_claim_lost; another connection may own rooms; keep one listener and inspect room claims")
         raise RetryConnection()
 
     async def _forward_events(self, queue: asyncio.Queue, client: httpx.AsyncClient) -> None:
@@ -205,7 +227,27 @@ class SwitchListener:
                     targets=[]  # Unsupported metadata denies tasks; preserve ordinary ingestion.
                 bot_flag=payload.get('sender_is_bot')
                 try:
-                    message = IncomingMessage(
+                    body=payload.get("body", "")
+                    document_candidate=bool(
+                        payload.get("attachments") or (isinstance(body,str) and
+                        re.fullmatch(r"\s*(?:save|skip) [0-9a-fA-F]{12}\s*",body,re.IGNORECASE)))
+                    document_event=self.settings.switch_document_attachments_enabled and document_candidate
+                    if document_candidate:
+                        logger.log(logging.INFO if document_event else logging.WARNING,
+                            "document stage=switch_received sequence=%d attachments=%d enabled=%s",
+                            sequence,len(payload.get("attachments") or []),self.settings.switch_document_attachments_enabled)
+                    extras={}
+                    if document_event:
+                        if (not self.settings.switch_document_adapter_token.get_secret_value()
+                            or not self.settings.document_discord_bridges or not self.settings.switch_document_bot_sender_id):
+                            raise ListenerStopped("Configure the document adapter token, Discord bridge IDs and exact bot participant ID before enabling attachment ingestion.")
+                        content=payload.get("content")
+                        marker=payload.get("com.switch.attachment_group")
+                        if marker is None and isinstance(content,dict):
+                            marker=content.get("com.switch.attachment_group")
+                        extras=dict(attachments=payload.get("attachments") or [],attachment_group=marker,
+                            sender_kind=payload.get("sender_kind"),bridge_id=data.get("bridge_id"))
+                    message = (AttachmentMessage if document_event else IncomingMessage)(
                         tenant_id=self.settings.switch_tenant_id, room_id=data["room_id"],
                         message_id=payload.get("message_id"), sender=payload.get("sender"),
                         sender_name=payload.get("sender_name"),
@@ -218,33 +260,50 @@ class SwitchListener:
                         registered_agent_name=self.registered_agent_name,
                         mentioned_agent_ids=targets,
                         sender_is_bot=bot_flag if type(bot_flag) is bool else None,
+                        **extras,
                     )
                 except ValidationError:
                     raise ListenerStopped("Switch sent an invalid message; cursor was not advanced.") from None
                 try:
-                    response = await client.post("messages", json=message.model_dump(mode="json"))
+                    if document_event:
+                        response=await client.post("messages/document-attachments",json=message.model_dump(mode="json"),
+                            headers={"X-Document-Adapter-Token":self.settings.switch_document_adapter_token.get_secret_value()})
+                    else:
+                        response=await client.post("messages",json=message.model_dump(mode="json"))
                 except httpx.HTTPError:
+                    logger.warning("stage=api_forward reason=network_failure ref=%s",message_reference(message))
                     raise RetryConnection() from None
+                if response.status_code!=200:
+                    logger.warning("stage=api_forward http_status=%d document=%s ref=%s",
+                                   response.status_code,document_event,message_reference(message))
                 if response.status_code >= 500 or response.status_code == 429:
                     raise RetryConnection()
                 if response.status_code != 200:
                     raise ListenerStopped("API rejected a message. Check the ingest credential, tenant, room allow-list, and payload schema.")
                 try:
-                    receipt = MessageReceipt.model_validate(response.json())
+                    receipt = (AttachmentReceipt if document_event else MessageReceipt).model_validate(response.json())
                 except (ValueError, ValidationError):
                     raise ListenerStopped("API returned an invalid receipt; cursor was not advanced.") from None
                 if receipt.message_ref != message_reference(message):
                     raise ListenerStopped("API receipt does not match the message; cursor was not advanced.")
                 logger.info("API acknowledged message ref=%s duplicate=%s", receipt.message_ref, receipt.duplicate)
                 feature_event('switch_listener','duplicate' if receipt.duplicate else 'acknowledged',reference=receipt.message_ref)
+                if document_event:
+                    logger.info("document stage=api_ack ref=%s state=%s request=%s",receipt.message_ref,
+                                receipt.processing_state,receipt.request_ref or "none")
             self.state.cursor = sequence
             self.state.save(self.state_path)
 
     async def _session(self, client: httpx.AsyncClient) -> None:
+        self.connected.clear()
         async with self._connect() as socket:
             queue: asyncio.Queue = asyncio.Queue(maxsize=256)
             reader = asyncio.create_task(self._read_frames(socket, queue))
-            worker = asyncio.create_task(self._forward_events(queue, client))
+            async def forward():
+                await self.connected.wait()
+                await self.bind_document_reply_rooms()
+                await self._forward_events(queue, client)
+            worker = asyncio.create_task(forward())
             try:
                 done, _ = await asyncio.wait((reader, worker), return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
@@ -256,6 +315,11 @@ class SwitchListener:
 
     async def run(self) -> None:
         delay = 1
+        logger.info("Switch startup policy=live_only; offline events will be skipped")
+        logger.info("document stage=listener_start enabled=%s rooms=%d bridge_configured=%s bot_configured=%s adapter_configured=%s",
+            self.settings.switch_document_attachments_enabled,len(self.settings.allowed_switch_rooms),
+            bool(self.settings.document_discord_bridges),bool(self.settings.switch_document_bot_sender_id),
+            bool(self.settings.switch_document_adapter_token.get_secret_value()))
         async with self.http_client() as client:
             # Fail early for a wrong backend URL or credential; no message is consumed.
             await self.delivery_status(client)

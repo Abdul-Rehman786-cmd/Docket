@@ -1,5 +1,46 @@
 # Team Memory Agent: Architecture and Implementation Plan
 
+## Versioned document module
+
+Document-specific controllers/models/services/repositories implement restricted
+development-admin UTF-8 Markdown/text imports. Scope comes from backend tenant
+configuration and enabled room mappings. Imports commit source, versions, chunks
+and idempotency together. Separate durable chunk leases reuse the existing local
+model/tokenizer/executor; all chunks complete before atomic publication. Previous
+published evidence remains searchable during replacement. Document search returns
+typed `document:document_id:version_id:chunk_id` references with exact source slices.
+It remains independently callable, without changing commitment/message workflows.
+The feature defaults to disabled for new installations. The configured backend
+has the approved additive schema deployed and the feature enabled; real hosted
+upload, automatic processing, citations and failure-safety fixtures passed.
+Document scope resolution is read-only; startup no longer upserts mappings. See
+[document contracts and deployment](supabase/DOCUMENT_INGESTION.md) for interfaces,
+authorization, API, retention, verification distinctions and remaining limits.
+See [hosted deployment evidence](supabase/DOCUMENT_DEPLOYMENT_VERIFICATION.md) for
+the genuine migration version, cloud results and safe restart checks.
+
+### Optional Switch/Discord attachment consent
+
+The existing listener now forwards attachment references/group metadata and exact
+`save|skip REF` commands to a separate FastAPI adapter route, gated by both the
+existing ingest token and a distinct listener-only credential. Positive per-person origin checks, Discord-bridge allow-lists and enabled room mappings establish
+scope; names, captions, file contents and model output cannot authorize imports.
+The posting client's exact participant ID joins the existing self-sender filter
+so its prompts/statuses cannot re-enter normal AI ingestion.
+FastAPI owns atomic consent, expiry and request state in a separate full-sync
+SQLite metadata ledger, with a bounded durable reply outbox. No file contents
+are downloaded or persisted before consent. Independent bounded importer/sender
+loops keep prompt delivery responsive during downloads. Confirmed files reuse
+DocumentService, the current Supabase schema and the shared local embedding worker.
+Only completed active publication queues a success reply through Switch.
+Document source keys bind immutable upload identities, not matching filenames.
+The new workflow is disabled because the exact bot participant ID is unresolved.
+Human-versus-agent classification is not required; known bots remain excluded. No personal
+uploader registration is required. Unsupported identities fail closed. No approved
+live Discord fixture has run. No remote schema/configuration or existing message journal is changed.
+Environment read/write viewer routes are disabled to protect backend credentials.
+See [attachment contracts and setup](supabase/DISCORD_DOCUMENT_INGESTION.md).
+
 This document describes the system architecture, component boundaries, Switch agent integration, and database schema for the Team Memory backend.
 
 ## Current implementation: FastAPI and Switch message delivery
@@ -138,7 +179,7 @@ The diagram and implementation plan below describe the target system. The curren
 - The browser viewer asks for the local ingest token in a masked field, keeps it only in tab memory, and opens an authenticated viewer WebSocket for snapshots and incremental updates. It displays sender names with message text rather than a count or receipt reference. Both fields render using `textContent`, never HTML; **Lock** closes the socket, clears the token, cancels pending requests, and removes displayed data. The page uses a restrictive Content Security Policy and message responses use `Cache-Control: no-store`. This is a local development viewer, not production user authentication.
 - `python -m app.switch_listener` runs the separate WebSocket listener in `services/switch_listener.py`. It uses the existing agent credentials, declares configured rooms at connection open, receives all message events for those rooms, and forwards their sender IDs, sender display names, and contents to FastAPI. Run only one listener for that agent; declaring rooms takes over those claims from another client of the same agent. `--check` verifies API authentication, the WebSocket, and room membership without claiming rooms; `--status` shows the latest sender name and redacted message. It never registers agents or posts chat messages.
 - `SWITCH_TENANT_ID` and `SWITCH_ROOM_IDS` bind the initial demo to one tenant and an explicit room allow-list. Unknown rooms are ignored. This is server-to-server ingestion authorization, not mobile user authentication.
-- Heartbeat handling runs independently of API forwarding. The listener checkpoints its acknowledged cursor, connection ID, and generation under ignored `backend/.local/`, and resumes after transient disconnects. Permanent refusals, takeovers, and retention gaps stop with a safe diagnostic. Likewise, `repositories/reply_state.py` persists the highest replied Discord message watermark in ignored `backend/.local/last_replied_message.txt` using atomic writes (`.tmp` to `.txt` rename), preventing the AI from re-answering backlogged questions when the backend restarts.
+- Heartbeat handling runs independently of API forwarding. The listener checkpoints its acknowledged cursor, connection ID, and generation under ignored `backend/.local/`, and resumes after transient disconnects within that process. Each new listener process creates a fresh connection at `start_from=head`, ignoring the previous checkpoint for input replay. Events sent before the new connection opens are skipped. Accepted document imports and embedding jobs recover independently from their durable journals. Permanent refusals, takeovers, and retention gaps stop with a safe diagnostic. Likewise, `repositories/reply_state.py` persists the highest replied Discord message watermark in ignored `backend/.local/last_replied_message.txt` using atomic writes (`.tmp` to `.txt` rename), preventing the AI from re-answering backlogged questions when the backend restarts.
 - Receipt metadata and duplicate detection are process-local, bounded to the latest 1,000 message identities, and reset on API restart. The latest 100 redacted previews are also held in memory and reset on restart. Run one worker. Receipt acknowledgement does not mean durable storage or extraction. The raw message body is redacted before enqueueing; queued jobs retain only the redacted question and necessary routing metadata.
 - Backend tests cover health, record access, message authentication/authorization, preview isolation and retention, safe validation/logging, duplicate receipts, resume state, rejected deliveries, and WebSocket heartbeats while the API is slow. A local headless-browser check also verified unlock, automatic message updates, safe rendering of untrusted markup, lock cleanup, and invalid-token rejection with fictional messages.
 
@@ -274,7 +315,7 @@ Browser: Incoming messages screen at /
 
 FastAPI and the listener are separate processes. Starting or reloading FastAPI does not start the listener. Both must remain running for new Discord messages to appear. The browser's **Live** indicator confirms the authenticated viewer socket; it does not confirm that the listener is connected to Switch. Likewise, `/health` can return `200` while Discord delivery is stopped.
 
-The listener reads settings from the ignored `backend/.env`, opens the outbound Switch connection, and forwards authorized room events to FastAPI. The browser contacts FastAPI only. The listener's persisted cursor survives restarts, while the API's receipt and preview memory does not. Restarting the API therefore clears displayed history; resuming the listener does not restore messages it already acknowledged. Unacknowledged events can be replayed while they remain in Switch's retention window.
+The listener reads settings from the ignored `backend/.env`, opens the outbound Switch connection, and forwards authorized room events to FastAPI. The browser contacts FastAPI only. The listener starts each new process at the current stream head instead of restoring its persisted cursor. Offline messages and confirmations are skipped. Within a running process, transient reconnects retain the acknowledged cursor and generation, replaying unacknowledged events within Switch's retention window. Restarting only FastAPI does not reset the listener; accepted backend jobs and document imports still recover independently.
 
 ### Authenticated viewer socket
 
@@ -303,7 +344,7 @@ For an empty Incoming messages screen:
 3. Check listener output for room coverage and `API acknowledged message ref=...`, and API output for the matching `Switch message received ref=...`. Receipt references allow delivery correlation without printing message text or credentials.
 4. Unlock or refresh the browser feed and send a new harmless Discord marker. An authenticated empty preview response means no authorized previews are currently retained; `401` indicates an authentication failure, and `503` can indicate missing ingestion configuration.
 
-The listener checkpoint is persisted at `backend/.local/switch-listener.json`; do not delete or reset it as a routine step, as it maintains the connection ID and acknowledged cursor.
+The listener checkpoint is persisted at `backend/.local/switch-listener.json`; do not delete or reset it as a routine step, as document replies use its current connection binding. New listener processes overwrite it after connecting at the stream head.
 
 Default delivery logs contain receipt metadata. `LOG_DISCORD_MESSAGES=true` separately enables redacted sender and message previews in the API terminal after authentication and authorization. HTTP and WebSocket wire-level debugging can expose authentication headers and must remain disabled. The current FastAPI entry point does not configure a general `LOG_LEVEL` setting.
 
@@ -631,3 +672,11 @@ Make Switch visible: the room, the router client connected through the agent pro
 - Create a room: https://docs.switchagents.ai/switch-rooms/getting-started/create-a-room
 - Discord setup: https://docs.switchagents.ai/switch-rooms/deploy/messaging-apps/discord
 - Self-hosting Switch: https://docs.switchagents.ai/switch-rooms/deploy/self-host
+
+
+Attachment replies bind per-room sessions on the existing listener connection,
+using generation-fenced placements and connection/session headers for `post_message`.
+They send no unsupported room argument and open no competing reply connection.
+Native `switch-media://<32 lowercase hex>` and legacy MXC handles remain opaque
+query values for authenticated Switch downloads. Safe stage logs trace routing,
+consent, processing and delivery without payloads, media handles or credentials.

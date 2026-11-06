@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from importlib.util import find_spec
 import logging
 import os
 from time import perf_counter
@@ -24,12 +25,24 @@ from app.controllers.profiles import router as profiles_router
 from app.models.commitments import CommitmentError
 from app.services.reminder_worker import ReminderWorker
 from app.services.storage_service import StorageRetentionWorker
+from app.controllers.documents import router as documents_router
+from app.repositories.document_repository import SupabaseDocumentRepository
+from app.services.document_worker import DocumentWorker
+from app.controllers.document_attachments import router as document_attachments_router
+from app.services.document_attachments import DocumentAttachments
 
 
 @asynccontextmanager
 async def lifespan(application):
     configure_logging(get_settings())
     startup_events(get_settings(),is_ai_configured(get_settings()))
+    DocumentAttachments.log_configuration(get_settings())
+    if get_settings().local_embeddings_enabled:
+        missing=[name for name in ("onnxruntime","tokenizers") if find_spec(name) is None]
+        if missing:
+            logging.getLogger("team_memory").warning(
+                "document stage=embedding_setup reason=dependencies_missing packages=%s; start FastAPI using backend/.venv/Scripts/python.exe",
+                ",".join(missing))
     application.state.http_clients = HTTPClients()
     application.state.ai_service = AIService()
     application.state.viewer_hub = ViewerHub()
@@ -40,6 +53,8 @@ async def lifespan(application):
         on_change=application.state.viewer_hub.publish
     )
     application.state.reminder_worker = ReminderWorker()
+    application.state.document_worker = DocumentWorker(SupabaseDocumentRepository())
+    application.state.document_attachments = DocumentAttachments()
     with use_http_clients(application.state.http_clients):
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             try:
@@ -52,6 +67,10 @@ async def lifespan(application):
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             application.state.retention_worker.start()
         application.state.reminder_worker.start()
+        if get_settings().document_ingestion_enabled:
+            application.state.document_worker.start()
+        if get_settings().switch_document_attachments_enabled:
+            application.state.document_attachments.start()
     try:
         yield
     finally:
@@ -62,6 +81,8 @@ async def lifespan(application):
         finally:
             await application.state.retention_worker.close()
             await application.state.embedding_worker.close()
+            await application.state.document_worker.close()
+            await application.state.document_attachments.close()
             application.state.viewer_hub.close()
             application.state.message_receipts.on_change = None
             await application.state.http_clients.close()
@@ -72,12 +93,15 @@ async def lifespan(application):
 app = FastAPI(title="Team Memory API", version="0.1.0", lifespan=lifespan)
 app.state.message_receipts = MessageReceiptRepository()
 app.state.ai_service = AIService()
+app.state.document_attachments = DocumentAttachments()
 app.include_router(records_router)
 app.include_router(messages_router)
 app.include_router(viewer_router)
 app.include_router(ai_router)
 app.include_router(commitments_router)
 app.include_router(profiles_router)
+app.include_router(documents_router)
+app.include_router(document_attachments_router)
 
 
 @app.middleware("http")
@@ -85,7 +109,7 @@ async def prevent_message_caching(request, call_next):
     started = perf_counter()
     with use_http_clients(getattr(request.app.state, "http_clients", None)):
         response = await call_next(request)
-    if request.url.path.startswith(("/messages", "/ai", "/api/v1/tenants/")):
+    if request.url.path.startswith(("/messages", "/ai", "/api/v1/tenants/", "/api/v1/documents", "/api/v1/document-attachments")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
     route = request.scope.get("route")

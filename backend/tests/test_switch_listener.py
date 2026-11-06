@@ -30,12 +30,17 @@ def event(room="test-room", sequence=1):
     }
 
 
-def test_connection_url_declares_rooms_and_resumes_with_generation_fencing(tmp_path):
+def test_restart_starts_at_head_but_running_listener_resumes_with_generation_fencing(tmp_path):
     listener = make_listener(tmp_path)
     listener.state.cursor, listener.state.generation = 12, 3
     listener.state.save(listener.state_path)
     restarted = make_listener(tmp_path)
-    url = urlsplit(restarted.socket_url())
+    fresh = parse_qs(urlsplit(restarted.socket_url()).query)
+    assert fresh["connection_id"] != [listener.state.connection_id]
+    assert fresh["start_from"] == ["head"]
+    assert "expected_generation" not in fresh
+    assert restarted.state.cursor is None
+    url = urlsplit(listener.socket_url())
     query = parse_qs(url.query)
     assert url.scheme == "ws"
     assert query["connection_id"] == [listener.state.connection_id]
@@ -45,6 +50,50 @@ def test_connection_url_declares_rooms_and_resumes_with_generation_fencing(tmp_p
     assert query["rooms"] == ["second-room,test-room"]
     assert "rooms" not in parse_qs(urlsplit(restarted.socket_url(claim_rooms=False)).query)
     assert "test-agent-key" not in restarted.socket_url()
+
+
+def test_restart_skips_offline_events_and_forwards_new_events_once(tmp_path):
+    async def run():
+        previous = make_listener(tmp_path)
+        previous.state.cursor, previous.state.generation = 12, 3
+        previous.state.save(previous.state_path)
+        listener = make_listener(tmp_path)
+        received = asyncio.Event()
+        paths = []
+
+        async def switch(socket):
+            query = parse_qs(urlsplit(socket.request.path).query)
+            assert query["start_from"] == ["head"]
+            assert "expected_generation" not in query
+            await socket.send(json.dumps({"event": "connection_state", "data": {
+                "generation": 1, "cursor": 50, "rooms": ["test-room"],
+            }}))
+            # Even an old/duplicate frame must not cross the new head boundary.
+            for sequence in (12, 49, 50, 51, 51):
+                await socket.send(json.dumps(event(sequence=sequence)))
+            await received.wait()
+            async with asyncio.timeout(3):
+                while listener.state.cursor != 51:
+                    await asyncio.sleep(0)
+            await socket.send(json.dumps({"type": "evicted", "code": "taken_over"}))
+
+        async def respond(request):
+            paths.append(request.url.path)
+            response = await httpx.ASGITransport(app=app).handle_async_request(request)
+            received.set()
+            return response
+
+        async with serve(switch, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            listener = make_listener(tmp_path, switch_bridge_url=f"http://127.0.0.1:{port}")
+            async with httpx.AsyncClient(transport=httpx.MockTransport(respond), base_url="http://test/",
+                    headers={"X-Ingest-Token": "test-ingest-token"}) as client:
+                with pytest.raises(ListenerStopped):
+                    await asyncio.wait_for(listener._session(client), timeout=5)
+        assert paths == ["/messages"]
+        assert listener.state.cursor == 51
+        assert parse_qs(urlsplit(listener.socket_url()).query)["start_from"] == ["51"]
+    asyncio.run(run())
 
 
 def test_changing_agent_does_not_reuse_old_cursor(tmp_path):

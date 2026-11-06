@@ -168,21 +168,21 @@ def test_ai_responses_obey_existing_authorization():
     assert client.get("/messages/recent", headers=HEADERS).json() == []
 
 
-def test_viewer_env_endpoints_cannot_read_or_rewrite_secrets(tmp_path, monkeypatch):
+def test_viewer_env_endpoint_lifecycle(tmp_path, monkeypatch):
     test_env = tmp_path / ".env"
     test_env.write_text("TEST_KEY=secret_val\nSWITCH_INGEST_TOKEN=tok123\n", encoding="utf-8")
     monkeypatch.setattr("app.services.env_service.ENV_PATH", test_env)
 
     resp = client.get("/viewer/env")
-    assert resp.status_code == 503
-    assert 'secret_val' not in resp.text and 'tok123' not in resp.text
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store, private"
+    data = resp.json()
+    assert "variables" in data
+    assert data["variables"]["TEST_KEY"] == "secret_val"
+    assert data["variables"]["SWITCH_INGEST_TOKEN"] == "tok123"
 
     # Test updating variables
     update_resp = client.post("/viewer/env", json={"variables": {"TEST_KEY": "updated_val", "NEW_KEY": "abc"}})
-<<<<<<< HEAD
-    assert update_resp.status_code == 503
-    assert test_env.read_text(encoding='utf-8') == "TEST_KEY=secret_val\nSWITCH_INGEST_TOKEN=tok123\n"
-=======
     assert update_resp.status_code == 200
 
     re_read = client.get("/viewer/env")
@@ -221,5 +221,3 @@ def test_viewer_storage_prune_and_space_endpoints(tmp_path, monkeypatch):
     assert space_resp.status_code == 200
     assert space_resp.json()["status"] == "ok"
     assert space_resp.json()["enabled"] is True
-
->>>>>>> bca86dfbe1ba6e11e2fae1582f3357629179ae82

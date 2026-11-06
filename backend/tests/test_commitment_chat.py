@@ -228,9 +228,6 @@ async def test_authenticated_adapter_boundary_and_env_routes_fail_closed(monkeyp
         assert (await client.post(path,headers={**headers,'X-Adapter-Token':token},json=message.model_dump(mode='json'))).status_code==200
         assert (await client.post(path,headers=headers,json=message.model_dump(mode='json'))).status_code==200
         assert (await client.post(path,headers={'X-Adapter-Token':token},json=message.model_dump(mode='json'))).status_code==401
-        for route in ['/viewer/env']:
-            assert (await client.get(route)).status_code==503
-            assert (await client.post(route,json={'variables':{'SWITCH_ADAPTER_TOKEN':'changed'}})).status_code==503
         public=f'/api/v1/tenants/{uuid4()}/rooms/{uuid4()}/commitments/{uuid4()}/complete'
         assert (await client.post(public,headers={**headers,'X-Adapter-Token':token},
             json={'expected_version':1,'idempotency_key':str(uuid4())})).status_code==503

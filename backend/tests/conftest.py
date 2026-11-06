@@ -45,6 +45,10 @@ def isolate_local_configuration(monkeypatch, tmp_path):
         "SWITCH_BACKEND_URL": "http://127.0.0.1:8000",
         "LOG_DISCORD_MESSAGES": "false",
         "LOCAL_EMBEDDINGS_ENABLED": "false",
+        "SWITCH_DOCUMENT_ATTACHMENTS_ENABLED": "false",
+        "SWITCH_DOCUMENT_ADAPTER_TOKEN": "",
+        "SWITCH_DOCUMENT_DISCORD_BRIDGE_IDS": "",
+        "SWITCH_DOCUMENT_BOT_SENDER_ID": "",
         "SWITCH_REPLY_TO_DISCORD": "true",
     }.items():
         monkeypatch.setenv(name, value)

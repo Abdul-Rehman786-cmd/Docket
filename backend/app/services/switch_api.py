@@ -1,6 +1,7 @@
 """Small server-side Switch transport. Errors never contain remote payloads."""
 
 import asyncio
+import logging
 import json
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
@@ -31,12 +32,15 @@ class SwitchAPI:
         async with service_client("switch") as client:
             yield client
 
-    async def operation(self, client, name: str, args: dict, connection_id: str | None = None):
+    async def operation(self, client, name: str, args: dict, connection_id: str | None = None, session_id: str | None = None):
         headers = dict(self.headers)
         if connection_id:
             headers["X-Switch-Connection-Id"] = connection_id
+        if session_id:
+            headers["X-Switch-Session-Id"] = session_id
         response = await client.post(self.base_url + self.agent_path + "/ops/" + name, json=args, headers=headers)
         if response.status_code != 200:
+            logging.getLogger("team_memory").warning("stage=switch_operation http_status=%d",response.status_code)
             raise SwitchError("Switch rejected the operation. Check agent access and runtime availability.")
         try:
             return response.json()["result"]
