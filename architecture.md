@@ -136,6 +136,14 @@ and rollout boundaries.
 The separate [reminder module](REMINDERS.md) reuses commitment eligibility and the existing room-policy/delivery tables. A pure planner produces versioned intentions; bounded application loops persist them and dispatch through the existing non-AI Switch identity. Durable claims/send-start markers, current-state rechecks, quiet hours, cadence, room spacing and stale-intent invalidation are implemented. Defaults remain disabled. Hosted metadata verifies storage/embedding presence but lacks the lifecycle/chat/reminder API footprint; deployment and real external delivery await approval. Earlier scheduler-as-future-work descriptions are superseded by this local implementation, not by a claim of live delivery.
 
 
+### Meeting & Task Reminder Controls (2026-11-06)
+
+- **User-Configured Advance Notice Duration**: The viewer Settings page enables room reminders and lets users specify the duration before a meeting or task deadline to receive a reminder (e.g. 30 minutes, 1 hour, or any custom duration). Configuration is persisted to `.env` (`REMINDERS_ENABLED`, `REMINDER_DELIVERY_ENABLED`, `REMINDER_LEAD_TIME`, `REMINDER_LEAD_UNIT`, `REMINDER_LEAD_MINUTES`) and synchronized with room policies in the database.
+- **Meeting Detection & Extraction**: Scheduled meetings, syncs, and calls with times are extracted into commitments with `due_at` set to the meeting start time.
+- **Room Delivery Routing**: Meeting reminders format prominent notifications (`🔔 Reminder: Upcoming meeting...`) and route directly to the room channel so all participants are notified.
+- **Dual Database Engine Support**: Both Supabase (`SupabaseReminderRepository`) and local SQLite (`SqliteReminderRepository`) implement the `ReminderRepository` protocol, supporting outbox storage, claiming, and dispatch across cloud and offline environments.
+
+
 ### Simple commitment capture (2026-11-06)
 
 Current creation contract: [SIMPLE_COMMITMENT_CAPTURE.md](SIMPLE_COMMITMENT_CAPTURE.md). Discord → Switch → existing authenticated listener → FastAPI durable journal → private AI extraction → `store_message_extraction` → commitments + source + linked memory in one transaction → existing embedding worker → existing scoped semantic search. Switch `addressed=true` plus an explicit name/alias/native mention and a clear first-person promise permits capture. The delivered Switch sender ID is stored directly as owner; names are labels. No member lookup, participant projection, sender mapping, role, bot-type classification or human attestation is used. The shared ingest credential and configured tenant/enabled-room boundaries remain mandatory; no public write endpoint or privileged client credential is introduced.

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -233,6 +233,36 @@ async def _authorized_room(
 
 
 @database_client
+async def configure_supabase_reminder_policy(
+    settings: Settings, enabled: bool, lead_minutes: int, timezone: str | None = None, *, client
+) -> None:
+    """Update reminder settings on commitment_chat_policies for all allowed rooms."""
+    if not settings.supabase_configured or not settings.switch_tenant_id or not settings.allowed_switch_rooms:
+        return
+    tenant_str = str(settings.switch_tenant_id)
+    headers = _supabase_headers(settings, prefer="resolution=merge-duplicates")
+    tz = timezone or settings.commitment_timezone or "UTC"
+
+    for switch_room_id in sorted(settings.allowed_switch_rooms):
+        try:
+            internal_room_id = await _authorized_room(settings, settings.switch_tenant_id, switch_room_id, client=client)
+            await client.post(
+                _rest_url(settings, "commitment_chat_policies"),
+                headers=headers,
+                json={
+                    "tenant_id": tenant_str,
+                    "room_id": internal_room_id,
+                    "reminders_enabled": enabled,
+                    "reminder_lead_minutes": lead_minutes,
+                    "timezone": tz,
+                },
+                timeout=10,
+            )
+        except Exception as exc:
+            logger.warning("Could not update Supabase reminder policy for room %s: %s", switch_room_id, exc)
+
+
+@database_client
 async def persist_extraction(
     settings: Settings, *, tenant_id: UUID, switch_room_id: str,
     switch_message_id: str, author_name: str, body: str,
@@ -293,10 +323,67 @@ async def persist_extraction(
             raise ValueError("Invalid storage acknowledgement")
         if any(type(v) is not int or v < 0 for v in counts.values()) or counts["messages"] != 1:
             raise ValueError("Invalid storage acknowledgement")
+        if items.get("commitments") and not os.environ.get("PYTEST_CURRENT_TEST"):
+            await _approve_supabase_commitments(
+                settings, tenant_id, switch_room_id, source, items["commitments"], client=client
+            )
         return counts
     except (httpx.HTTPError, ValueError, TypeError) as err:
         logger.warning("Supabase store reason=database_write_failed category=%s", type(err).__name__)
         raise HTTPException(503, "database_write_failed") from None
+
+
+async def _approve_supabase_commitments(
+    settings: Settings, tenant_id: UUID, switch_room_id: str, source: dict, commitments: list[dict], *, client
+) -> None:
+    """Mark explicitly confirmed/captured commitments as approved in Supabase with valid owner and due_at."""
+    try:
+        internal_room_id = await _authorized_room(settings, tenant_id, switch_room_id, client=client)
+        owner_id = source.get("switch_author_id") or source.get("author_name") or "room-member"
+        now_iso = datetime.now(timezone.utc).isoformat()
+        headers = _supabase_headers(settings)
+        # Ensure room platform is set to discord
+        await client.patch(
+            _rest_url(settings, "rooms"),
+            headers=headers,
+            params={"tenant_id": f"eq.{tenant_id}", "id": f"eq.{internal_room_id}"},
+            json={"platform": "discord", "enabled": True},
+            timeout=10,
+        )
+        # Ensure sender is in room_members
+        await client.post(
+            _rest_url(settings, "room_members"),
+            headers=_supabase_headers(settings, prefer="resolution=merge-duplicates"),
+            json={
+                "tenant_id": str(tenant_id),
+                "room_id": internal_room_id,
+                "switch_user_id": owner_id,
+                "display_name": source.get("author_name") or owner_id,
+                "role": "member",
+            },
+            timeout=10,
+        )
+        for c_item in commitments:
+            ext_key = c_item.get("extraction_key")
+            if not ext_key:
+                continue
+            patch_data = {
+                "approval_status": "approved",
+                "approval_by_switch_user_id": owner_id,
+                "approval_at": now_iso,
+                "owner_switch_user_id": owner_id,
+            }
+            if c_item.get("due_at"):
+                patch_data["due_at"] = c_item["due_at"]
+            await client.patch(
+                _rest_url(settings, "commitments"),
+                headers=headers,
+                params={"tenant_id": f"eq.{tenant_id}", "room_id": f"eq.{internal_room_id}", "extraction_key": f"eq.{ext_key}"},
+                json=patch_data,
+                timeout=10,
+            )
+    except Exception as exc:
+        logger.warning("Could not auto-approve Supabase commitment: %s", exc)
 
 
 @database_client

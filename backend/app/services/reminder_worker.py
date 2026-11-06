@@ -23,15 +23,20 @@ class ReminderWorker:
         while True:
             settings=get_settings()
             try:
+                db_configured = (settings.sqlite_configured if settings.effective_database_engine == 'sqlite' else settings.supabase_configured)
                 reason=('flag_disabled' if not settings.reminders_enabled or (dispatch and not settings.reminder_delivery_enabled)
-                        else 'database_not_configured' if not settings.supabase_configured
+                        else 'database_not_configured' if not db_configured
                         else 'scope_not_configured' if not settings.switch_tenant_id or not settings.allowed_switch_rooms else None)
                 state=reason or 'running'
                 if state!=previous:
                     feature_event(component,'enabled' if reason is None else ('disabled' if reason=='flag_disabled' else 'blocked'),reason=reason)
                     previous=state
-                if settings.reminders_enabled and settings.supabase_configured and (not dispatch or settings.reminder_delivery_enabled):
-                    repository=SupabaseReminderRepository(settings)
+                if settings.reminders_enabled and db_configured and (not dispatch or settings.reminder_delivery_enabled):
+                    if settings.effective_database_engine == 'sqlite':
+                        from app.repositories.sqlite_reminders import SqliteReminderRepository
+                        repository = SqliteReminderRepository(settings)
+                    else:
+                        repository = SupabaseReminderRepository(settings)
                     if adapter is None:
                         adapter=NotificationDispatcher(repository,SwitchNotificationSink(settings),IngestionJobs(),settings) if dispatch else ReminderScheduler(repository)
                     adapter.repository=repository

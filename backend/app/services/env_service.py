@@ -32,6 +32,11 @@ DEFAULT_KEYS = [
     "SQLITE_MAX_SPACE_ENABLED",
     "SQLITE_MAX_SPACE_VALUE",
     "SQLITE_MAX_SPACE_UNIT",
+    "REMINDERS_ENABLED",
+    "REMINDER_DELIVERY_ENABLED",
+    "REMINDER_LEAD_MINUTES",
+    "REMINDER_LEAD_TIME",
+    "REMINDER_LEAD_UNIT",
 ]
 
 OPTIONAL_KEYS = {
@@ -42,6 +47,11 @@ OPTIONAL_KEYS = {
     "SQLITE_MAX_SPACE_ENABLED": "Optional · 'true' or 'false' for SQLite auto-eviction",
     "SQLITE_MAX_SPACE_VALUE": "Optional · max space limit for SQLite (e.g. 500)",
     "SQLITE_MAX_SPACE_UNIT": "Optional · 'KB', 'MB', or 'GB'",
+    "REMINDERS_ENABLED": "Optional · 'true' or 'false' to enable reminder scheduling",
+    "REMINDER_DELIVERY_ENABLED": "Optional · 'true' or 'false' to enable dispatching reminders to rooms",
+    "REMINDER_LEAD_MINUTES": "Optional · total minutes before meeting/task to send reminder (e.g. 30)",
+    "REMINDER_LEAD_TIME": "Optional · lead time number (e.g. 30)",
+    "REMINDER_LEAD_UNIT": "Optional · 'minutes', 'hours', or 'days'",
     "ADMIN_API_TOKEN": "Optional · for admin API endpoints",
     "SWITCH_AI_TIMEOUT_SECONDS": "Optional · defaults to 180s",
     "SWITCH_REPLY_TO_DISCORD": "Optional · defaults to true",

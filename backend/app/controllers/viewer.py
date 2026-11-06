@@ -8,6 +8,7 @@ from app.models.viewer import (
     EnforceSqliteSpacePayload,
     EnvVariablesPayload,
     PruneByTimelinePayload,
+    ReminderConfigPayload,
 )
 from app.services.env_service import OPTIONAL_KEYS, read_env_variables, write_env_variables
 from app.services.migration_service import migrate_supabase_to_sqlite
@@ -82,9 +83,55 @@ def update_env_variables(payload: EnvVariablesPayload, request: Request) -> JSON
         worker = getattr(request.app.state, "retention_worker", None)
         if worker:
             asyncio.create_task(worker.process_once())
+    if any(k in payload.variables for k in ("REMINDERS_ENABLED", "REMINDER_LEAD_MINUTES", "REMINDER_LEAD_TIME", "REMINDER_LEAD_UNIT")):
+        from app.services.reminder_settings_service import configure_reminders
+        enabled = payload.variables.get("REMINDERS_ENABLED", "false").lower() == "true"
+        time_val = int(payload.variables.get("REMINDER_LEAD_TIME", "30") or "30")
+        unit_val = payload.variables.get("REMINDER_LEAD_UNIT", "minutes")
+        mins = int(payload.variables.get("REMINDER_LEAD_MINUTES", str(time_val)) or str(time_val))
+        asyncio.create_task(configure_reminders(
+            enabled=enabled,
+            lead_time=time_val,
+            lead_unit=unit_val,
+            lead_minutes=mins,
+            delivery_enabled=enabled,
+        ))
     headers = viewer_headers(request)
     headers["Cache-Control"] = "no-store, private"
     return JSONResponse(content={"status": "ok"}, headers=headers)
+
+
+@router.get("/viewer/reminders/status")
+def viewer_reminders_status(request: Request) -> JSONResponse:
+    from app.core.config import get_settings
+    settings = get_settings()
+    headers = viewer_headers(request)
+    headers["Cache-Control"] = "no-store, private"
+    return JSONResponse(
+        content={
+            "enabled": settings.reminders_enabled,
+            "delivery_enabled": settings.reminder_delivery_enabled,
+            "lead_time": settings.reminder_lead_time,
+            "lead_unit": settings.reminder_lead_unit,
+            "lead_minutes": settings.reminder_lead_minutes,
+        },
+        headers=headers,
+    )
+
+
+@router.post("/viewer/reminders/configure")
+async def viewer_reminders_configure(payload: ReminderConfigPayload, request: Request) -> JSONResponse:
+    from app.services.reminder_settings_service import configure_reminders
+    res = await configure_reminders(
+        enabled=payload.enabled,
+        lead_time=payload.lead_time,
+        lead_unit=payload.lead_unit,
+        lead_minutes=payload.lead_minutes,
+        delivery_enabled=payload.delivery_enabled,
+    )
+    headers = viewer_headers(request)
+    headers["Cache-Control"] = "no-store, private"
+    return JSONResponse(content=res, headers=headers)
 
 
 @router.post("/viewer/migrate-db")

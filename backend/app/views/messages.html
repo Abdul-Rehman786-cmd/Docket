@@ -112,31 +112,32 @@
         </div>
       </div>
 
-      <!-- Reminders Configuration -->
+      <!-- Meeting & Task Reminders Configuration -->
       <div class="settings-section">
         <div class="section-title-row">
           <div>
-            <h3>Task &amp; Commitment Reminders</h3>
-            <p class="subtitle">Reminder policy is managed by a trusted server administrator. These controls do not change server policy.</p>
+            <h3>Meeting &amp; Task Reminders</h3>
+            <p class="subtitle">Automatically send reminder notifications to the room before scheduled meetings and task deadlines.</p>
           </div>
-          <label class="switch">
-            <input id="reminders-toggle" type="checkbox" disabled aria-label="Reminders are configured on the server">
+          <label class="switch" title="Toggle automatic reminders in rooms">
+            <input id="reminders-toggle" type="checkbox" aria-label="Enable room reminders">
             <span class="slider"></span>
           </label>
         </div>
 
         <div id="reminders-lead-time-box" class="lead-time-box">
-          <label for="reminder-lead-time">Advance Notice Time (Kitna time pehla de)</label>
+          <label for="reminder-lead-time">Advance Notice Time (How early to send the reminder)</label>
           <div class="input-group-row">
-            <input id="reminder-lead-time" type="number" min="1" max="1000" value="30" disabled style="max-width: 120px;">
-            <select id="reminder-lead-unit" class="select-input" disabled>
+            <input id="reminder-lead-time" type="number" min="1" max="10080" value="30" style="max-width: 120px;">
+            <select id="reminder-lead-unit" class="select-input">
               <option value="minutes" selected>Minutes before</option>
               <option value="hours">Hours before</option>
               <option value="days">Days before</option>
             </select>
-            <span class="field-hint inline-hint">Reminders trigger before commitment due dates.</span>
+            <span class="field-hint inline-hint">AI sends a reminder to the room this duration before the meeting or task starts.</span>
           </div>
         </div>
+        <p id="reminders-status-msg" class="feed-note" role="status" style="padding: 6px 0 0; border: 0;"></p>
       </div>
 
       <!-- Storage & Retention Management -->

@@ -32,3 +32,13 @@ class EnforceSqliteSpacePayload(BaseModel):
     max_space_unit: Literal["KB", "MB", "GB"] = "MB"
     enabled: bool = True
 
+
+class ReminderConfigPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore", hide_input_in_errors=True)
+
+    enabled: bool = False
+    lead_time: int = Field(default=30, ge=0, le=10080)
+    lead_unit: Literal["minutes", "hours", "days"] = "minutes"
+    lead_minutes: int | None = Field(default=None, ge=0, le=10080)
+    delivery_enabled: bool = True
+

@@ -335,6 +335,7 @@ const remindersToggle = document.getElementById("reminders-toggle");
 const remindersLeadBox = document.getElementById("reminders-lead-time-box");
 const reminderLeadTime = document.getElementById("reminder-lead-time");
 const reminderLeadUnit = document.getElementById("reminder-lead-unit");
+const remindersStatusMsg = document.getElementById("reminders-status-msg");
 const storageRetentionTime = document.getElementById("storage-retention-time");
 const storageRetentionUnit = document.getElementById("storage-retention-unit");
 const pruneTargetEngine = document.getElementById("prune-target-engine");
@@ -998,6 +999,35 @@ async function loadEnvVars() {
     envVarList.appendChild(createEnvRow(key, val, optText));
   });
 
+  // Load reminder settings into UI
+  if (loadedVars["REMINDERS_ENABLED"]) {
+    remindersToggle.checked = loadedVars["REMINDERS_ENABLED"] === "true";
+  }
+  if (loadedVars["REMINDER_LEAD_TIME"]) {
+    reminderLeadTime.value = loadedVars["REMINDER_LEAD_TIME"];
+  } else if (loadedVars["REMINDER_LEAD_MINUTES"]) {
+    reminderLeadTime.value = loadedVars["REMINDER_LEAD_MINUTES"];
+  }
+  if (loadedVars["REMINDER_LEAD_UNIT"]) {
+    reminderLeadUnit.value = loadedVars["REMINDER_LEAD_UNIT"];
+  }
+  remindersLeadBox.style.opacity = remindersToggle.checked ? "1" : "0.45";
+  remindersLeadBox.style.pointerEvents = remindersToggle.checked ? "auto" : "none";
+
+  try {
+    fetch("/viewer/reminders/status")
+      .then(r => r.ok ? r.json() : null)
+      .then(rData => {
+        if (!rData) return;
+        if (typeof rData.enabled === "boolean") remindersToggle.checked = rData.enabled;
+        if (rData.lead_time) reminderLeadTime.value = String(rData.lead_time);
+        if (rData.lead_unit) reminderLeadUnit.value = rData.lead_unit;
+        remindersLeadBox.style.opacity = remindersToggle.checked ? "1" : "0.45";
+        remindersLeadBox.style.pointerEvents = remindersToggle.checked ? "auto" : "none";
+      })
+      .catch(() => {});
+  } catch {}
+
   updateEngineDisplay();
   envStatusMsg.textContent = "✓ Environment variables loaded from backend/.env";
   setTimeout(() => { envStatusMsg.textContent = ""; }, 3000);
@@ -1084,6 +1114,14 @@ saveSettingsBtn.addEventListener("click", async () => {
   const maxVal = parseFloat(storageMaxSpace.value) || 500;
   const maxUnit = storageMaxUnit.value || "MB";
 
+  const remindersEnabled = remindersToggle ? remindersToggle.checked : false;
+  const leadVal = parseInt(reminderLeadTime.value, 10) || 30;
+  const leadUnit = reminderLeadUnit.value || "minutes";
+  let leadMins = leadVal;
+  if (leadUnit === "hours") leadMins = leadVal * 60;
+  else if (leadUnit === "days") leadMins = leadVal * 1440;
+  leadMins = Math.min(10080, Math.max(0, leadMins));
+
   const setEnvField = (k, v) => {
     const inp = envVarList.querySelector(`.env-val-input[data-key="${k}"]`);
     if (inp) inp.value = String(v);
@@ -1094,7 +1132,32 @@ saveSettingsBtn.addEventListener("click", async () => {
   setEnvField("SQLITE_MAX_SPACE_VALUE", String(maxVal));
   setEnvField("SQLITE_MAX_SPACE_UNIT", maxUnit);
 
+  setEnvField("REMINDERS_ENABLED", remindersEnabled ? "true" : "false");
+  setEnvField("REMINDER_DELIVERY_ENABLED", remindersEnabled ? "true" : "false");
+  setEnvField("REMINDER_LEAD_TIME", String(leadVal));
+  setEnvField("REMINDER_LEAD_UNIT", leadUnit);
+  setEnvField("REMINDER_LEAD_MINUTES", String(leadMins));
+
   await saveEnvToServer();
+
+  try {
+    const rResp = await fetch("/viewer/reminders/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled: remindersEnabled,
+        lead_time: leadVal,
+        lead_unit: leadUnit,
+        lead_minutes: leadMins,
+        delivery_enabled: remindersEnabled,
+      }),
+    });
+    if (rResp.ok && remindersStatusMsg) {
+      remindersStatusMsg.textContent = `✓ Reminders ${remindersEnabled ? "enabled" : "disabled"}: ${leadVal} ${leadUnit} before meetings.`;
+      setTimeout(() => { remindersStatusMsg.textContent = ""; }, 3500);
+    }
+  } catch {}
+
   if (engineSqliteRadio.checked && maxEnabled) {
     await applyAndEnforceSqliteSpace();
   }
@@ -1106,7 +1169,11 @@ saveSettingsBtn.addEventListener("click", async () => {
     retentionUnit: storageRetentionUnit.value,
     sqliteMaxSpaceEnabled: maxEnabled,
     maxSpace: storageMaxSpace.value,
-    maxSpaceUnit: storageMaxUnit.value
+    maxSpaceUnit: storageMaxUnit.value,
+    remindersEnabled: remindersEnabled,
+    reminderLeadTime: String(leadVal),
+    reminderLeadUnit: leadUnit,
+    reminderLeadMinutes: leadMins,
   };
 
   try {
@@ -1131,7 +1198,17 @@ function loadSavedSettings() {
       sqliteDirPath.value = data.sqlitePath;
       storageLocationPath.value = data.sqlitePath;
     }
-    // Reminder policy is scoped and backend-managed; never restore browser-local authority.
+    if (typeof data.remindersEnabled === "boolean" && remindersToggle) {
+      remindersToggle.checked = data.remindersEnabled;
+      remindersLeadBox.style.opacity = remindersToggle.checked ? "1" : "0.45";
+      remindersLeadBox.style.pointerEvents = remindersToggle.checked ? "auto" : "none";
+    }
+    if (data.reminderLeadTime && reminderLeadTime) {
+      reminderLeadTime.value = data.reminderLeadTime;
+    }
+    if (data.reminderLeadUnit && reminderLeadUnit) {
+      reminderLeadUnit.value = data.reminderLeadUnit;
+    }
     if (data.retentionTime) storageRetentionTime.value = data.retentionTime;
     if (data.retentionUnit) storageRetentionUnit.value = data.retentionUnit;
     if (typeof data.sqliteMaxSpaceEnabled === "boolean" && sqliteMaxSpaceToggle) {

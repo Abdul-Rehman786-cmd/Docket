@@ -171,6 +171,7 @@ async def persist_extraction(
             # Insert commitments
             for comm in commitments:
                 comm_uuid = str(uuid4())
+                app_status = comm.get("approval_status") or ("approved" if comm.get("due_at") else "pending")
                 cursor.execute(
                     """
                     INSERT INTO commitments (id, tenant_id, room_id, message_id, owner_name,
@@ -185,7 +186,7 @@ async def persist_extraction(
                         comm.get("owner_name") or clean_author,
                         comm.get("description", ""),
                         comm.get("due_at"),
-                        comm.get("approval_status", "pending"),
+                        app_status,
                         comm.get("task_status", "open"),
                     ),
                 )

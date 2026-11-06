@@ -181,6 +181,52 @@ CREATE TABLE IF NOT EXISTS document_imports (
     request_hash TEXT NOT NULL,
     PRIMARY KEY (tenant_id, import_id)
 );
+
+-- 11. Commitment Chat Policies (Reminders & Notice Configuration)
+CREATE TABLE IF NOT EXISTS commitment_chat_policies (
+    tenant_id TEXT NOT NULL,
+    room_id TEXT NOT NULL,
+    reminders_enabled INTEGER NOT NULL DEFAULT 0,
+    reminder_policy_version INTEGER NOT NULL DEFAULT 1,
+    reminder_lead_minutes INTEGER NOT NULL DEFAULT 30,
+    reminder_cadence_minutes INTEGER NOT NULL DEFAULT 1440,
+    reminder_max_followups INTEGER NOT NULL DEFAULT 3,
+    reminder_gap_minutes INTEGER NOT NULL DEFAULT 30,
+    reminder_room_gap_seconds INTEGER NOT NULL DEFAULT 60,
+    reminder_quiet_start INTEGER NOT NULL DEFAULT 22,
+    reminder_quiet_end INTEGER NOT NULL DEFAULT 8,
+    reminder_delivery_mode TEXT NOT NULL DEFAULT 'source_thread',
+    timezone TEXT,
+    PRIMARY KEY (tenant_id, room_id)
+);
+
+-- 12. Reminder Deliveries (Outbox)
+CREATE TABLE IF NOT EXISTS reminder_deliveries (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    room_id TEXT NOT NULL,
+    commitment_id TEXT NOT NULL REFERENCES commitments(id) ON DELETE CASCADE,
+    scheduled_for TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    occurrence_key TEXT UNIQUE,
+    recipient_id TEXT,
+    commitment_version INTEGER DEFAULT 1,
+    policy_version INTEGER DEFAULT 1,
+    reminder_type TEXT,
+    ordinal INTEGER DEFAULT 0,
+    occurrence_base TEXT,
+    claim_token TEXT,
+    lease_until TEXT,
+    dispatch_started_at TEXT,
+    sent_at TEXT,
+    next_attempt_at TEXT,
+    switch_reply_message_id TEXT,
+    error_code TEXT,
+    notification_body TEXT,
+    created_at TEXT DEFAULT (DATETIME('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_reminder_deliv_status ON reminder_deliveries(status, next_attempt_at);
 """
 
 

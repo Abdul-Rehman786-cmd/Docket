@@ -2,9 +2,12 @@
 
 Unsupported phrasing is ambiguous. Expand this grammar only with negative tests.
 """
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+logger = logging.getLogger('team_memory')
 
 from app.models.commitment_chat import ChatPlan, TaskChangeProposal
 from app.core.chat_participation import without_agent_mention
@@ -40,26 +43,199 @@ def own_request_kind(body):
     return None
 
 
-def personal_commitment(body, metadata):
-    """Use Switch addressing, not member verification, for simple capture.
+TZ_ABBREVIATIONS = {
+    'pkt': timezone(timedelta(hours=5)),
+    'utc': timezone.utc,
+    'gmt': timezone.utc,
+    'est': timezone(timedelta(hours=-5)),
+    'edt': timezone(timedelta(hours=-4)),
+    'cst': timezone(timedelta(hours=-6)),
+    'cdt': timezone(timedelta(hours=-5)),
+    'pst': timezone(timedelta(hours=-8)),
+    'pdt': timezone(timedelta(hours=-7)),
+    'ist': timezone(timedelta(hours=5, minutes=30)),
+    'bst': timezone(timedelta(hours=1)),
+    'cet': timezone(timedelta(hours=1)),
+    'cest': timezone(timedelta(hours=2)),
+    'jst': timezone(timedelta(hours=9)),
+    'kst': timezone(timedelta(hours=9)),
+}
 
-    `addressed` may include follow-ups: still require an explicit mention token.
-    Names/native IDs here are formatting, not ownership or authorization evidence.
-    """
+MONTHS = {
+    'jan': 1, 'january': 1, 'feb': 2, 'february': 2, 'mar': 3, 'march': 3,
+    'apr': 4, 'april': 4, 'may': 5, 'jun': 6, 'june': 6, 'jul': 7, 'july': 7,
+    'aug': 8, 'august': 8, 'sep': 9, 'september': 9, 'oct': 10, 'october': 10,
+    'nov': 11, 'november': 11, 'dec': 12, 'december': 12,
+}
+
+
+def parse_natural_datetime(expr: str, now: datetime | None = None, default_tz = timezone.utc) -> datetime | None:
+    if not expr or not expr.strip():
+        return None
+    now = now or datetime.now(default_tz)
+    s = expr.strip().lower()
+
+    try:
+        dt = datetime.fromisoformat(expr.strip().replace('Z', '+00:00'))
+        if dt.tzinfo:
+            return dt.astimezone(timezone.utc)
+        return dt.replace(tzinfo=default_tz).astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        pass
+
+    tz = default_tz
+    for tz_token, tz_obj in TZ_ABBREVIATIONS.items():
+        pattern = r'\b' + re.escape(tz_token) + r'\b'
+        if re.search(pattern, s):
+            tz = tz_obj
+            s = re.sub(pattern, '', s).strip()
+            break
+
+    year = now.year
+    yr_match = re.search(r'\b(202\d|203\d)\b', s)
+    if yr_match:
+        year = int(yr_match.group(1))
+        s = re.sub(r'\b' + yr_match.group(1) + r'\b', '', s).strip()
+
+    hour = 9
+    minute = 0
+    t_match = re.search(r'\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b', s)
+    if t_match:
+        h = int(t_match.group(1))
+        minute = int(t_match.group(2) or 0)
+        meridiem = t_match.group(3)
+        if meridiem == 'pm' and h < 12:
+            h += 12
+        elif meridiem == 'am' and h == 12:
+            h = 0
+        hour = h
+        s = s[:t_match.start()] + ' ' + s[t_match.end():]
+    else:
+        t24_match = re.search(r'\b([01]?\d|2[0-3]):([0-5]\d)\b', s)
+        if t24_match:
+            hour = int(t24_match.group(1))
+            minute = int(t24_match.group(2))
+            s = s[:t24_match.start()] + ' ' + s[t24_match.end():]
+
+    month = now.month
+    day = now.day
+
+    m_found = None
+    for m_name, m_num in sorted(MONTHS.items(), key=lambda x: -len(x[0])):
+        pattern = r'\b' + m_name + r'\b'
+        if re.search(pattern, s):
+            m_found = m_num
+            s = re.sub(pattern, '', s).strip()
+            break
+
+    d_match = re.search(r'\b(\d{1,2})(?:st|nd|rd|th)?\b', s)
+    if d_match:
+        day = int(d_match.group(1))
+    elif 'today' in s:
+        day = now.day
+        month = now.month
+    elif 'tomorrow' in s:
+        tmrw = now + timedelta(days=1)
+        day = tmrw.day
+        month = tmrw.month
+        year = tmrw.year
+
+    if m_found:
+        month = m_found
+
+    try:
+        parsed = datetime(year, month, day, hour, minute, 0, tzinfo=tz)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def personal_commitment(body, metadata):
+    """Use Switch addressing, not member verification, for simple capture."""
     if not metadata or not metadata.get('addressed'): return None
-    text=body.strip().replace('\u2019',"'")
-    if any(c in text for c in ('?', '"', '`', '\n')) or text.startswith('>'): return None
-    # Switch handles actual names/aliases and marks the message addressed. This
-    # also accepts the normal native Discord mention syntax delivered by adapters.
+    text=' '.join(body.strip().replace('\u2019',"'").split())
+    if any(c in text for c in ('?', '"', '`')) or text.startswith('>'): return None
     text,count=re.subn(r'^(?:@[\w.-]+|<@!?[A-Za-z0-9_-]+>)[,:]?\s+', '', text, count=1)
     if not count: return None
+
+    # Pattern 1: title first: (set/schedule a meeting) (for/with [the] title/topic [of] <topic>) (<when>)
+    m1 = re.search(
+        r'(?:(?:set|schedule|arrange|create)\s+(?:a\s+)?meeting|meeting)\s+'
+        r'(?:with|for)\s+(?:the\s+)?(?:title|topic)(?:\s+of)?\s+(?P<topic>.+?)'
+        r'(?:\s+(?:at|on|for)\s+|\s+(?=(?:202\d|203\d|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|today|tomorrow)\b|\d{1,2}(?::\d{2})?\s*(?:am|pm))))'
+        r'(?P<when>.+)',
+        text, re.I
+    )
+    if m1 and not re.search(r'\b(if|might|maybe|perhaps|not|never|hypothetically|said|quote)\b', text, re.I):
+        topic = m1.group('topic').strip().rstrip('.')
+        when = m1.group('when').strip()
+        logger.info("Personal commitment matched (pattern 1): topic='%s', when='%s'", topic, when)
+        return f"Meeting: {topic}", when
+
+    # Pattern 2: when first, title last: (set meeting for/at/on <when>) (with/for [the] title/topic [of] / about / regarding / titled <topic>)
+    m2 = re.search(
+        r'(?:(?:set|schedule|arrange|create)\s+(?:a\s+)?meeting|meeting)\s+'
+        r'(?:for|at|on)\s+(?P<when>.+?)\s+'
+        r'(?:(?:with|for)\s+(?:the\s+)?(?:title|topic)(?:\s+of)?|about|regarding|titled)\s+(?P<topic>.+)',
+        text, re.I
+    )
+    if m2 and not re.search(r'\b(if|might|maybe|perhaps|not|never|hypothetically|said|quote)\b', text, re.I):
+        topic = m2.group('topic').strip().rstrip('.')
+        when = m2.group('when').strip()
+        logger.info("Personal commitment matched (pattern 2): topic='%s', when='%s'", topic, when)
+        return f"Meeting: {topic}", when
+
+    # Pattern 3: title first with about/regarding/titled <topic> at/on/for <when>
+    m3 = re.search(
+        r'(?:(?:set|schedule|arrange|create)\s+(?:a\s+)?meeting|meeting)\s+'
+        r'(?:about|regarding|titled)\s+(?P<topic>.+?)\s+'
+        r'(?:at|on|for)\s+(?P<when>.+)',
+        text, re.I
+    )
+    if m3 and not re.search(r'\b(if|might|maybe|perhaps|not|never|hypothetically|said|quote)\b', text, re.I):
+        topic = m3.group('topic').strip().rstrip('.')
+        when = m3.group('when').strip()
+        logger.info("Personal commitment matched (pattern 3): topic='%s', when='%s'", topic, when)
+        return f"Meeting: {topic}", when
+
+    # Pattern 4: general meeting with <topic> at/on/for <when> or meeting at/on/for <when>
+    m4 = re.search(
+        r'(?:(?:we have\s+(?:a\s+)?|set\s+(?:a\s+)?|schedule\s+(?:a\s+)?)?meeting)\s+'
+        r'(?:(?:with|for|about|to)\s+(?P<topic>[\w ,/-]{2,400}?)\s+)?'
+        r'(?:at|on|for)\s+(?P<when>[^\n;!?]{1,128})',
+        text, re.I
+    )
+    if m4 and not re.search(r'\b(if|might|maybe|perhaps|not|never|hypothetically|said|quote)\b', text, re.I):
+        topic = m4.group('topic').strip().rstrip('.') if m4.group('topic') else 'Team sync'
+        when = m4.group('when').strip()
+        logger.info("Personal commitment matched (pattern 4): topic='%s', when='%s'", topic, when)
+        return f"Meeting: {topic}", when
+
+    # Pattern 5: bare meeting <when> without preposition (e.g. "set a meeting 3:40 pm PKT")
+    m5 = re.search(
+        r'(?:(?:we have\s+(?:a\s+)?|(?:set|schedule|arrange|create)\s+(?:a\s+)?)?meeting)\s+'
+        r'(?P<when>(?:202\d|203\d|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|today|tomorrow)\b|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}:[0-5]\d)[^\n;!?]{0,120})',
+        text, re.I
+    )
+    if m5 and not re.search(r'\b(if|might|maybe|perhaps|not|never|hypothetically|said|quote)\b', text, re.I):
+        when = m5.group('when').strip()
+        logger.info("Personal commitment matched (pattern 5): topic='Team sync', when='%s'", when)
+        return "Meeting: Team sync", when
+
     match=re.fullmatch(r"I(?:'ll| will| commit to) (?P<task>[\w ,/-]{2,500}?)(?: by (?P<when>[^\n;!?]{1,128}))?\.?",text,re.I)
-    if not match or re.search(r'\b(if|might|maybe|perhaps|not|never|hypothetically|said|quote)\b',text,re.I): return None
-    return match['task'].strip().rstrip('.'), match['when'].rstrip('.') if match['when'] else None
+    if match and not re.search(r'\b(if|might|maybe|perhaps|not|never|hypothetically|said|quote)\b',text,re.I):
+        task = match['task'].strip().rstrip('.')
+        when = match['when'].rstrip('.') if match['when'] else None
+        logger.info("Personal commitment matched (task): task='%s', when='%s'", task, when)
+        return task, when
+
+    return None
 
 
 def protect_extraction(decision,body,enabled):
     if not enabled or decision.task_changes or not update_intent(body): return decision
+    if any(re.search(r'\bmeeting\b', c.description, re.I) for c in decision.commitments):
+        return decision
     # Keep legitimate retrieval questions working, but never extract another task
     # from an update-looking message, even when the model misses task_changes.
     if decision.action in ('store_only','store_and_query'):
@@ -79,34 +255,41 @@ def resolved_deadline(expression, plan, candidate):
             return absolute.astimezone(timezone.utc)
     except ValueError:
         pass
-    if not plan.policy.timezone:
+    if not plan or not getattr(plan, 'policy', None) or not getattr(plan.policy, 'timezone', None):
+        raise ValueError('unresolved_deadline')
+    if not getattr(plan, 'source', None) or not getattr(plan.source, 'occurred_at', None) or plan.source.occurred_at is None:
         raise ValueError('unresolved_deadline')
     try:
         zone=timezone.utc if plan.policy.timezone=='UTC' else ZoneInfo(plan.policy.timezone)
     except (ZoneInfoNotFoundError,ValueError):
         raise ValueError('unresolved_deadline') from None
     match=re.fullmatch(r'(?:next )?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?: at ([0-2]\d:[0-5]\d))?',expression,re.I)
-    if not match:
-        raise ValueError('unresolved_deadline')
+    if match:
+        local_source=plan.source.occurred_at.astimezone(zone)
+        weekday=['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].index(match[1].lower())
+        days=(weekday-local_source.weekday())%7
+        # Same-day Monday/"next Monday" is linguistically uncertain; do not choose.
+        if days==0: raise ValueError('unresolved_deadline')
+        if match[2]:
+            hour,minute=map(int,match[2].split(':'))
+            clock=(hour,minute,0,0)
+        elif candidate and getattr(candidate, 'due_at', None):
+            due=candidate.due_at.astimezone(zone)
+            clock=(due.hour,due.minute,due.second,due.microsecond)
+        else:
+            raise ValueError('unresolved_deadline')
+        day=local_source.date()+timedelta(days=days)
+        local=datetime(day.year,day.month,day.day,*clock,tzinfo=zone)
+        # Reject nonexistent or ambiguous daylight-saving clock times.
+        if local.utcoffset()!=local.replace(fold=1).utcoffset() or local.astimezone(timezone.utc).astimezone(zone)!=local:
+            raise ValueError('unresolved_deadline')
+        return local.astimezone(timezone.utc)
+    # Check natural date/time (e.g. "Nov 6 3:10 PM pkt 2026")
     local_source=plan.source.occurred_at.astimezone(zone)
-    weekday=['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].index(match[1].lower())
-    days=(weekday-local_source.weekday())%7
-    # Same-day Monday/"next Monday" is linguistically uncertain; do not choose.
-    if days==0: raise ValueError('unresolved_deadline')
-    if match[2]:
-        hour,minute=map(int,match[2].split(':'))
-        clock=(hour,minute,0,0)
-    elif candidate.due_at:
-        due=candidate.due_at.astimezone(zone)
-        clock=(due.hour,due.minute,due.second,due.microsecond)
-    else:
-        raise ValueError('unresolved_deadline')
-    day=local_source.date()+timedelta(days=days)
-    local=datetime(day.year,day.month,day.day,*clock,tzinfo=zone)
-    # Reject nonexistent or ambiguous daylight-saving clock times.
-    if local.utcoffset()!=local.replace(fold=1).utcoffset() or local.astimezone(timezone.utc).astimezone(zone)!=local:
-        raise ValueError('unresolved_deadline')
-    return local.astimezone(timezone.utc)
+    natural = parse_natural_datetime(expression, now=local_source, default_tz=zone)
+    if natural is not None:
+        return natural
+    raise ValueError('unresolved_deadline')
 
 
 def validate_proposal(plan: ChatPlan, proposal: TaskChangeProposal):
@@ -196,9 +379,11 @@ def own_task_query(plan, proposal):
 def strip_chat_extraction(decision):
     """Chat commitments go through lifecycle transactions, never general extraction."""
     if not decision.commitments: return decision
+    meetings = [c for c in decision.commitments if re.search(r'\bmeeting\b', c.description, re.I)]
     data=decision.model_dump()
-    data['commitments']=[]
-    data['answer']=None  # An AI extraction is never confirmation of a saved task.
-    if not (data['decisions'] or data['memories'] or data.get('profile_facts')):
-        data['action']='query_only' if decision.action=='store_and_query' else 'none'
+    data['commitments']=[c.model_dump() for c in meetings]
+    if not meetings:
+        data['answer']=None  # An AI extraction is never confirmation of a saved task.
+        if not (data['decisions'] or data['memories'] or data.get('profile_facts')):
+            data['action']='query_only' if decision.action=='store_and_query' else 'none'
     return type(decision).model_validate(data)

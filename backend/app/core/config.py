@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     @classmethod
     def resolve_supabase_keys(cls, data):
         if isinstance(data, dict):
+            cleaned = {}
+            for k, v in data.items():
+                if v == "" or (isinstance(v, str) and not v.strip()):
+                    continue
+                cleaned[k] = v
+            data = cleaned
+
             secret_key = (data.get("SUPABASE_SECRET_KEY") or "").strip()
             service_key = (data.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
             effective = secret_key or service_key or (data.get("SUPABASE_SERVICE_KEY") or "").strip()
@@ -68,6 +75,9 @@ class Settings(BaseSettings):
     commitment_timezone: str | None = None  # Confirmed shared room zone; unset means unresolved relative dates.
     reminders_enabled: bool = False
     reminder_delivery_enabled: bool = False
+    reminder_lead_minutes: int = Field(default=30, ge=0, le=10080, validation_alias=AliasChoices("REMINDER_LEAD_MINUTES"))
+    reminder_lead_time: int = Field(default=30, ge=0, le=10080, validation_alias=AliasChoices("REMINDER_LEAD_TIME"))
+    reminder_lead_unit: str = Field(default="minutes", validation_alias=AliasChoices("REMINDER_LEAD_UNIT"))
     switch_tenant_id: UUID | None = None
     switch_room_ids: str = Field(default="", repr=False)
     switch_ai_sender_ids: str = Field(default="", repr=False)

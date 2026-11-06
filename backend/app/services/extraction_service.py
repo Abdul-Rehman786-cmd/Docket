@@ -54,15 +54,21 @@ def storage_items(decision, settings, *, source_metadata=None, source_body=None)
         capture=bool(source_metadata and source_metadata.get('commitment_capture'))
         owner_id=source_metadata.get('switch_author_id') if capture else None
         if capture: owner=safe(source_metadata.get('author_name'))
-        identity = key("capture" if capture else "commitment", json.dumps([description, owner_id if capture else owner, item.due_at]))
+        effective_due = item.due_at
+        if not effective_due and not capture and description and "meeting" in description.lower():
+            from app.services.commitment_chat_evidence import parse_natural_datetime
+            parsed_dt = parse_natural_datetime(description) or (parse_natural_datetime(source_body) if source_body else None)
+            if parsed_dt is not None:
+                effective_due = parsed_dt.isoformat()
+        identity = key("capture" if capture else "commitment", json.dumps([description, owner_id if capture else owner, effective_due]))
         if identity in seen:
             continue
         seen.add(identity)
         result["commitments"].append(dict(extraction_key=identity, description=description,
-                                          owner_name=owner, due_at=item.due_at))
-        summary = summary_text(description, owner_name=owner, due_at=item.due_at)
+                                          owner_name=owner, due_at=effective_due))
+        summary = summary_text(description, owner_name=owner, due_at=effective_due)
         if capture:
-            summary=summary_text(description,owner_name=owner,owner_id=owner_id,due_at=item.due_at)
+            summary=summary_text(description,owner_name=owner,owner_id=owner_id,due_at=effective_due)
             summary+='\nAcceptance: explicit sender statement'
             if source_metadata.get('commitment_deadline_text'):
                 summary+='\nDeadline wording: '+safe(source_metadata['commitment_deadline_text'])
@@ -97,6 +103,8 @@ def capture_decision(decision, body, metadata, settings):
 
     This creates no records. Existing atomic storage remains the only writer.
     """
+    import logging
+    logger = logging.getLogger('team_memory')
     from types import SimpleNamespace
     from datetime import datetime
     from app.models.ai import LLMDecision, ExtractedCommitment
@@ -107,19 +115,32 @@ def capture_decision(decision, body, metadata, settings):
         and proposals[0].source_message_id==metadata.get('switch_message_id')
         and proposals[0].evidence==body.strip() and proposals[0].assignee_id is None
         and proposals[0].commitment_id is None)
-    if not promise or not (len(decision.commitments)==1 or accepted_proposal):
+    is_meeting = bool(promise and promise[0].startswith('Meeting:'))
+    logger.info("capture_decision input: promise=%s, is_meeting=%s, commitments=%d, proposals=%d", promise, is_meeting, len(decision.commitments), len(proposals))
+    if not promise or not (len(decision.commitments)==1 or accepted_proposal or is_meeting):
         return strip_chat_extraction(decision) if not proposals else LLMDecision(action='none')
     description,wording=promise
     due=None
     if wording:
+        occurred_dt = None
         try:
             # Absolute aware instants don't need a message clock; relative dates do.
             when=metadata.get('occurred_at') if metadata.get('timestamp_ms') is not None else None
-            plan=SimpleNamespace(source=SimpleNamespace(occurred_at=datetime.fromisoformat(when.replace('Z','+00:00')) if when else None),
+            if isinstance(when, datetime):
+                occurred_dt = when
+            elif isinstance(when, str) and when:
+                occurred_dt = datetime.fromisoformat(when.replace('Z', '+00:00'))
+            plan=SimpleNamespace(source=SimpleNamespace(occurred_at=occurred_dt),
                 policy=SimpleNamespace(timezone=metadata.get('capture_timezone')))
             due=resolved_deadline(wording,plan,SimpleNamespace(due_at=None))
-        except (ValueError,AttributeError,TypeError,OverflowError):
-            pass  # Preserve wording; never invent an exact deadline/timezone.
+        except (ValueError,AttributeError,TypeError,OverflowError) as ex:
+            if is_meeting:
+                from datetime import timezone
+                from app.services.commitment_chat_evidence import parse_natural_datetime
+                due = parse_natural_datetime(wording, now=occurred_dt, default_tz=timezone.utc)
+            if due is None:
+                logger.warning("capture_decision deadline resolution skipped: wording='%s', reason=%s", wording, ex)
+    logger.info("capture_decision resolved: description='%s', due_at='%s'", description, due.isoformat() if due else None)
     return LLMDecision(action='store_only',commitments=[ExtractedCommitment(description=description,
         owner_name=metadata.get('author_name'),due_at=due.isoformat() if due else None)],
         decisions=decision.decisions,memories=decision.memories,profile_facts=decision.profile_facts)

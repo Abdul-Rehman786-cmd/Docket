@@ -168,15 +168,16 @@ def build_decision_prompt(question: str, task_context=None) -> str:
         '  "task_changes": []\n'
         '}\n\n'
         "Rules:\n"
-        "1. action='store_only': Message states a new fact, team decision, or commitment to remember. Populate commitments, decisions, or memories (memory_type must be 'fact'). Set search_query=null.\n"
+        "1. action='store_only': Message states a new fact, team decision, meeting, schedule, or commitment to remember. Always prefer saving over asking questions. Populate commitments, decisions, or memories (memory_type must be 'fact'). Set search_query=null.\n"
         "2. action='query_only': Message asks a question requiring stored team memory, past decisions, commitments, or docs. Set search_query to concise search keywords, and leave commitments, decisions, and memories empty.\n"
         "3. action='store_and_query': Message both provides new facts/decisions/commitments to store AND asks a question requiring database lookup. Populate both the extracted items and search_query.\n"
-        "4. action='clarify': User intends to record a meeting, decision, or commitment, but critical details are missing/ambiguous. Leave extraction arrays empty, search_query=null, and put a concise clarification question in 'answer'.\n"
-        "5. action='none': Greetings, casual chatter, or general questions not needing database storage or lookup. Leave extraction arrays empty, search_query=null, and provide a helpful plain-text reply in 'answer'.\n"
+        "4. action='clarify': ONLY use if the message is completely uninterpretable gibberish. NEVER clarify missing meeting details, dates, years, or durations.\n"
+        "5. action='none': Greetings, casual chatter, or general conversational acknowledgments not needing database storage or lookup. Leave extraction arrays empty, search_query=null, and provide a helpful plain-text reply in 'answer'.\n"
         "6. For a clear first-person promise addressed to the agent, extract one commitment in commitments "
         "(action=store_only). Do not create a task for greetings, questions, quotes or hypotheticals. "
         "Use null due_at when the exact deadline is unresolved; the backend preserves the original wording. "
         "Owner comes from the message sender, never a named person or guessed identity. "
+        "7. For meetings: If the user mentions a meeting, event, sync, call, or schedule (e.g. 'add a meeting for 9 am tomorrow', 'set a meeting for Nov 6 3:10 pm pkt'), immediately extract it in commitments with action='store_only' (e.g. description='Meeting: <topic or summary>'). NEVER interrogate the user or ask follow-up questions for meeting duration, topic, year, timezone, or end time. Save whatever details the user gave. If due_at has no explicit year, assume the upcoming date or current year; if timezone or exact time is unclear, set due_at=null and keep the wording in description.\n"
     )
     return prompt + (
         '\nOptional task_changes: [{"action":"create|start|complete|cancel|reassign|reschedule|list",'
@@ -783,6 +784,8 @@ class AIService:
             if (source_meta and source_meta.get('origin')=='discord' and source_meta.get('durable')
                 and source_meta.get('switch_author_id') and source_meta.get('room_id') in settings.allowed_switch_rooms):
                 capture_input=personal_commitment(row.question,source_meta)
+                if capture_input:
+                    logger.info("AI capture_input matched ref=%s input=%s", msg_ref, capture_input)
 
             if (
                 settings.switch_reply_to_discord
@@ -845,6 +848,7 @@ class AIService:
                     decision = LLMDecision.model_validate_json(job["decision"])
                 else:
                     raw_answer = await ask_switch(settings,row.question,task_context=plan.model_dump(mode='json')) if plan else await ask_switch(settings,row.question)
+                    logger.info("AI raw LLM response ref=%s: %s", msg_ref, raw_answer)
                     decision = parse_llm_decision(raw_answer)
                     decision=chat_decision(decision)
                     if not capture_input: decision=protect_extraction(decision,row.question,settings.automatic_commitments_enabled)
@@ -994,7 +998,13 @@ class AIService:
                 if capture_input and decision.commitments:
                     if not stored_counts or stored_counts.get('commitments',0)<1 or stored_counts.get('memories',0)<1:
                         raise HTTPException(503,'Commitment storage was not acknowledged')
-                    final_answer='Task saved in Supabase. Search indexing is pending.'
+                    is_meeting = any(re.search(r'\bmeeting\b', c.description, re.I) for c in decision.commitments)
+                    if is_meeting:
+                        c = decision.commitments[0]
+                        time_info = f" for {c.due_at}" if c.due_at else ""
+                        final_answer = f"📅 Meeting scheduled: {c.description}{time_info}. Automatic reminder will be sent to the room before the meeting starts."
+                    else:
+                        final_answer='Task saved in Supabase. Search indexing is pending.'
 
             preserve_profile_sources = bool(settings.person_profiles_enabled and profile_source_ids)
             final_answer = clean_reply_text(final_answer, preserve_sources=preserve_profile_sources)
@@ -1041,11 +1051,18 @@ class AIService:
                     should_reply = False
 
             if should_reply:
+                is_meeting = bool(decision.commitments and any(re.search(r'\bmeeting\b', c.description, re.I) for c in decision.commitments))
+                meeting_reply = (
+                    f"📅 Meeting scheduled: {decision.commitments[0].description}"
+                    + (f" (Time: {decision.commitments[0].due_at})" if decision.commitments[0].due_at else "")
+                    + ". Automatic reminder will be sent to the room before the meeting starts."
+                ) if is_meeting else None
+
                 reply_body = (
                     final_answer
                     if staged_for_confirmation or (capture_input and decision.commitments)
                     else (
-                        "Data has been saved into the database."
+                        (meeting_reply or "Data has been saved into the database.")
                         if decision.action == "store_only"
                         else final_answer
                     )

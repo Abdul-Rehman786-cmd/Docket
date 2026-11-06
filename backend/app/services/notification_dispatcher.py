@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import re
 from datetime import datetime,timedelta,timezone
 from app.models.reminders import NotificationFailure,NotificationEnvelope
 from app.services.reminder_planner import eligible,after_quiet_hours,utc
@@ -37,14 +38,21 @@ def reminder_template(context,settings):
     description=json.loads(message_text_for_log(task.description,settings,max_length=500))
     # Never forward mass/user mentions embedded in source text; no fabricated pings.
     description=' '.join(description.replace('@','＠').replace('<','‹').replace('>','›').split())
+    is_meeting = bool(re.search(r'\bmeeting\b', task.description, re.I))
+    if is_meeting:
+        label='Upcoming' if context.delivery.intention.kind=='upcoming' else 'Due / overdue'
+        return (f'🔔 Reminder: {label} meeting: {description}\nDeadline (UTC): {utc(task.due_at).isoformat()}\n'
+                f'[source:{task.message_id}] [reminder:{context.delivery.intention.occurrence_key}]')
     label='Upcoming' if context.delivery.intention.kind=='upcoming' else 'Due / overdue'
     return (f'{label} task: {description}\nDeadline (UTC): {utc(task.due_at).isoformat()}\n'
             f'[source:{task.message_id}] [reminder:{context.delivery.intention.occurrence_key}]')
 
 
 def reminder_notification(context,settings):
+    is_meeting = bool(re.search(r'\bmeeting\b', context.work.commitment.description, re.I))
+    thread = None if is_meeting else (context.work.thread_id if context.work.policy.delivery_mode=='source_thread' else None)
     return NotificationEnvelope(room_id=context.work.switch_room_id,body=reminder_template(context,settings),
-        thread_id=context.work.thread_id if context.work.policy.delivery_mode=='source_thread' else None)
+        thread_id=thread)
 
 
 class NotificationDispatcher:
