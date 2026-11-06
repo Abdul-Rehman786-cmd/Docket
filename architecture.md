@@ -595,6 +595,29 @@ The system supports seamless switching between remote Supabase (PostgreSQL with 
     - **Effective Size & Schema Overhead Protection**: SQLite requires ~172 KB base disk allocation for 10 tables and 30 indexes even when empty. When maximum space is configured below 256 KB, the enforcer and UI evaluate user payload data (`payload_bytes`) rather than empty schema page overhead to prevent accidental data deletion.
     - **Dual UI Metric Display**: Storage usage bar dynamically displays `Payload: X KB / Y KB (%) • Disk: Z KB` when small quotas are active, or total disk usage for standard megabyte/gigabyte quotas.
 
+### Meeting Reminders & Transactional Outbox Engine
+
+The system provides fully automated meeting scheduling, deadline tracking, and channel reminders operating under the transactional outbox pattern:
+
+- **Dual Async Loops in FastAPI Lifespan**:
+  - `ReminderWorker` runs inside the main FastAPI application lifecycle (`main.py`), executing two bounded concurrent loops ticking every 15 seconds:
+    1. **Planning Loop (`ReminderScheduler`)**: Scans stored commitments with future `due_at` and `approval_status='approved'`. When `meeting_time - lead_minutes <= now`, calculates a deterministic idempotency key (`uuid5(..., 'kind:ordinal')`) and inserts an outbox record with `status='pending'` into `reminder_deliveries`.
+    2. **Dispatch Loop (`NotificationDispatcher`)**: Claims pending deliveries using lease tokens (`status='sending'`, 2-minute lease window), verifies scope and quiet hours, formats the announcement (`🔔 Reminder: Upcoming meeting...`), relays the webhook to Switch, and acknowledges `status='sent'`.
+- **User-Configurable Lead Notice in Settings UI**:
+  - Web Viewer Settings panel (`/viewer`) allows users to toggle meeting reminders and configure the lead notice duration (e.g. `15` or `30` minutes, `1` or `2` hours, `1` day).
+  - Saved dynamically via `POST /viewer/reminders/configure` to `backend/.env` (`REMINDER_LEAD_MINUTES`, `REMINDER_LEAD_TIME`, `REMINDER_LEAD_UNIT`) and reflected immediately in room reminder policies.
+- **Natural Language & Timezone Parsing Grammar**:
+  - `commitment_chat_evidence.py` captures meeting requests (`set/schedule a meeting [for/with the title of <topic>] [at/on/for] <when>`, or bare times like `set a meeting 4:00 pm PKT`).
+  - `parse_natural_datetime` parses complex natural expressions, 12-hour/24-hour clocks, and common timezones (`PKT`, `EST`, `PST`, `UTC`, etc.), resolving deadlines to normalized UTC ISO-8601 strings.
+  - Automatically defaults omitted years to the current/upcoming occurrence rather than interrogating the user.
+- **Automatic Commitment Approval & Atomic Storage**:
+  - Direct meeting commands are authoritative: `_approve_supabase_commitments` and `sqlite_records.persist_extraction` automatically record meetings with `approval_status='approved'`, valid owner IDs, and UTC `due_at`, ensuring immediate reminder eligibility.
+- **Dual-Engine Outbox Support**:
+  - **SQLite**: Local relational tables `commitment_chat_policies` and `reminder_deliveries` handle outbox state natively with zero cloud dependencies.
+  - **Supabase**: `SupabaseReminderRepository` supports both PostgreSQL RPCs and resilient REST queries directly against `reminder_deliveries`, ensuring reminder delivery even before optional database triggers are applied.
+- **Reliable Switch Channel Dispatch**:
+  - `SwitchNotificationSink` dispatches reminders directly to room channels via Switch's `/ops/post_message` with automated fallback to room `/message`, preventing HTTP 400 rejection and relaying notifications into Discord.
+
 ## 9. Multiple servers (later)
 
 - One agent, one WebSocket, many rooms.
