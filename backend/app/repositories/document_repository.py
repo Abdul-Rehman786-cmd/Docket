@@ -5,18 +5,12 @@ commits document/version/chunks/idempotency; finish atomically publishes a fully
 embedded latest version. No message jobs or commitment records are accessed.
 """
 
-from typing import Protocol
 
 import httpx
 from fastapi import HTTPException
 
 from app.core.http_clients import database_client
-from app.models.documents import DocumentScope
 from app.repositories.record_repository import _rest_url, _supabase_headers
-
-
-class DocumentRepository(Protocol):
-    async def call(self, scope: DocumentScope, operation: str, data: dict): ...
 
 
 class SupabaseDocumentRepository:

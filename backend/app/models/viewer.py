@@ -11,9 +11,9 @@ class ViewerAuthentication(BaseModel):
 
 
 class EnvVariablesPayload(BaseModel):
-    model_config = ConfigDict(extra="ignore", hide_input_in_errors=True)
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
-    variables: dict[str, str] = Field(default_factory=dict)
+    variables: dict[str, SecretStr] = Field(default_factory=dict, max_length=200, repr=False)
 
 
 class PruneByTimelinePayload(BaseModel):

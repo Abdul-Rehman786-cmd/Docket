@@ -1,8 +1,7 @@
-import asyncio
 from pathlib import Path
 import re
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket
+from fastapi import APIRouter, Depends, Request, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
 from app.models.viewer import (
     EnforceSqliteSpacePayload,
@@ -10,7 +9,8 @@ from app.models.viewer import (
     PruneByTimelinePayload,
     ReminderConfigPayload,
 )
-from app.services.env_service import OPTIONAL_KEYS, read_env_variables, write_env_variables
+from app.services.env_service import read_env_variables, save_viewer_settings, write_env_variables
+from app.core.security import require_admin_token
 from app.services.migration_service import migrate_supabase_to_sqlite
 from app.services.storage_service import (
     configure_and_enforce_sqlite_space,
@@ -66,42 +66,18 @@ async def viewer_socket(websocket: WebSocket):
     await serve_viewer(websocket)
 
 
-@router.get("/viewer/env")
-def get_env_variables(request: Request) -> JSONResponse:
-    headers = viewer_headers(request)
-    headers["Cache-Control"] = "no-store, private"
-    return JSONResponse(
-        content={"variables": read_env_variables(), "optional_keys": OPTIONAL_KEYS},
-        headers=headers,
-    )
+@router.get("/viewer/env", dependencies=[Depends(require_admin_token)])
+def credential_settings(request: Request) -> JSONResponse:
+    return JSONResponse(content=read_env_variables(), headers=viewer_headers(request))
 
 
-@router.post("/viewer/env")
-def update_env_variables(payload: EnvVariablesPayload, request: Request) -> JSONResponse:
-    write_env_variables(payload.variables)
-    if any(k in payload.variables for k in ("STORAGE_RETENTION_VALUE", "STORAGE_RETENTION_UNIT")):
-        worker = getattr(request.app.state, "retention_worker", None)
-        if worker:
-            asyncio.create_task(worker.process_once())
-    if any(k in payload.variables for k in ("REMINDERS_ENABLED", "REMINDER_LEAD_MINUTES", "REMINDER_LEAD_TIME", "REMINDER_LEAD_UNIT")):
-        from app.services.reminder_settings_service import configure_reminders
-        enabled = payload.variables.get("REMINDERS_ENABLED", "false").lower() == "true"
-        time_val = int(payload.variables.get("REMINDER_LEAD_TIME", "30") or "30")
-        unit_val = payload.variables.get("REMINDER_LEAD_UNIT", "minutes")
-        mins = int(payload.variables.get("REMINDER_LEAD_MINUTES", str(time_val)) or str(time_val))
-        asyncio.create_task(configure_reminders(
-            enabled=enabled,
-            lead_time=time_val,
-            lead_unit=unit_val,
-            lead_minutes=mins,
-            delivery_enabled=enabled,
-        ))
-    headers = viewer_headers(request)
-    headers["Cache-Control"] = "no-store, private"
-    return JSONResponse(content={"status": "ok"}, headers=headers)
+@router.post("/viewer/env", dependencies=[Depends(require_admin_token)])
+def update_credential_settings(payload: EnvVariablesPayload, request: Request) -> JSONResponse:
+    save_viewer_settings(payload.variables)
+    return JSONResponse(content={"status": "ok"}, headers=viewer_headers(request))
 
 
-@router.get("/viewer/reminders/status")
+@router.get("/viewer/reminders/status", dependencies=[Depends(require_admin_token)])
 def viewer_reminders_status(request: Request) -> JSONResponse:
     from app.core.config import get_settings
     settings = get_settings()
@@ -119,7 +95,7 @@ def viewer_reminders_status(request: Request) -> JSONResponse:
     )
 
 
-@router.post("/viewer/reminders/configure")
+@router.post("/viewer/reminders/configure", dependencies=[Depends(require_admin_token)])
 async def viewer_reminders_configure(payload: ReminderConfigPayload, request: Request) -> JSONResponse:
     from app.services.reminder_settings_service import configure_reminders
     res = await configure_reminders(
@@ -134,7 +110,7 @@ async def viewer_reminders_configure(payload: ReminderConfigPayload, request: Re
     return JSONResponse(content=res, headers=headers)
 
 
-@router.post("/viewer/migrate-db")
+@router.post("/viewer/migrate-db", dependencies=[Depends(require_admin_token)])
 async def migrate_database(request: Request) -> JSONResponse:
     res = await migrate_supabase_to_sqlite()
     headers = viewer_headers(request)
@@ -142,7 +118,7 @@ async def migrate_database(request: Request) -> JSONResponse:
     return JSONResponse(content=res, headers=headers)
 
 
-@router.get("/viewer/storage/status")
+@router.get("/viewer/storage/status", dependencies=[Depends(require_admin_token)])
 def viewer_storage_status(request: Request) -> JSONResponse:
     res = get_storage_status()
     headers = viewer_headers(request)
@@ -150,7 +126,7 @@ def viewer_storage_status(request: Request) -> JSONResponse:
     return JSONResponse(content=res, headers=headers)
 
 
-@router.post("/viewer/storage/prune-timeline")
+@router.post("/viewer/storage/prune-timeline", dependencies=[Depends(require_admin_token)])
 async def viewer_prune_timeline(payload: PruneByTimelinePayload, request: Request) -> JSONResponse:
     write_env_variables(
         {
@@ -169,7 +145,7 @@ async def viewer_prune_timeline(payload: PruneByTimelinePayload, request: Reques
     return JSONResponse(content=res, headers=headers)
 
 
-@router.post("/viewer/storage/enforce-space")
+@router.post("/viewer/storage/enforce-space", dependencies=[Depends(require_admin_token)])
 def viewer_enforce_sqlite_space(payload: EnforceSqliteSpacePayload, request: Request) -> JSONResponse:
     res = configure_and_enforce_sqlite_space(
         max_space_value=payload.max_space_value,

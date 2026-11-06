@@ -21,7 +21,7 @@ from app.models.commitment_chat import ChatPlan, ChatOutcome, TaskChangeProposal
 from app.models.commitments import CommitmentError
 from app.repositories.commitment_repository import SupabaseCommitmentRepository
 from app.services.commitment_chat_service import CommitmentChatService
-from app.services.commitment_chat_evidence import update_intent, protect_extraction
+from app.services.commitment_chat_evidence import protect_extraction
 from app.services.commitment_chat_evidence import strip_chat_extraction, commitment_intent, own_request_kind
 from app.services.commitment_chat_evidence import personal_commitment
 from app.core.chat_participation import explicit_agent_mention
@@ -332,6 +332,56 @@ async def ask_switch(settings: Settings, question: str, *, synthesis: bool = Fal
                 body = payload.get("body")
                 if isinstance(body, str) and body.strip():
                     return body
+
+
+def meeting_confirmation(commitments, settings, *, capture=False):
+    """Preserve capture and general-reply wording using one timezone conversion."""
+    if not commitments or not any(re.search(r'\bmeeting\b', item.description, re.I) for item in commitments):
+        return None
+    first = commitments[0]
+    time_info = ""
+    if first.due_at:
+        time_info = f" for {first.due_at}" if capture else f" (Time: {first.due_at})"
+        try:
+            dt = datetime.fromisoformat(str(first.due_at).replace('Z', '+00:00'))
+            if settings.commitment_timezone and settings.commitment_timezone != 'UTC':
+                from zoneinfo import ZoneInfo
+                local = dt.astimezone(ZoneInfo(settings.commitment_timezone))
+                local_time = local.strftime('%Y-%m-%d %I:%M %p %Z')
+                utc_time = dt.strftime('%H:%M')
+                time_info = (f" for {local_time} ({utc_time} UTC)" if capture
+                             else f" (Time: {local_time} / {utc_time} UTC)")
+        except Exception:
+            # Preserve the delivered deadline if its format/timezone cannot be converted.
+            pass
+    return (f"📅 Meeting scheduled: {first.description}{time_info}. "
+            "Automatic reminder will be sent to the room before the meeting starts.")
+
+
+def normalize_chat_decision(parsed, settings, source_meta, question, capture_input, plan):
+    parsed = filter_profile_decision(parsed, settings, source_meta, question)
+    if not source_meta: return parsed
+    if capture_input:
+        return capture_decision(parsed,question,source_meta,settings)
+    request_kind=own_request_kind(question)
+    # An owner-only read must never fall through to room-wide RAG,
+    # even if the model proposes query_only or identity is missing.
+    if request_kind=='list' and source_meta.get('switch_message_id'):
+        return LLMDecision(action='none',task_changes=[TaskChangeProposal(action='list',
+            source_message_id=source_meta['switch_message_id'],evidence=question.strip(),
+            clarification_required=False)])
+    # Legacy runtime extraction is still an untrusted proposal. The
+    # same exact-evidence creation gate validates it before writing.
+    if (plan and len(parsed.commitments)==1 and not parsed.task_changes and
+        not parsed.decisions and not parsed.memories and parsed.action=='store_only'):
+        item=parsed.commitments[0]
+        return LLMDecision(action='none',task_changes=[TaskChangeProposal(action='create',
+            source_message_id=plan.source.switch_message_id,evidence=plan.source.body.strip(),
+            clarification_required=False,description=item.description,due_at=item.due_at)])
+    filtered=strip_chat_extraction(parsed)
+    if request_kind and not (filtered.decisions or filtered.memories or filtered.profile_facts or filtered.task_changes):
+        return LLMDecision(action='none')
+    return filtered
 
 
 class AIService:
@@ -760,6 +810,185 @@ class AIService:
                 # Do not retain the previous job while idle on queue.get().
                 del scope, row, settings, meta
 
+    async def _handle_document_request(self, scope, row, settings, source_meta, job, is_addressed):
+        msg_ref = row.source_message_ref or "direct-question"
+        msg_timestamp = source_meta.get("timestamp_ms")
+        async def document_synthesis(prompt):
+            safe_prompt = json.loads(message_text_for_log(prompt, settings, max_length=40000))
+            raw = await ask_switch(settings, safe_prompt, synthesis=True)
+            try:
+                fence = JSON_FENCE.fullmatch(raw.strip())
+                parsed = json.loads(fence[1] if fence else raw) if len(raw) <= 16000 else None
+            except (ValueError, TypeError):
+                return None
+            if isinstance(parsed, dict) and isinstance(parsed.get('answer'), str):
+                parsed['answer'] = json.loads(message_text_for_log(parsed['answer'], settings, max_length=1000))
+            return parsed
+        document_answer = await self.document_chat.handle(settings, source_meta, row.question, document_synthesis,
+                                                          continuation_only=not is_addressed)
+        if document_answer is not None:
+            logger.info('document stage=chat_reply ref=%s adapter_verified=%s', msg_ref,
+                        bool(source_meta.get('adapter_verified')))
+            safe_answer = clean_reply_text(json.loads(message_text_for_log(document_answer, settings)))
+            if job:
+                await self.journal.finish(msg_ref)
+            if settings.switch_reply_to_discord:
+                await self._send_discord_reply(settings, source_meta['room_id'], safe_answer,
+                    thread_id=None, timestamp_ms=msg_timestamp,
+                    switch_message_id=source_meta.get('switch_message_id'))
+            self.repository.update(scope, row.request_id, status='answered', answer=safe_answer)
+            feature_event('retrieval', 'succeeded', reference=row.source_message_ref or row.request_id)
+            return True
+        return False
+
+    async def _store_decision(self, row, settings, decision, source_meta, capture_input, job, is_addressed):
+        msg_ref = row.source_message_ref or "direct-question"
+        stored_counts = None
+        staged_for_confirmation = False
+        final_answer = None
+        if source_meta is None and len(settings.allowed_switch_rooms) != 1:
+            raise HTTPException(422, "Select a source message to identify the storage room")
+        default_room = sorted(settings.allowed_switch_rooms)[0]
+        meta = source_meta or {
+            "room_id": default_room,
+            "switch_message_id": f"ai-req-{row.request_id}",
+            "author_name": "Viewer user",
+            "occurred_at": row.created_at,
+        }
+        if not meta.get("switch_message_id"):
+            raise HTTPException(422, "Source evidence is no longer available")
+        if capture_input and decision.commitments:
+            meta={**meta,'commitment_capture':True,'commitment_deadline_text':capture_input[1]}
+
+        if is_addressed and source_meta and source_meta.get("origin") == "discord" and not (capture_input and decision.commitments):
+            draft_key = confirmation_key(settings, meta['room_id'], meta.get('thread_id'), meta.get('switch_author_id'))
+            if draft_key is None:
+                raise HTTPException(422, 'Confirmation source identity is unavailable')
+            occurred = meta["occurred_at"].isoformat() if isinstance(meta["occurred_at"], datetime) else str(meta["occurred_at"])
+            await self.pending_confirmations.stage(
+                draft_key=draft_key,
+                tenant_id=settings.switch_tenant_id,
+                room_id=meta["room_id"],
+                thread_id=meta.get("thread_id"),
+                switch_message_id=meta["switch_message_id"],
+                author_name=meta["author_name"],
+                body=row.question,
+                occurred_at=occurred,
+                decision=decision,
+                source_metadata=meta,
+            )
+            staged_for_confirmation = True
+            feature_event('confirmation','staged',reference=row.source_message_ref or row.request_id,action=decision.action)
+            final_answer = format_draft_preview(decision)
+            logger.info("Draft extraction staged for confirmation draft_key=%s ref=%s", draft_key, msg_ref)
+        else:
+            stored_counts = await store_ai_memory(
+                settings,
+                tenant_id=settings.switch_tenant_id,
+                switch_room_id=meta["room_id"],
+                switch_message_id=meta["switch_message_id"],
+                author_name=meta["author_name"],
+                body=row.question,
+                occurred_at=meta["occurred_at"],
+                decision=decision,
+                source_metadata=meta,
+            )
+            if job:
+                await self.journal.stored(msg_ref, stored_counts)
+            feature_event('storage','succeeded',reference=row.source_message_ref or row.request_id,**stored_counts)
+            logger.info(
+                "AI database store complete ref=%s request_id=%s action=%s stored=%s",
+                msg_ref,
+                row.request_id,
+                decision.action,
+                json.dumps(stored_counts, sort_keys=True),
+            )
+
+        return stored_counts, staged_for_confirmation, final_answer
+
+    async def _answer_from_memory(self, row, settings, decision, source_meta, stored_counts, profile_question):
+        msg_ref = row.source_message_ref or "direct-question"
+        profile_source_ids = set()
+        msg_timestamp = source_meta.get("timestamp_ms") if source_meta else None
+        if (
+            source_meta
+            and source_meta.get("origin") == "discord"
+            and self.is_message_older_than_last_reply(msg_timestamp)
+        ):
+            logger.info(
+                "AI skipped database query/synthesis for older message ref=%s timestamp_ms=%s last_replied_ms=%s",
+                msg_ref,
+                msg_timestamp,
+                self.reply_state.timestamp_ms,
+            )
+            final_answer = "Skipped response for older message."
+        elif profile_question:
+            final_answer, profile_source_ids = await answer_personal_profile(settings, source_meta, profile_question)
+        else:
+            db_context = await query_team_memory(
+                settings,
+                search_query=decision.search_query or row.question,
+                switch_room_id=source_meta.get("room_id") if source_meta else None,
+            )
+            logger.info(
+                "AI database query complete ref=%s request_id=%s action=%s matched=%s",
+                msg_ref,
+                row.request_id,
+                decision.action,
+                json.dumps({k: len(v) for k, v in db_context.items()}, sort_keys=True),
+            )
+            synthesis_prompt = build_context_synthesis_prompt(
+                row.question, db_context, stored_counts=stored_counts
+            )
+            profile_source_ids = {r['message_id'] for r in db_context.get('profile_reports', [])}
+            synthesized = await ask_switch(settings, synthesis_prompt, synthesis=True)
+            final_answer = _extract_plain_answer(synthesized)
+        return final_answer, profile_source_ids
+
+    async def _deliver_answer(self, row, settings, decision, source_meta, final_answer, *,
+                              is_addressed, staged_for_confirmation, capture_input, preserve_profile_sources):
+        msg_ref = row.source_message_ref or "direct-question"
+        should_reply = (
+            settings.switch_reply_to_discord
+            and is_addressed
+            and source_meta
+            and source_meta.get("origin") == "discord"
+            and source_meta.get("room_id")
+            and bool(final_answer and final_answer.strip())
+        )
+        if should_reply:
+            msg_timestamp = source_meta.get("timestamp_ms")
+            if self.is_message_older_than_last_reply(msg_timestamp):
+                logger.info(
+                    "AI skipped reply to older message ref=%s timestamp_ms=%s last_replied_ms=%s",
+                    msg_ref,
+                    msg_timestamp,
+                    self.reply_state.timestamp_ms,
+                )
+                should_reply = False
+
+        if should_reply:
+            meeting_reply = meeting_confirmation(decision.commitments, settings)
+
+            reply_body = (
+                final_answer
+                if staged_for_confirmation or (capture_input and decision.commitments)
+                else (
+                    (meeting_reply or "Data has been saved into the database.")
+                    if decision.action == "store_only"
+                    else final_answer
+                )
+            )
+            reply_body = clean_reply_text(reply_body, preserve_sources=preserve_profile_sources)
+            await self._send_discord_reply(
+                settings,
+                source_meta["room_id"],
+                reply_body,
+                source_meta.get("thread_id"),
+                source_meta.get("timestamp_ms"),
+                source_meta.get("switch_message_id"),
+            )
+
     async def _run(self, scope, row, settings: Settings, *, source_meta: dict | None = None):
         msg_ref = row.source_message_ref or "direct-question"
         chat_outcome=None
@@ -788,7 +1017,7 @@ class AIService:
                 and source_meta.get('switch_author_id') and source_meta.get('room_id') in settings.allowed_switch_rooms):
                 capture_input=personal_commitment(row.question,source_meta)
                 if capture_input:
-                    logger.info("AI capture_input matched ref=%s input=%s", msg_ref, capture_input)
+                    logger.info("AI capture_input matched ref=%s", msg_ref)
 
             if (
                 settings.switch_reply_to_discord
@@ -812,31 +1041,7 @@ class AIService:
                 if ((is_addressed or document_followup) and source_meta and source_meta.get('origin') == 'discord'
                     and not capture_input and not profile_question and not own_request_kind(row.question)
                     and not self.is_message_older_than_last_reply(msg_timestamp)):
-                    async def document_synthesis(prompt):
-                        safe_prompt = json.loads(message_text_for_log(prompt, settings, max_length=40000))
-                        raw = await ask_switch(settings, safe_prompt, synthesis=True)
-                        try:
-                            fence = JSON_FENCE.fullmatch(raw.strip())
-                            parsed = json.loads(fence[1] if fence else raw) if len(raw) <= 16000 else None
-                        except (ValueError, TypeError):
-                            return None
-                        if isinstance(parsed, dict) and isinstance(parsed.get('answer'), str):
-                            parsed['answer'] = json.loads(message_text_for_log(parsed['answer'], settings, max_length=1000))
-                        return parsed
-                    document_answer = await self.document_chat.handle(settings, source_meta, row.question, document_synthesis,
-                                                                      continuation_only=not is_addressed)
-                    if document_answer is not None:
-                        logger.info('document stage=chat_reply ref=%s adapter_verified=%s', msg_ref,
-                                    bool(source_meta.get('adapter_verified')))
-                        safe_answer = clean_reply_text(json.loads(message_text_for_log(document_answer, settings)))
-                        if job:
-                            await self.journal.finish(msg_ref)
-                        if settings.switch_reply_to_discord:
-                            await self._send_discord_reply(settings, source_meta['room_id'], safe_answer,
-                                thread_id=None, timestamp_ms=msg_timestamp,
-                                switch_message_id=source_meta.get('switch_message_id'))
-                        self.repository.update(scope, row.request_id, status='answered', answer=safe_answer)
-                        feature_event('retrieval', 'succeeded', reference=row.source_message_ref or row.request_id)
+                    if await self._handle_document_request(scope, row, settings, source_meta, job, is_addressed):
                         return
                 chat=CommitmentChatService(SupabaseCommitmentRepository(settings))
                 plan=ChatPlan.model_validate_json(job['chat_plan']) if job and job.get('chat_plan') else None
@@ -846,30 +1051,6 @@ class AIService:
                 if job and not job['decision'] and plan is None and not capture_input:
                     plan=await chat.prepare_open(settings,source_meta,row.question)
                     if plan is not None: await self.journal.chat_prepared(msg_ref,plan)
-                def chat_decision(parsed):
-                    parsed = filter_profile_decision(parsed, settings, source_meta, row.question)
-                    if not source_meta: return parsed
-                    if capture_input:
-                        return capture_decision(parsed,row.question,source_meta,settings)
-                    request_kind=own_request_kind(row.question)
-                    # An owner-only read must never fall through to room-wide RAG,
-                    # even if the model proposes query_only or identity is missing.
-                    if request_kind=='list' and source_meta.get('switch_message_id'):
-                        return LLMDecision(action='none',task_changes=[TaskChangeProposal(action='list',
-                            source_message_id=source_meta['switch_message_id'],evidence=row.question.strip(),
-                            clarification_required=False)])
-                    # Legacy runtime extraction is still an untrusted proposal. The
-                    # same exact-evidence creation gate validates it before writing.
-                    if (plan and len(parsed.commitments)==1 and not parsed.task_changes and
-                        not parsed.decisions and not parsed.memories and parsed.action=='store_only'):
-                        item=parsed.commitments[0]
-                        return LLMDecision(action='none',task_changes=[TaskChangeProposal(action='create',
-                            source_message_id=plan.source.switch_message_id,evidence=plan.source.body.strip(),
-                            clarification_required=False,description=item.description,due_at=item.due_at)])
-                    filtered=strip_chat_extraction(parsed)
-                    if request_kind and not (filtered.decisions or filtered.memories or filtered.profile_facts or filtered.task_changes):
-                        return LLMDecision(action='none')
-                    return filtered
                 if profile_question:
                     # Original-message intent overrides model output and old saved
                     # routing. Personal questions never enter room-wide retrieval.
@@ -880,14 +1061,14 @@ class AIService:
                     decision = LLMDecision.model_validate_json(job["decision"])
                 else:
                     raw_answer = await ask_switch(settings,row.question,task_context=plan.model_dump(mode='json')) if plan else await ask_switch(settings,row.question)
-                    logger.info("AI raw LLM response ref=%s: %s", msg_ref, raw_answer)
+                    logger.info("AI response received ref=%s characters=%d", msg_ref, len(raw_answer))
                     decision = parse_llm_decision(raw_answer)
-                    decision=chat_decision(decision)
+                    decision=normalize_chat_decision(decision, settings, source_meta, row.question, capture_input, plan)
                     if not capture_input: decision=protect_extraction(decision,row.question,settings.automatic_commitments_enabled)
                     if job:
                         decision = redact_decision(decision, settings)
                         await self.journal.extracted(msg_ref, decision)
-                decision=chat_decision(decision)
+                decision=normalize_chat_decision(decision, settings, source_meta, row.question, capture_input, plan)
                 if not capture_input: decision=protect_extraction(decision,row.question,settings.automatic_commitments_enabled)
                 feature_event('ai','prepared',reference=row.source_message_ref or row.request_id,action=decision.action,
                               commitments=len(decision.commitments),decisions=len(decision.decisions),memories=len(decision.memories),proposed=len(decision.task_changes))
@@ -910,107 +1091,16 @@ class AIService:
                 staged_for_confirmation = False
 
                 if decision.action in ("store_only", "store_and_query") and stored_counts is None:
-                    if source_meta is None and len(settings.allowed_switch_rooms) != 1:
-                        raise HTTPException(422, "Select a source message to identify the storage room")
-                    default_room = sorted(settings.allowed_switch_rooms)[0]
-                    meta = source_meta or {
-                        "room_id": default_room,
-                        "switch_message_id": f"ai-req-{row.request_id}",
-                        "author_name": "Viewer user",
-                        "occurred_at": row.created_at,
-                    }
-                    if not meta.get("switch_message_id"):
-                        raise HTTPException(422, "Source evidence is no longer available")
-                    if capture_input and decision.commitments:
-                        meta={**meta,'commitment_capture':True,'commitment_deadline_text':capture_input[1]}
-
-                    is_addressed = bool(
-                        source_meta
-                        and (
-                            source_meta.get("addressed")
-                            or is_bot_mentioned(source_meta.get("body") or row.question, settings)
-                        )
+                    stored_counts, staged_for_confirmation, draft_answer = await self._store_decision(
+                        row, settings, decision, source_meta, capture_input, job, is_addressed,
                     )
-
-                    if is_addressed and source_meta and source_meta.get("origin") == "discord" and not (capture_input and decision.commitments):
-                        draft_key = confirmation_key(settings, meta['room_id'], meta.get('thread_id'), meta.get('switch_author_id'))
-                        if draft_key is None:
-                            raise HTTPException(422, 'Confirmation source identity is unavailable')
-                        occurred = meta["occurred_at"].isoformat() if isinstance(meta["occurred_at"], datetime) else str(meta["occurred_at"])
-                        await self.pending_confirmations.stage(
-                            draft_key=draft_key,
-                            tenant_id=settings.switch_tenant_id,
-                            room_id=meta["room_id"],
-                            thread_id=meta.get("thread_id"),
-                            switch_message_id=meta["switch_message_id"],
-                            author_name=meta["author_name"],
-                            body=row.question,
-                            occurred_at=occurred,
-                            decision=decision,
-                            source_metadata=meta,
-                        )
-                        staged_for_confirmation = True
-                        feature_event('confirmation','staged',reference=row.source_message_ref or row.request_id,action=decision.action)
-                        final_answer = format_draft_preview(decision)
-                        logger.info("Draft extraction staged for confirmation draft_key=%s ref=%s", draft_key, msg_ref)
-                    else:
-                        stored_counts = await store_ai_memory(
-                            settings,
-                            tenant_id=settings.switch_tenant_id,
-                            switch_room_id=meta["room_id"],
-                            switch_message_id=meta["switch_message_id"],
-                            author_name=meta["author_name"],
-                            body=row.question,
-                            occurred_at=meta["occurred_at"],
-                            decision=decision,
-                            source_metadata=meta,
-                        )
-                        if job:
-                            await self.journal.stored(msg_ref, stored_counts)
-                        feature_event('storage','succeeded',reference=row.source_message_ref or row.request_id,**stored_counts)
-                        logger.info(
-                            "AI database store complete ref=%s request_id=%s action=%s stored=%s",
-                            msg_ref,
-                            row.request_id,
-                            decision.action,
-                            json.dumps(stored_counts, sort_keys=True),
-                        )
+                    if staged_for_confirmation:
+                        final_answer = draft_answer
 
                 if decision.action in ("query_only", "store_and_query"):
-                    msg_timestamp = source_meta.get("timestamp_ms") if source_meta else None
-                    if (
-                        source_meta
-                        and source_meta.get("origin") == "discord"
-                        and self.is_message_older_than_last_reply(msg_timestamp)
-                    ):
-                        logger.info(
-                            "AI skipped database query/synthesis for older message ref=%s timestamp_ms=%s last_replied_ms=%s",
-                            msg_ref,
-                            msg_timestamp,
-                            self.reply_state.timestamp_ms,
-                        )
-                        final_answer = "Skipped response for older message."
-                    elif profile_question:
-                        final_answer, profile_source_ids = await answer_personal_profile(settings, source_meta, profile_question)
-                    else:
-                        db_context = await query_team_memory(
-                            settings,
-                            search_query=decision.search_query or row.question,
-                            switch_room_id=source_meta.get("room_id") if source_meta else None,
-                        )
-                        logger.info(
-                            "AI database query complete ref=%s request_id=%s action=%s matched=%s",
-                            msg_ref,
-                            row.request_id,
-                            decision.action,
-                            json.dumps({k: len(v) for k, v in db_context.items()}, sort_keys=True),
-                        )
-                        synthesis_prompt = build_context_synthesis_prompt(
-                            row.question, db_context, stored_counts=stored_counts
-                        )
-                        profile_source_ids = {r['message_id'] for r in db_context.get('profile_reports', [])}
-                        synthesized = await ask_switch(settings, synthesis_prompt, synthesis=True)
-                        final_answer = _extract_plain_answer(synthesized)
+                    final_answer, profile_source_ids = await self._answer_from_memory(
+                        row, settings, decision, source_meta, stored_counts, profile_question,
+                    )
                 else:
                     if not staged_for_confirmation:
                         final_answer = (decision.answer or "").strip()
@@ -1030,25 +1120,8 @@ class AIService:
                 if capture_input and decision.commitments:
                     if not stored_counts or stored_counts.get('commitments',0)<1 or stored_counts.get('memories',0)<1:
                         raise HTTPException(503,'Commitment storage was not acknowledged')
-                    is_meeting = any(re.search(r'\bmeeting\b', c.description, re.I) for c in decision.commitments)
-                    if is_meeting:
-                        c = decision.commitments[0]
-                        time_info = ""
-                        if c.due_at:
-                            try:
-                                dt = datetime.fromisoformat(str(c.due_at).replace('Z', '+00:00'))
-                                if settings.commitment_timezone and settings.commitment_timezone != 'UTC':
-                                    from zoneinfo import ZoneInfo
-                                    loc_dt = dt.astimezone(ZoneInfo(settings.commitment_timezone))
-                                    tz_code = loc_dt.strftime('%Z')
-                                    time_info = f" for {loc_dt.strftime('%Y-%m-%d %I:%M %p')} {tz_code} ({dt.strftime('%H:%M')} UTC)"
-                                else:
-                                    time_info = f" for {c.due_at}"
-                            except Exception:
-                                time_info = f" for {c.due_at}"
-                        final_answer = f"📅 Meeting scheduled: {c.description}{time_info}. Automatic reminder will be sent to the room before the meeting starts."
-                    else:
-                        final_answer='Task saved in Supabase. Search indexing is pending.'
+                    final_answer = (meeting_confirmation(decision.commitments, settings, capture=True)
+                                    or 'Task saved in Supabase. Search indexing is pending.')
 
             preserve_profile_sources = bool(settings.person_profiles_enabled and profile_source_ids)
             final_answer = clean_reply_text(final_answer, preserve_sources=preserve_profile_sources)
@@ -1068,71 +1141,11 @@ class AIService:
                 await self.journal.finish(msg_ref)
                 feature_event('ingestion','succeeded',reference=row.source_message_ref)
             # Reply pipeline: Discord -> Switch -> FastAPI -> Switch -> Discord
-            is_addressed = bool(
-                source_meta
-                and (
-                    source_meta.get("addressed")
-                    or is_bot_mentioned(source_meta.get("body") or row.question, settings)
-                )
+            await self._deliver_answer(
+                row, settings, decision, source_meta, final_answer,
+                is_addressed=is_addressed, staged_for_confirmation=staged_for_confirmation,
+                capture_input=capture_input, preserve_profile_sources=preserve_profile_sources,
             )
-            should_reply = (
-                settings.switch_reply_to_discord
-                and is_addressed
-                and source_meta
-                and source_meta.get("origin") == "discord"
-                and source_meta.get("room_id")
-                and bool(final_answer and final_answer.strip())
-            )
-            if should_reply:
-                msg_timestamp = source_meta.get("timestamp_ms")
-                if self.is_message_older_than_last_reply(msg_timestamp):
-                    logger.info(
-                        "AI skipped reply to older message ref=%s timestamp_ms=%s last_replied_ms=%s",
-                        msg_ref,
-                        msg_timestamp,
-                        self.reply_state.timestamp_ms,
-                    )
-                    should_reply = False
-
-            if should_reply:
-                is_meeting = bool(decision.commitments and any(re.search(r'\bmeeting\b', c.description, re.I) for c in decision.commitments))
-                meeting_time_str = ""
-                if is_meeting and decision.commitments[0].due_at:
-                    c_due = decision.commitments[0].due_at
-                    try:
-                        dt = datetime.fromisoformat(str(c_due).replace('Z', '+00:00'))
-                        if settings.commitment_timezone and settings.commitment_timezone != 'UTC':
-                            from zoneinfo import ZoneInfo
-                            loc_dt = dt.astimezone(ZoneInfo(settings.commitment_timezone))
-                            tz_code = loc_dt.strftime('%Z')
-                            meeting_time_str = f" (Time: {loc_dt.strftime('%Y-%m-%d %I:%M %p')} {tz_code} / {dt.strftime('%H:%M')} UTC)"
-                        else:
-                            meeting_time_str = f" (Time: {c_due})"
-                    except Exception:
-                        meeting_time_str = f" (Time: {c_due})"
-
-                meeting_reply = (
-                    f"📅 Meeting scheduled: {decision.commitments[0].description}{meeting_time_str}. Automatic reminder will be sent to the room before the meeting starts."
-                ) if is_meeting else None
-
-                reply_body = (
-                    final_answer
-                    if staged_for_confirmation or (capture_input and decision.commitments)
-                    else (
-                        (meeting_reply or "Data has been saved into the database.")
-                        if decision.action == "store_only"
-                        else final_answer
-                    )
-                )
-                reply_body = clean_reply_text(reply_body, preserve_sources=preserve_profile_sources)
-                await self._send_discord_reply(
-                    settings,
-                    source_meta["room_id"],
-                    reply_body,
-                    source_meta.get("thread_id"),
-                    source_meta.get("timestamp_ms"),
-                    source_meta.get("switch_message_id"),
-                )
             self.repository.update(
                 scope,
                 row.request_id,

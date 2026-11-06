@@ -2,11 +2,14 @@
 import { PGlite } from '@electric-sql/pglite';
 import { vector } from '@electric-sql/pglite-pgvector';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 
 const read = async path => readFile(new URL(path, import.meta.url), 'utf8');
 const db = new PGlite({ extensions: { vector, pgcrypto } });
 try {
+  const migrations = (await readdir(new URL('../migrations/', import.meta.url))).filter(name => name.endsWith('.sql'));
+  if (migrations.length !== 1 || migrations[0] !== '20261104000100_initial_schema.sql')
+    throw new Error('Fresh installation must have one consolidated PostgreSQL migration');
   await db.exec('CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role BYPASSRLS;');
   const baseline = await read('../migrations/20261104000100_initial_schema.sql');
   for (let pass = 1; pass <= 2; pass++) {

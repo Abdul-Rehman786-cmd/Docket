@@ -1,9 +1,15 @@
 from pathlib import Path
-from dotenv import dotenv_values
+from dotenv import dotenv_values, set_key
+from threading import RLock
+import re
+
+from fastapi import HTTPException
 from app.core.config import BACKEND_DIR, get_settings
 
 ENV_PATH = BACKEND_DIR / ".env"
 EXAMPLE_PATH = BACKEND_DIR / ".env.example"
+_ENV_LOCK = RLock()
+SECRET_KEY = re.compile(r"(?:KEY|TOKEN|SECRET|PASSWORD|DATABASE_URL|CONNECTION_STRING)", re.I)
 
 DEFAULT_KEYS = [
     "DATABASE_ENGINE",
@@ -39,30 +45,6 @@ DEFAULT_KEYS = [
     "REMINDER_LEAD_UNIT",
 ]
 
-OPTIONAL_KEYS = {
-    "DATABASE_ENGINE": "Engine · 'sqlite' or 'supabase'",
-    "SQLITE_DB_PATH": "Required for SQLite · user selected directory or file path (no default)",
-    "STORAGE_RETENTION_VALUE": "Optional · retention period number (e.g. 90)",
-    "STORAGE_RETENTION_UNIT": "Optional · 'hours', 'days', 'weeks', 'months', 'years', or 'indefinite'",
-    "SQLITE_MAX_SPACE_ENABLED": "Optional · 'true' or 'false' for SQLite auto-eviction",
-    "SQLITE_MAX_SPACE_VALUE": "Optional · max space limit for SQLite (e.g. 500)",
-    "SQLITE_MAX_SPACE_UNIT": "Optional · 'KB', 'MB', or 'GB'",
-    "REMINDERS_ENABLED": "Optional · 'true' or 'false' to enable reminder scheduling",
-    "REMINDER_DELIVERY_ENABLED": "Optional · 'true' or 'false' to enable dispatching reminders to rooms",
-    "REMINDER_LEAD_MINUTES": "Optional · total minutes before meeting/task to send reminder (e.g. 30)",
-    "REMINDER_LEAD_TIME": "Optional · lead time number (e.g. 30)",
-    "REMINDER_LEAD_UNIT": "Optional · 'minutes', 'hours', or 'days'",
-    "ADMIN_API_TOKEN": "Optional · for admin API endpoints",
-    "SWITCH_AI_TIMEOUT_SECONDS": "Optional · defaults to 180s",
-    "SWITCH_REPLY_TO_DISCORD": "Optional · defaults to true",
-    "SWITCH_AI_AGENT_NAME": "Optional · defaults to codex-discord",
-    "LOG_DISCORD_MESSAGES": "Optional · defaults to false",
-    "SWITCH_AI_SENDER_IDS": "Optional · extra agent IDs",
-    "GROK_API_KEY": "Optional · external model API key",
-    "SUPABASE_SERVICE_ROLE_KEY": "Optional · legacy alias for SUPABASE_SECRET_KEY",
-}
-
-
 def ensure_env_file() -> Path:
     if not ENV_PATH.exists():
         ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -73,33 +55,52 @@ def ensure_env_file() -> Path:
     return ENV_PATH
 
 
-def read_env_variables() -> dict[str, str]:
-    path = ensure_env_file()
-    raw = dotenv_values(path)
-    result: dict[str, str] = {}
-    # Prioritize keys that already exist in .env
-    for k, v in raw.items():
-        if k:
-            result[k] = v or ""
-    # Append any standard optional keys not yet defined
-    for k in DEFAULT_KEYS:
-        if k not in result:
-            result[k] = ""
-    return result
+def settings_keys():
+    """Expose only documented keys, never arbitrary entries from a real .env."""
+    examples = dotenv_values(EXAMPLE_PATH, interpolate=False) if EXAMPLE_PATH.exists() else {}
+    return list(dict.fromkeys([*DEFAULT_KEYS, *examples]))
+
+
+def read_env_variables():
+    """Return editable non-secret values and presence flags for write-only credentials."""
+    with _ENV_LOCK:
+        values = dotenv_values(ensure_env_file(), interpolate=False)
+    variables, credentials = {}, {}
+    for key in settings_keys():
+        value = values.get(key) or ""
+        if SECRET_KEY.search(key):
+            credentials[key] = bool(value.strip())
+        else:
+            variables[key] = value
+    return {"variables": variables, "credentials": credentials}
+
+
+def save_viewer_settings(variables):
+    allowed = set(settings_keys())
+    if any(key not in allowed for key in variables):
+        raise HTTPException(422, "Unsupported setting name")
+    updates = {}
+    for key, wrapped in variables.items():
+        value = wrapped.get_secret_value()
+        if len(value) > 16384 or any(char in value for char in ("\r", "\n", "\x00")):
+            raise HTTPException(422, "Setting values must be single-line text")
+        # Empty credential inputs mean retain the existing secret, not erase it.
+        if SECRET_KEY.search(key) and not value.strip():
+            continue
+        updates[key] = value
+    write_env_variables(updates)
 
 
 def write_env_variables(variables: dict[str, str]) -> None:
-    ensure_env_file()
-    existing = dotenv_values(ENV_PATH)
-    merged = {**existing, **variables}
-    lines = ["# Team Memory environment configuration", ""]
-    for k, v in merged.items():
-        if not k:
-            continue
-        val = str(v) if v is not None else ""
-        lines.append(f"{k}={val}")
-    temp_path = ENV_PATH.with_suffix(".tmp")
-    temp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    temp_path.replace(ENV_PATH)
-    get_settings.cache_clear()
-
+    """Quote values and atomically replace the local file after all updates succeed."""
+    with _ENV_LOCK:
+        path = ensure_env_file()
+        temp_path = path.with_suffix(".tmp")
+        try:
+            temp_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            for key, value in variables.items():
+                set_key(str(temp_path), key, str(value) if value is not None else "", quote_mode="auto")
+            temp_path.replace(path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        get_settings.cache_clear()

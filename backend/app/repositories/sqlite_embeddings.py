@@ -1,10 +1,10 @@
 import logging
 import sqlite3
-from uuid import UUID, uuid4
+from uuid import uuid4
 from fastapi import HTTPException
 import numpy as np
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings
 from app.repositories.sqlite_db import get_sqlite_connection, init_sqlite_db
 
 logger = logging.getLogger("uvicorn.error")

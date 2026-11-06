@@ -528,3 +528,20 @@ def test_viewer_source_request_never_posts_to_discord(ai_config, monkeypatch):
     assert rows[0].status == "answered"
     assert rows[0].db_action == "query_only"
     assert posted == []
+
+
+@pytest.mark.parametrize("capture,expected_time", [
+    (True, " for 2026-11-06 03:00 PM PKT (10:00 UTC)"),
+    (False, " (Time: 2026-11-06 03:00 PM PKT / 10:00 UTC)"),
+])
+def test_shared_meeting_confirmation_preserves_reply_wording(capture, expected_time):
+    from types import SimpleNamespace
+    settings = Settings(_env_file=None, commitment_timezone="Asia/Karachi")
+    tasks = [SimpleNamespace(description="Meeting: Demo", due_at="2026-11-06T10:00:00+00:00")]
+    assert ai_service.meeting_confirmation(tasks, settings, capture=capture) == (
+        f"📅 Meeting scheduled: Meeting: Demo{expected_time}. "
+        "Automatic reminder will be sent to the room before the meeting starts."
+    )
+    settings = settings.model_copy(update={"commitment_timezone": "invalid-zone"})
+    assert tasks[0].due_at in ai_service.meeting_confirmation(tasks, settings, capture=capture)
+    assert ai_service.meeting_confirmation([], settings, capture=capture) is None

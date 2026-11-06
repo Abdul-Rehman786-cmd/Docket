@@ -1,15 +1,10 @@
 """Integration seam for a future verified human session provider, closed by default."""
 
-from typing import Protocol
 
 from fastapi import HTTPException, Request
 
 from app.models.commitments import Actor
 from app.core.feature_logging import feature_event
-
-
-class ActorResolver(Protocol):
-    async def resolve(self, request: Request) -> Actor: ...
 
 
 async def resolve_commitment_actor(request: Request) -> Actor:

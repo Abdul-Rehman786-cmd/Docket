@@ -1,9 +1,8 @@
 """Reminder contracts. Policies share the existing backend-managed room policy store."""
-from datetime import datetime
 from typing import Literal
 from uuid import UUID
-from pydantic import AwareDatetime,BaseModel,ConfigDict,Field,model_validator
-from app.models.commitments import CommitmentState,Scope,SubjectId
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from app.models.commitments import CommitmentState, SubjectId
 
 
 class ReminderPolicy(BaseModel):

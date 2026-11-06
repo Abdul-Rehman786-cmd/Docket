@@ -1,5 +1,4 @@
 """AI proposals are untrusted. ChatPlan/Execution are backend-only contracts."""
-from datetime import datetime
 from typing import Literal
 from uuid import UUID
 

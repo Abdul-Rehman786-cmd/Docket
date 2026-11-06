@@ -1,7 +1,6 @@
 """Service for managing reminder settings and room reminder policies."""
 import logging
 from typing import Literal
-from uuid import UUID
 
 from app.core.config import get_settings
 from app.services.env_service import write_env_variables

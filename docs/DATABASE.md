@@ -1,7 +1,109 @@
-# Hosted storage/embedding upgrade proposal — approval required
+# Database setup and deployment
+
+**Fresh/disposable databases only:** the baseline resets Team Memory tables.
+Never replay it against existing hosted team data. Runtime settings are separate
+from schema deployment, and remote changes still require explicit approval.
+
+This guide combines setup, migration-history rules and the earlier hosted upgrade
+proposal. PostgreSQL has one migration file: the consolidated initial schema.
+Seven redundant module archives were removed after checking their objects against
+a disposable database. Their source remains in Git history. The separate SQLite
+profile upgrade and SQL test/read-only audit scripts are not PostgreSQL setup steps.
+The proposal remains historical evidence: do not treat it as approval
+or assume its recorded preflight matches today's project. Use
+[architecture.md](../architecture.md) for the main architecture and
+[verification history](VERIFICATION.md) for recorded checks.
+
+## Contents
+
+- [Fresh database setup](#database-setup)
+- [Historical migrations and existing installations](#migration-history)
+- [Historical hosted upgrade proposal](#deployment-proposal)
+
+<a id="database-setup"></a>
+## Fresh database setup
+
+Consolidated from `supabase/README.md`.
+
+<a id="database-setup-single-script-supabase-setup"></a>
+### Single-script Supabase setup
+
+For a new, empty database, run the complete contents of:
+
+[`migrations/20261104000100_initial_schema.sql`](../supabase/migrations/20261104000100_initial_schema.sql)
+
+Run it once. It contains all currently implemented database modules in one
+transaction: core scope/storage, memory embeddings, commitment lifecycle/audit,
+chat actions, reminders, versioned documents (Markdown/text/PDF/DOCX/PPTX), simple
+capture and person profiles. It uses no file includes, external scripts or secrets.
+Runtime feature activation and backend credentials are configured separately.
+
+The SQL needs PostgreSQL/pgvector/pgcrypto and the usual Supabase `anon`,
+`authenticated`, `service_role` roles. The disposable test harness creates those
+roles and extensions locally; a Supabase project supplies its standard roles.
+
+<a id="database-setup-existing-installations"></a>
+#### Existing installations
+
+**Do not run this script on an existing hosted database.** It intentionally resets
+Team Memory tables and data, including document/profile/audit data. Consolidation
+was performed locally; the connected hosted project's data, schema and migration
+history were not changed. Existing deployments require reviewed additive upgrades,
+not this reset. Never run the archived module scripts after a fresh installation.
+
+Earlier module SQL is retained in Git history for audit/reconciliation, including
+proposals that were not deployed everywhere. It is no longer duplicated in the
+working tree; all definitions are included in the initial schema.
+SQLite scripts remain separate because they target a different database engine.
+
+<a id="database-setup-verification"></a>
+#### Verification
+
+The standalone script is exercised in disposable PostgreSQL/PGlite by the existing
+fresh/reset, lifecycle, chat, reminders, documents, storage and embedding suites.
+Backend SQL-backed profile/capture tests load that same one script. No production
+credentials or hosted database connections are used by these test harnesses.
+
+
+Verified 2026-11-06: the standalone script creates all 21 project tables with RLS
+and no direct anonymous/authenticated table access; fresh creation and a second
+explicit disposable reset both pass. SQL audit, useful-storage, embedding, lifecycle,
+chat, reminder and document/format suites pass. The complete backend suite passes
+571 tests with real local inference enabled. Earlier audit fixtures were updated
+to check versioned reminder occurrence uniqueness and delete only an unreferenced
+memory, preserving the current source-evidence restriction.
+
+<a id="migration-history"></a>
+## Historical migrations and existing installations
+
+Consolidated from `supabase/migrations/history/README.md`.
+
+<a id="migration-history-historical-module-migrations"></a>
+### Historical module migrations
+
+Earlier additive proposals/applied upgrades have been folded into the initial
+schema and removed from the working tree. Their original bytes remain in Git
+history for review and reconciliation. They are not an active migration chain.
+
+For a fresh database, run only `../20261104000100_initial_schema.sql`. It contains
+their definitions and the final document formats in one transaction. Do not run
+these module scripts afterward: their objects already exist.
+
+Existing hosted databases retain their existing migration history. Never replay
+the destructive consolidated baseline there. Any future hosted upgrade needs a
+separate reviewed additive migration and explicit approval. No hosted schema or
+migration-history records were modified by the local consolidation.
+
+<a id="deployment-proposal"></a>
+## Historical hosted upgrade proposal
+
+Consolidated from `supabase/DEPLOYMENT_PROPOSAL.md`.
+
+<a id="deployment-proposal-hosted-storageembedding-upgrade-proposal-approval-required"></a>
+### Hosted storage/embedding upgrade proposal — approval required
 
 For the current **cloud text-storage** task, the smaller proposal in
-[CLOUD_STORAGE_STATUS.md](CLOUD_STORAGE_STATUS.md) supersedes this full upgrade.
+[CLOUD_STORAGE_STATUS.md](VERIFICATION.md#cloud-storage) supersedes this full upgrade.
 `python -m app.schema_upgrade --storage-only` installs only the missing atomic
 storage function and its backend grants. The table/embedding backfill below is
 not a prerequisite for saving useful text and has not been authorized.
@@ -11,20 +113,21 @@ It is a destructive **fresh development baseline**, never a hosted upgrade.
 The user authorized local consolidation only. No remote DDL or migration-history
 change has been performed for this task.
 
-## Inspected live difference
+<a id="deployment-proposal-inspected-live-difference"></a>
+#### Inspected live difference
 
-**Latest read-only observation (2026-11-05):** storage and embedding functions/columns are now exposed by the configured hosted PostgREST API. The historical absence findings below are superseded by [REMINDER_VERIFICATION.md](REMINDER_VERIFICATION.md). Lifecycle/chat/reminder functions and columns remain absent from the exposed metadata. Review exact hosted definitions/grants with `reminder_deployment_review.sql`, then obtain approval for the missing additive migrations `20261105000100`, `20261105000200`, and `20261105000300` in order. No remote changes were made for this milestone. Do not automatically replay an older storage/embedding upgrade, the core reset or migration-history changes.
+**Latest read-only observation (2026-11-05):** storage and embedding functions/columns are now exposed by the configured hosted PostgREST API. The historical absence findings below are superseded by [REMINDER_VERIFICATION.md](VERIFICATION.md#reminders). Lifecycle/chat/reminder functions and columns remain absent from the exposed metadata. Review exact hosted definitions/grants with `reminder_deployment_review.sql`, then obtain approval for the missing additive migrations `20261105000100`, `20261105000200`, and `20261105000300` in order. No remote changes were made for this milestone. Do not automatically replay an older storage/embedding upgrade, the core reset or migration-history changes.
 
 
-Automatic chat management additionally prepares `migrations/history/20261105000200_commitment_chat.sql`, after the lifecycle migration. It requires reviewed sender/member mappings, enabled room policies and a separate private adapter credential. See [automatic chat contracts](../AUTOMATIC_COMMITMENTS.md). It has not been applied remotely and must not be enabled against an unreviewed schema.
+Automatic chat management additionally prepares `migrations/history/20261105000200_commitment_chat.sql`, after the lifecycle migration. It requires reviewed sender/member mappings, enabled room policies and a separate private adapter credential. See [automatic chat contracts](OPERATIONS.md#automatic-commitments). It has not been applied remotely and must not be enabled against an unreviewed schema.
 
 
 The separately implemented commitment lifecycle has its own additive migration,
 `migrations/history/20261105000100_commitment_lifecycle.sql`. It requires the full reviewed
 embedding recovery upgrade before deployment, plus trusted human authentication
 before its routes can be enabled. It has not been applied remotely. See
-[COMMITMENT_VERIFICATION.md](COMMITMENT_VERIFICATION.md) and
-[the lifecycle contract](../COMMITMENT_MANAGEMENT.md). It does not replace or replay
+[COMMITMENT_VERIFICATION.md](VERIFICATION.md#commitment-lifecycle) and
+[the lifecycle contract](OPERATIONS.md#commitment-lifecycle). It does not replace or replay
 the destructive core baseline, and the smaller text-storage-only proposal is not
 sufficient for the lifecycle's embedding recovery guarantees.
 
@@ -47,7 +150,8 @@ No previously applied migration was deleted from deployed history. Unknown
 environments outside this workspace/connection cannot be attested; check those
 before reusing this baseline elsewhere.
 
-## Exact non-destructive change set
+<a id="deployment-proposal-exact-non-destructive-change-set"></a>
+#### Exact non-destructive change set
 
 `python -m app.schema_upgrade` from `backend/` prints the exact SQL proposal,
 derived from the consolidated baseline. It does not connect to any database or
@@ -79,7 +183,8 @@ replay, or removal of useful data in this proposal. A single memory trigger is
 dropped/recreated transactionally. The recipe pins revision
 `93b36ff09519291b77d6000d2e86bd8565378086`, FP32 ONNX, masked mean pooling and L2.
 
-## Preconditions and migration history
+<a id="deployment-proposal-preconditions-and-migration-history"></a>
+#### Preconditions and migration history
 
 - Fresh disposable PostgreSQL/pgvector creation/reset and the SQL fixture suites
   must pass before hosted deployment. The PGlite test-engine installation was
@@ -99,7 +204,8 @@ dropped/recreated transactionally. The recipe pins revision
   history. No extra local migration file is required or proposed. CLI baseline
   reconciliation remains a separate reviewed action.
 
-## Verification after approval
+<a id="deployment-proposal-verification-after-approval"></a>
+#### Verification after approval
 
 1. Stop/drain the API during the transaction; keep the listener's checkpoint.
    Unacknowledged Switch events can replay. Do not start another competing listener.
@@ -127,7 +233,8 @@ dropped/recreated transactionally. The recipe pins revision
    This external test has not been sent and requires user participation or
    explicit posting authorization.
 
-## Failure and recovery
+<a id="deployment-proposal-failure-and-recovery"></a>
+#### Failure and recovery
 
 An error during deployment rolls back its transaction. Do not use a reset as
 recovery. If runtime inference fails, useful records remain committed, retry

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import re
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4

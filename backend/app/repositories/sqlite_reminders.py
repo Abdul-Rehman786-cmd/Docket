@@ -1,9 +1,7 @@
-"""SQLite reminder repository. Implements ReminderRepository protocol for embedded storage."""
+"""SQLite reminder repository for embedded storage."""
 from datetime import datetime, timedelta, timezone
 import logging
 from uuid import UUID, uuid4
-from fastapi import HTTPException
-from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.models.commitments import CommitmentError, CommitmentState

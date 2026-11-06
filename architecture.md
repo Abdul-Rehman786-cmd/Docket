@@ -10,8 +10,10 @@ Definitions already in the original are not replayed or duplicated.
 
 The original retains its explicit reset behavior for fresh/disposable databases,
 with cleanup of named project dependencies. Never execute it on existing hosted
-team data. Historical additive SQL is preserved under `supabase/migrations/history/`;
-it is not an active fresh-install chain. No hosted schema/history was changed by
+team data. Earlier additive PostgreSQL module SQL has been integrated here and
+removed from the working tree; its original files remain in Git history. The
+SQLite-only profile upgrade remains under `supabase/migrations/sqlite/` because
+the local loader requires that dialect-specific migration. No hosted schema/history was changed by
 this local consolidation. SQL test harnesses now load only the standalone original.
 
 ## Versioned document module
@@ -52,7 +54,7 @@ choices; durable ingestion deduplication remains unchanged. No schema changes
 or new dependencies/models are introduced. API restart loses selection, not
 documents. Deploy one API process for consistent selections. Summaries sample
 at most eight source-order chunks and always disclose partial coverage. See
-[document chat contracts, verification and rollout](supabase/DOCUMENT_CHAT.md).
+[document chat contracts, verification and rollout](docs/OPERATIONS.md#document-chat).
 
 ### Imports, storage and publication
 
@@ -68,9 +70,9 @@ The feature defaults to disabled for new installations. The configured backend
 has the approved additive schema deployed and the feature enabled; real hosted
 upload, automatic processing, citations and failure-safety fixtures passed.
 Document scope resolution is read-only; startup no longer upserts mappings. See
-[document contracts and deployment](supabase/DOCUMENT_INGESTION.md) for interfaces,
+[document contracts and deployment](docs/OPERATIONS.md#document-ingestion) for interfaces,
 authorization, API, retention, verification distinctions and remaining limits.
-See [hosted deployment evidence](supabase/DOCUMENT_DEPLOYMENT_VERIFICATION.md) for
+See [hosted deployment evidence](docs/VERIFICATION.md#document-deployment) for
 the genuine migration version, cloud results and safe restart checks.
 
 ### Switch/Discord document consent revision
@@ -102,11 +104,22 @@ and two parser processes with 20-second wall time and 512 MiB memory each.
 The approved additive format-constraint migration is applied to the configured
 Supabase project. The original consolidated SQL is synchronized for fresh installs
 under explicit user instruction; it was not replayed remotely. No deployment flag
-changes, shared-service restarts or live tests were performed for this revision. See [document contracts](supabase/DISCORD_DOCUMENT_INGESTION.md).
+changes, shared-service restarts or live tests were performed for this revision. See [document contracts](docs/OPERATIONS.md#document-attachments).
 
 This document describes the system architecture, component boundaries, Switch agent integration, and database schema for the Team Memory backend.
 
 ## Current implementation: FastAPI and Switch message delivery
+
+### AI orchestration boundaries
+
+`AIService._run` coordinates the existing job stages. Named helpers own document
+routing/answer completion, source-evidence storage or confirmation, scoped memory
+retrieval and outgoing reply policy. The normalizer applies the same profile and
+commitment evidence rules to fresh and recovered decisions. Storage remains ahead
+of journal completion and reply delivery; cancellation/error handling stays in
+the orchestrator. Meeting replies share one timezone-formatting helper. No queue,
+worker, database transaction or external integration was added by this refactor.
+
 
 ### Optional person profiles
 
@@ -186,22 +199,22 @@ backend-only permissions; the authenticated Supabase API now advertises the prof
 storage RPC and tables. The active backend configuration has profiles enabled.
 No synthetic team records or external messages were created for this verification.
 Live message extraction remains to be checked with a new user message.
-See [PERSON_PROFILES.md](PERSON_PROFILES.md) for supported statements, local checks
+See [PERSON_PROFILES.md](docs/OPERATIONS.md#person-profiles) for supported statements, local checks
 and rollout boundaries.
 
 ### Feature observability
 
-`core/feature_logging.py` emits content-free INFO events for ingestion, AI/extraction, confirmations, commitment actions, retrieval/embeddings, viewer connections and reminder planning/delivery. Events distinguish configuration, durable persistence, replay, denial, deferral and saved Switch acknowledgement. IDs are hashed; reasons and metrics are allow-listed. Empty-worker heartbeats are bounded. This adds no database probes, model calls or business activation; see [FEATURE_LOGGING.md](FEATURE_LOGGING.md).
+`core/feature_logging.py` emits content-free INFO events for ingestion, AI/extraction, confirmations, commitment actions, retrieval/embeddings, viewer connections and reminder planning/delivery. Events distinguish configuration, durable persistence, replay, denial, deferral and saved Switch acknowledgement. IDs are hashed; reasons and metrics are allow-listed. Empty-worker heartbeats are bounded. This adds no database probes, model calls or business activation; see [FEATURE_LOGGING.md](docs/OPERATIONS.md#feature-logging).
 
 
 ### Reminder milestone (2026-11-05)
 
-The separate [reminder module](REMINDERS.md) reuses commitment eligibility and the existing room-policy/delivery tables. A pure planner produces versioned intentions; bounded application loops persist them and dispatch through the existing non-AI Switch identity. Durable claims/send-start markers, current-state rechecks, quiet hours, cadence, room spacing and stale-intent invalidation are implemented. Defaults remain disabled. Hosted metadata verifies storage/embedding presence but lacks the lifecycle/chat/reminder API footprint; deployment and real external delivery await approval. Earlier scheduler-as-future-work descriptions are superseded by this local implementation, not by a claim of live delivery.
+The separate [reminder module](docs/OPERATIONS.md#reminders) reuses commitment eligibility and the existing room-policy/delivery tables. A pure planner produces versioned intentions; bounded application loops persist them and dispatch through the existing non-AI Switch identity. Durable claims/send-start markers, current-state rechecks, quiet hours, cadence, room spacing and stale-intent invalidation are implemented. Defaults remain disabled. Hosted metadata verifies storage/embedding presence but lacks the lifecycle/chat/reminder API footprint; deployment and real external delivery await approval. Earlier scheduler-as-future-work descriptions are superseded by this local implementation, not by a claim of live delivery.
 
 
 ### Meeting & Task Reminder Controls (2026-11-06)
 
-- **User-Configured Advance Notice Duration**: The viewer Settings page enables room reminders and lets users specify the duration before a meeting or task deadline to receive a reminder (e.g. 30 minutes, 1 hour, or any custom duration). Configuration is persisted to `.env` (`REMINDERS_ENABLED`, `REMINDER_DELIVERY_ENABLED`, `REMINDER_LEAD_TIME`, `REMINDER_LEAD_UNIT`, `REMINDER_LEAD_MINUTES`) and synchronized with room policies in the database.
+- **User-Configured Advance Notice Duration**: The admin-authenticated reminder configuration API enables room reminders and lets administrators specify the duration before a meeting or task deadline to receive a reminder (e.g. 30 minutes, 1 hour, or any custom duration). Configuration is persisted to `.env` (`REMINDERS_ENABLED`, `REMINDER_DELIVERY_ENABLED`, `REMINDER_LEAD_TIME`, `REMINDER_LEAD_UNIT`, `REMINDER_LEAD_MINUTES`) and synchronized with room policies in the database.
 - **Meeting Detection & Extraction**: Scheduled meetings, syncs, and calls with times are extracted into commitments with `due_at` set to the meeting start time.
 - **Room Delivery Routing**: Meeting reminders format prominent notifications (`🔔 Reminder: Upcoming meeting...`) and route directly to the room channel so all participants are notified.
 - **Dual Database Engine Support**: Both Supabase (`SupabaseReminderRepository`) and local SQLite (`SqliteReminderRepository`) implement the `ReminderRepository` protocol, supporting outbox storage, claiming, and dispatch across cloud and offline environments.
@@ -209,7 +222,7 @@ The separate [reminder module](REMINDERS.md) reuses commitment eligibility and t
 
 ### Simple commitment capture (2026-11-06)
 
-Current creation contract: [SIMPLE_COMMITMENT_CAPTURE.md](SIMPLE_COMMITMENT_CAPTURE.md). Discord → Switch → existing authenticated listener → FastAPI durable journal → private AI extraction → `store_message_extraction` → commitments + source + linked memory in one transaction → existing embedding worker → existing scoped semantic search. Switch `addressed=true` plus an explicit name/alias/native mention and a clear first-person promise permits capture. The delivered Switch sender ID is stored directly as owner; names are labels. No member lookup, participant projection, sender mapping, role, bot-type classification or human attestation is used. The shared ingest credential and configured tenant/enabled-room boundaries remain mandatory; no public write endpoint or privileged client credential is introduced.
+Current creation contract: [SIMPLE_COMMITMENT_CAPTURE.md](docs/OPERATIONS.md#commitment-capture). Discord → Switch → existing authenticated listener → FastAPI durable journal → private AI extraction → `store_message_extraction` → commitments + source + linked memory in one transaction → existing embedding worker → existing scoped semantic search. Switch `addressed=true` plus an explicit name/alias/native mention and a clear first-person promise permits capture. The delivered Switch sender ID is stored directly as owner; names are labels. No member lookup, participant projection, sender mapping, role, bot-type classification or human attestation is used. The shared ingest credential and configured tenant/enabled-room boundaries remain mandatory; no public write endpoint or privileged client credential is introduced.
 
 `services/commitment_chat_evidence.py` uses existing Switch addressing and normalizes the mention/personal statement; it is not a new mention-verification service. `services/extraction_service.py` normalizes the AI extraction from that statement, binds the sender, preserves deadline wording in the linked summary and resolves only clear aware instants using the original timestamp/optional confirmed `COMMITMENT_TIMEZONE`. The existing storage service/repository selects an additive five-argument overload (`p_capture=true`) of the same atomic RPC. It calls the working four-argument storage function and initializes the existing stable owner columns within that same transaction. New capture keys isolate this path from legacy extraction. No table/column/model/dimension is added. The additive migration is `20261106000100_simple_commitment_capture.sql`; it is applied in Supabase and verified live end-to-end (returning `"Processing your request..."` followed by `"Task saved in Supabase. Search indexing is pending."`).
 
@@ -235,10 +248,10 @@ To prevent historical replays from filling the 4-slot queue (`MAX_PENDING_JOBS =
 - `ai_service.py` dynamically reloads this watermark and marks historical messages as ineligible (`eligible = False`, `reason = 'older_than_watermark'`) prior to queue admission.
 - Stuck jobs in `ingestion.sqlite3` older than the watermark are auto-finished during startup recovery.
 
-Advanced lifecycle management, action history, mapped/open action authorization and reminder infrastructure described in [OPEN_COMMITMENTS.md](OPEN_COMMITMENTS.md) remain available and separately gated. Their verification/acceptance rules do not gate simple creation. Simple capture writes the delivered sender namespace, not the advanced open-action namespace; it does not claim automatic lifecycle/reminder eligibility or bootstrap their policies. No old tasks, history, policies or applied migration history are rewritten. Unmentioned commitment extraction is stripped while facts/decisions/questions retain their paths. Manual HTTP human authentication remains closed. Earlier creation prerequisites and approval/deadline restrictions below are superseded only for this simple capture path.
+Advanced lifecycle management, action history, mapped/open action authorization and reminder infrastructure described in [OPEN_COMMITMENTS.md](docs/OPERATIONS.md#open-commitments) remain available and separately gated. Their verification/acceptance rules do not gate simple creation. Simple capture writes the delivered sender namespace, not the advanced open-action namespace; it does not claim automatic lifecycle/reminder eligibility or bootstrap their policies. No old tasks, history, policies or applied migration history are rewritten. Unmentioned commitment extraction is stripped while facts/decisions/questions retain their paths. Manual HTTP human authentication remains closed. Earlier creation prerequisites and approval/deadline restrictions below are superseded only for this simple capture path.
 
 
-The separate commitment service implements approve, reject, start, complete, cancel, reassign, reschedule and scoped reads/history. It reuses existing role/status/source/embedding contracts; each mutation uses a backend-only PostgreSQL transaction with locked authorization, versions, audit and idempotency. The additive migration is locally tested and awaits hosted deployment review. Human authentication is absent: all new routes fail closed; shared ingestion/admin tokens do not identify people. See [COMMITMENT_MANAGEMENT.md](COMMITMENT_MANAGEMENT.md) for permitted transitions, HTTP contracts, independent identity/storage interfaces, reminder integration and verification limits. Earlier planned approval/task-state descriptions below are superseded by that implementation contract. No scheduler, notifications, recording controls or frontend redesign was added.
+The separate commitment service implements approve, reject, start, complete, cancel, reassign, reschedule and scoped reads/history. It reuses existing role/status/source/embedding contracts; each mutation uses a backend-only PostgreSQL transaction with locked authorization, versions, audit and idempotency. The additive migration is locally tested and awaits hosted deployment review. Human authentication is absent: all new routes fail closed; shared ingestion/admin tokens do not identify people. See [COMMITMENT_MANAGEMENT.md](docs/OPERATIONS.md#commitment-lifecycle) for permitted transitions, HTTP contracts, independent identity/storage interfaces, reminder integration and verification limits. Earlier planned approval/task-state descriptions below are superseded by that implementation contract. No scheduler, notifications, recording controls or frontend redesign was added.
 
 
 The diagram and implementation plan below describe the target system. The current backend is a local FastAPI scaffold that starts without database, LLM, or messaging credentials:
@@ -639,14 +652,22 @@ The system supports seamless switching between remote Supabase (PostgreSQL with 
 - Inserts records into SQLite using atomic transaction batch upserts (`INSERT OR REPLACE`).
 - Exposed via authenticated endpoint `POST /viewer/migrate-db`.
 
-### In-App Engine Switching Modal
-- In `views/messages.html` / `views/messages.js`, selecting SQLite radio intercepts the engine change.
-- A modal dialog appears immediately, presenting:
-  1. Directory selection: input field with `📁 Browse` and `⚡ Use local folder` quick-fill buttons.
-  2. Decision prompt:
-     - **Migrate data & Switch**: saves path, runs live migration via `/viewer/migrate-db`, updates `DATABASE_ENGINE=sqlite`, reloads.
-     - **Switch without migrating**: saves path and switches engine immediately (starts clean SQLite database).
-     - **Cancel**: closes modal and reverts radio button back to Supabase.
+### Viewer administration
+
+The public page shell contains an admin-unlocked credential/settings form.
+`GET/POST /viewer/env` require `X-Admin-Token`. Reads return only allowlisted
+non-secret values and boolean credential-presence flags. Writes accept replacements
+through SecretStr fields, retain blank credentials, reject unknown/multiline
+settings and atomically replace the ignored local environment file using quoted
+values. Existing credentials never return to the browser. The admin token and
+entered keys are cleared on save/lock/navigation; old localStorage credential
+caches are purged. No secret export or browser persistence is provided.
+
+Reminder status/configuration, migration, storage status, pruning and quota routes
+also require the admin dependency. Message-viewer authentication grants no admin
+privileges. These existing backend services remain available; reminder policies
+are synchronized through the dedicated reminder configuration API. Startup-only
+settings require restarting the relevant API/listener process.
 
 ### Storage Retention & SQLite Space Quota Management
 - `services/storage_service.py` and `controllers/viewer.py` expose:

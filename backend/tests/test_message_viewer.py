@@ -168,26 +168,87 @@ def test_ai_responses_obey_existing_authorization():
     assert client.get("/messages/recent", headers=HEADERS).json() == []
 
 
-def test_viewer_env_endpoint_lifecycle(tmp_path, monkeypatch):
+def test_admin_can_edit_credentials_without_reading_existing_values(tmp_path, monkeypatch):
+    from dotenv import dotenv_values
     test_env = tmp_path / ".env"
-    test_env.write_text("TEST_KEY=secret_val\nSWITCH_INGEST_TOKEN=tok123\n", encoding="utf-8")
+    test_env.write_text("SUPABASE_SECRET_KEY='fictional-existing-secret'\nSWITCH_BACKEND_URL='http://localhost:8000'\n", encoding="utf-8")
     monkeypatch.setattr("app.services.env_service.ENV_PATH", test_env)
+    monkeypatch.setenv("ADMIN_API_TOKEN", "fixture-admin-token")
+    get_settings.cache_clear()
+    headers = {"X-Admin-Token": "fixture-admin-token"}
+    response = client.get("/viewer/env", headers=headers)
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == 'no-store'
+    assert response.json()['credentials']['SUPABASE_SECRET_KEY'] is True
+    assert 'SUPABASE_SECRET_KEY' not in response.json()['variables']
+    assert 'fictional-existing-secret' not in response.text
+    assert response.json()['variables']['SWITCH_BACKEND_URL'] == 'http://localhost:8000'
 
-    resp = client.get("/viewer/env")
-    assert resp.status_code == 200
-    assert resp.headers["cache-control"] == "no-store, private"
-    data = resp.json()
-    assert "variables" in data
-    assert data["variables"]["TEST_KEY"] == "secret_val"
-    assert data["variables"]["SWITCH_INGEST_TOKEN"] == "tok123"
+    replacement = "fictional-key with spaces # ' and \\ slash"
+    response = client.post('/viewer/env', headers=headers, json={'variables': {
+        'SUPABASE_SECRET_KEY': replacement, 'SWITCH_BACKEND_URL': 'http://localhost:8001'}})
+    assert response.status_code == 200 and replacement not in response.text
+    assert dotenv_values(test_env, interpolate=False)['SUPABASE_SECRET_KEY'] == replacement
+    assert replacement not in client.get('/viewer/env', headers=headers).text
+    assert client.post('/viewer/env', headers=headers,
+        json={'variables': {'SUPABASE_SECRET_KEY': ''}}).status_code == 200
+    assert dotenv_values(test_env, interpolate=False)['SUPABASE_SECRET_KEY'] == replacement
 
-    # Test updating variables
-    update_resp = client.post("/viewer/env", json={"variables": {"TEST_KEY": "updated_val", "NEW_KEY": "abc"}})
-    assert update_resp.status_code == 200
 
-    re_read = client.get("/viewer/env")
-    assert re_read.json()["variables"]["TEST_KEY"] == "updated_val"
-    assert re_read.json()["variables"]["NEW_KEY"] == "abc"
+@pytest.mark.parametrize('variables', [
+    {'UNSUPPORTED_SETTING': 'value'},
+    {'SWITCH_BACKEND_URL': 'value\nINJECTED=value'},
+    {'SUPABASE_SECRET_KEY': 'value\x00'},
+])
+def test_credential_setting_validation_is_atomic(tmp_path, monkeypatch, variables):
+    test_env = tmp_path / '.env'
+    original = "SUPABASE_SECRET_KEY='fictional-existing-secret'\n"
+    test_env.write_text(original, encoding='utf-8')
+    monkeypatch.setattr('app.services.env_service.ENV_PATH', test_env)
+    monkeypatch.setenv('ADMIN_API_TOKEN', 'fixture-admin-token')
+    get_settings.cache_clear()
+    response = client.post('/viewer/env', headers={'X-Admin-Token': 'fixture-admin-token'},
+                           json={'variables': variables})
+    assert response.status_code == 422
+    assert test_env.read_text(encoding='utf-8') == original
+    assert all(value not in response.text for value in variables.values())
+
+
+def test_credential_write_failure_preserves_original_file(tmp_path, monkeypatch):
+    from app.services import env_service
+    test_env = tmp_path / '.env'
+    original = "SUPABASE_SECRET_KEY='fictional-existing-secret'\n"
+    test_env.write_text(original, encoding='utf-8')
+    monkeypatch.setattr(env_service, 'ENV_PATH', test_env)
+    calls = []
+    def fail_second_write(path, key, value, **kwargs):
+        calls.append(key)
+        Path(path).write_text('partial update', encoding='utf-8')
+        if len(calls) == 2:
+            raise OSError('fixture write failure')
+    from pathlib import Path
+    monkeypatch.setattr(env_service, 'set_key', fail_second_write)
+    with pytest.raises(OSError):
+        env_service.write_env_variables({'SWITCH_BACKEND_URL': 'http://localhost:8001', 'LOG_DISCORD_MESSAGES': 'false'})
+    assert test_env.read_text(encoding='utf-8') == original
+    assert not test_env.with_suffix('.tmp').exists()
+
+
+@pytest.mark.parametrize("method,path,payload", [
+    ("GET", "/viewer/env", None),
+    ("POST", "/viewer/env", {"variables": {"SUPABASE_SECRET_KEY": "replacement"}}),
+    ("GET", "/viewer/storage/status", None),
+    ("GET", "/viewer/reminders/status", None),
+    ("POST", "/viewer/migrate-db", None),
+    ("POST", "/viewer/reminders/configure", {"enabled": True, "lead_time": 30}),
+    ("POST", "/viewer/storage/prune-timeline", {"retention_value": 30, "retention_unit": "days"}),
+    ("POST", "/viewer/storage/enforce-space", {"max_space_value": 50}),
+])
+def test_administrative_viewer_routes_reject_public_and_ingest_access(monkeypatch, method, path, payload):
+    monkeypatch.setenv("ADMIN_API_TOKEN", "fixture-admin-token")
+    get_settings.cache_clear()
+    for headers in ({}, HEADERS, {"X-Admin-Token": "wrong-token"}):
+        assert client.request(method, path, json=payload, headers=headers).status_code == 401
 
 
 def test_viewer_storage_prune_and_space_endpoints(tmp_path, monkeypatch):
@@ -200,14 +261,16 @@ def test_viewer_storage_prune_and_space_endpoints(tmp_path, monkeypatch):
     monkeypatch.setattr("app.services.env_service.ENV_PATH", test_env)
     monkeypatch.setenv("DATABASE_ENGINE", "sqlite")
     monkeypatch.setenv("SQLITE_DB_PATH", str(db_file))
+    monkeypatch.setenv("ADMIN_API_TOKEN", "fixture-admin-token")
     get_settings.cache_clear()
+    admin_headers = {"X-Admin-Token": "fixture-admin-token"}
 
-    status_resp = client.get("/viewer/storage/status")
+    status_resp = client.get("/viewer/storage/status", headers=admin_headers)
     assert status_resp.status_code == 200
     assert status_resp.json()["active_engine"] == "sqlite"
 
     prune_resp = client.post(
-        "/viewer/storage/prune-timeline",
+        "/viewer/storage/prune-timeline", headers=admin_headers,
         json={"engine": "sqlite", "retention_value": 30, "retention_unit": "days"},
     )
     assert prune_resp.status_code == 200
@@ -215,7 +278,7 @@ def test_viewer_storage_prune_and_space_endpoints(tmp_path, monkeypatch):
     assert prune_resp.json()["engine"] == "sqlite"
 
     space_resp = client.post(
-        "/viewer/storage/enforce-space",
+        "/viewer/storage/enforce-space", headers=admin_headers,
         json={"max_space_value": 50, "max_space_unit": "MB", "enabled": True},
     )
     assert space_resp.status_code == 200

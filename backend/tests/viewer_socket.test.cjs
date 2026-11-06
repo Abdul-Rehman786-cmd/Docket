@@ -14,6 +14,10 @@ class Element {
     this.hidden = false;
     this.value = "";
     this.textContent = "";
+    const classes = new Set();
+    this.classList = {
+      toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); },
+    };
   }
   append(...nodes) {
     for (const node of nodes) {
@@ -47,13 +51,13 @@ class Element {
   focus() {}
 }
 
-function harness() {
+function harness(responses = []) {
   const elements = new Map();
   const element = id => {
     if (!elements.has(id)) elements.set(id, new Element());
     return elements.get(id);
   };
-  const sockets = [], timers = new Map(), requests = [];
+  const sockets = [], timers = new Map(), requests = [], clearedCaches = [];
   let nextTimer = 0;
   class Socket extends Element {
     static OPEN = 1;
@@ -75,15 +79,16 @@ function harness() {
     document: { getElementById: element, createElement: () => new Element(),
                 createDocumentFragment: () => new Element(true) },
     window, WebSocket: Socket, URL, AbortController,
+    localStorage: { removeItem(key) { clearedCaches.push(key); } },
     crypto: { randomUUID: () => "fixture-request-id" },
     setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
-    async fetch(url, options) { requests.push({ url, options }); return { ok: true, status: 202 }; },
+    async fetch(url, options) { requests.push({ url, options }); return responses.shift() || { ok: true, status: 202 }; },
   });
   element("feed-panel").hidden = true;
   vm.runInContext(readFileSync(join(__dirname, "../app/views/messages.js"), "utf8"), context);
   return {
-    element, sockets, timers, requests, context, window,
+    element, sockets, timers, requests, context, window, clearedCaches,
     unlock() { element("access-token").value = "fictional-viewer-token"; element("unlock-form").emit("submit"); },
     snapshot(socket = sockets.at(-1), messages = [], answers = []) {
       socket.server({ type: "snapshot", connection_id: "fixture-connection", messages, answers });
@@ -185,4 +190,40 @@ test("each tab owns a socket; page exit locks only that tab", () => {
   first.window.emit("pagehide");
   assert.equal(first.sockets[0].readyState, 3);
   assert.equal(second.sockets[0].readyState, 1);
+});
+
+
+test("settings navigation does not fetch credentials before admin unlock", () => {
+  const view = harness();
+  assert.deepEqual(view.clearedCaches, ["team_memory_env_values"]);
+  view.element("nav-settings-btn").emit("click");
+  assert.equal(view.element("settings-panel").hidden, false);
+  assert.equal(view.element("unlock-panel").hidden, true);
+  assert.equal(view.requests.length, 0);
+  view.element("nav-feed-btn").emit("click");
+  assert.equal(view.element("settings-panel").hidden, true);
+  assert.equal(view.element("unlock-panel").hidden, false);
+});
+
+
+test("credential settings use admin authentication, keep saved secrets blank and clear after save", async () => {
+  const view = harness([
+    { ok: true, json: async () => ({ variables: { SWITCH_BACKEND_URL: "http://localhost:8000" },
+      credentials: { SUPABASE_SECRET_KEY: true } }) },
+    { ok: true },
+  ]);
+  view.element("settings-admin-token").value = "fictional-admin-token";
+  await vm.runInContext("unlockSettings()", view.context);
+  assert.equal(view.requests[0].options.headers["X-Admin-Token"], "fictional-admin-token");
+  assert.equal(view.element("settings-admin-token").value, "");
+  const input = view.element("credential-fields").children[1].children[1];
+  assert.equal(input.type, "password");
+  assert.equal(input.value, "");
+  assert.match(input.placeholder, /Configured/);
+  input.value = "fictional-replacement";
+  await vm.runInContext("saveCredentialSettings()", view.context);
+  assert.equal(JSON.parse(view.requests[1].options.body).variables.SUPABASE_SECRET_KEY, "fictional-replacement");
+  assert.equal(input.value, "");
+  assert.equal(view.element("credential-editor").hidden, true);
+  assert.equal(vm.runInContext("settingsToken", view.context), "");
 });

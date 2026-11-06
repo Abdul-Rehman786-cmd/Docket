@@ -3,7 +3,7 @@ from datetime import datetime,timedelta,timezone
 import re
 from uuid import NAMESPACE_URL,uuid5
 from zoneinfo import ZoneInfo,ZoneInfoNotFoundError
-from app.models.reminders import ReminderWork,ReminderIntention,ReminderPolicy
+from app.models.reminders import ReminderWork, ReminderIntention
 from app.services.commitment_service import reminder_state
 
 
