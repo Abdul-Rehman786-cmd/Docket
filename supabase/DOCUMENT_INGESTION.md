@@ -1,3 +1,10 @@
+> Local format/consent revision (2026-11-06): PDF, DOCX and PPTX extraction,
+> channel-only replies and simple consent are implemented locally. The approved
+> binary-format constraint migration is applied; service reload and live binary
+> verification remain outstanding.
+> [Current limits, citation semantics and rollout](DISCORD_DOCUMENT_INGESTION.md)
+> supersede the original Markdown/text-only limits below.
+
 # Versioned document ingestion
 
 The optional consent-based Discord collection adapter is now implemented locally
@@ -132,7 +139,7 @@ Benchmark realistic scoped latency/recall before adding HNSW `vector_cosine_ops`
 
 Read-only hosted inspection found existing memory embedding functions but no
 document/version/chunk tables. The additive migration is
-`migrations/20261105163303_versioned_documents.sql`: four new tables, composite
+`migrations/history/20261105163303_versioned_documents.sql`: four new tables, composite
 scope/source constraints, queue/scope indexes and backend-only `document_operation`
 RPC. It changes no existing message or commitment object. All document tables
 enable RLS and revoke `PUBLIC`/`anon`/`authenticated` privileges. Backend

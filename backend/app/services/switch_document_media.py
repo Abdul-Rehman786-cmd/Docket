@@ -73,7 +73,6 @@ class SwitchDocumentTransport:
             if state.generation is None:
                 raise AttachmentFailure("reply_listener_unavailable")
             args={"body":body}
-            if thread:
-                args["thread_id"]=thread
+            # Always channel-only, including recovered callers carrying old thread metadata.
             await self.api.operation(client,"post_message",args,connection_id=state.connection_id,
                                      session_id=document_reply_session(room))

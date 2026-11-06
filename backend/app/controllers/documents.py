@@ -38,7 +38,7 @@ async def import_document(request: Request, metadata: ImportMetadata = Depends()
                           scope=Depends(document_scope), repository=Depends(document_repository)):
     raw = bytearray()
     async for part in request.stream():
-        if len(raw)+len(part) > MAX_UPLOAD_BYTES:
+        if len(raw)+len(part) > min(MAX_UPLOAD_BYTES,get_settings().switch_document_max_bytes):
             raise HTTPException(413,"document_too_large")
         raw.extend(part)
     result = await DocumentService(repository).import_bytes(scope,metadata,bytes(raw))

@@ -51,7 +51,7 @@ The existing reminder planner shares the new owner-acceptance eligibility rule. 
 
 ## Migration status and remaining operator steps
 
-All schema/function changes are in the existing `supabase/migrations/20261105000200_commitment_chat.sql`. It adds owner-acceptance columns/pair constraint/scoped source FK, create audit value/RPC and open preparation/authorization/eligibility. Existing owner/scope indexes, audit uniqueness and receipts are reused. No new SQL file was created.
+All schema/function changes are in the existing `supabase/migrations/history/20261105000200_commitment_chat.sql`. It adds owner-acceptance columns/pair constraint/scoped source FK, create audit value/RPC and open preparation/authorization/eligibility. Existing owner/scope indexes, audit uniqueness and receipts are reused. No new SQL file was created.
 
 Before editing, a read-only hosted PostgREST probe exposed storage/embedding support but no lifecycle/chat/reminder functions or columns. Exact migration history, grants/definitions, schema-cache freshness and other environments could not be verified. This is not proof the migration was never applied anywhere. Editing locally does not update hosted Supabase; replaying a previously applied version can fail or be unsafe. No migration was marked deployed, no history changed and no reset executed.
 

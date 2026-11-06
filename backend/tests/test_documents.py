@@ -74,7 +74,7 @@ def test_chunking_exact_slices_determinism_limits_overlap_and_coverage():
 
 
 @pytest.mark.parametrize('raw,filename,status',[(b'bad\xff','x.txt',422),(b'\x00text','x.txt',422),
-    (b'   ','x.txt',422),(b'text','x.pdf',415),(b'x'*(MAX_UPLOAD_BYTES+1),'x.md',413)])
+    (b'   ','x.txt',422),(b'text','x.pdf',422),(b'x'*(MAX_UPLOAD_BYTES+1),'x.md',413)])
 def test_input_limits(raw,filename,status):
     async def run():
         repo,service,_=domain()

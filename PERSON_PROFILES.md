@@ -102,7 +102,7 @@ No profile mutation API is exposed. All profile HTTP responses disable caching.
 
 ## Deployment and local verification
 
-1. Review the additive `supabase/migrations/20261106000200_person_profiles.sql`
+1. Review the additive `supabase/migrations/history/20261106000200_person_profiles.sql`
    against the target schema. It requires existing atomic storage and simple capture.
    Do not replay the destructive baseline. Remote application requires approval.
 2. SQLite runs its separate timestamped migration under `supabase/migrations/sqlite/`
@@ -145,7 +145,7 @@ fixed search paths, invoker security and explicit backend-only execution grants.
 
 The user approved applying the additive profile migration on 2026-11-06 (Pakistan
 time). Supabase recorded it as `20261105232021_person_profiles`; the applied SQL is
-the reviewed local `supabase/migrations/20261106000200_person_profiles.sql`.
+the reviewed local `supabase/migrations/history/20261106000200_person_profiles.sql`.
 The generated hosted version differs from the local planned timestamp; no existing
 migration history was rewritten. Do not reapply the same migration under its local
 timestamp without reconciling migration history first.

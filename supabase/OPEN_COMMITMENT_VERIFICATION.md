@@ -24,7 +24,7 @@ Assertions examine resulting commitments and explicit acceptance (human approval
 
 ## Deployment findings and limits
 
-The only changed schema migration is `migrations/20261105000200_commitment_chat.sql`, revised locally under explicit user authorization. No SQL file was added. Existing SQL fixtures were extended. The file includes source-backed owner acceptance, create audit/RPC, automatic nonprivileged participation projection and owner-only open preparation/action rules, while retaining the legacy mapped internal path.
+The only changed schema migration is `migrations/history/20261105000200_commitment_chat.sql`, revised locally under explicit user authorization. No SQL file was added. Existing SQL fixtures were extended. The file includes source-backed owner acceptance, create audit/RPC, automatic nonprivileged participation projection and owner-only open preparation/action rules, while retaining the legacy mapped internal path.
 
 Hosted metadata lacks the new creation RPC and both owner-acceptance columns as well as prior lifecycle/chat/reminder APIs. The global automatic/reminder flags are disabled; the distinct adapter secret is not configured. Tenant and two allowed rooms/non-AI credentials are configured (values were never printed). Enabled room-policy rows and timezone still need operator review after approved reconciliation.
 

@@ -23,7 +23,7 @@ The existing admin-only `GET /api/v1/commitments` remains diagnostic. Ingest/adm
 | Storage port | `backend/app/repositories/commitment_contract.py`: context, list, history and atomic apply operation |
 | Supabase adapter | `backend/app/repositories/commitment_repository.py`: backend-only RPC transport, safe errors, response scope checks |
 | Identity port | `backend/app/core/commitment_identity.py`: `ActorResolver.resolve(Request) -> Actor` and FastAPI dependency |
-| Transaction | `supabase/migrations/20261105000100_commitment_lifecycle.sql`: locked authorization, transition checks, linked memory, event and receipt |
+| Transaction | `supabase/migrations/history/20261105000100_commitment_lifecycle.sql`: locked authorization, transition checks, linked memory, event and receipt |
 
 An authentication teammate can implement the identity port independently. It must verify a session, map its immutable subject to `room_members.switch_user_id`, and derive the actor without accepting client actor/role/tenant claims. Room membership and role are loaded from storage. A storage teammate can implement the repository port with the same atomic semantics. The fake repository in tests is an example for development, not deployment persistence. This task does not modify the SQLite ingestion module.
 

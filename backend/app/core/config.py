@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     switch_document_bot_sender_id: str = Field(default="",repr=False)
     switch_document_confirmation_seconds: int = Field(default=900,ge=60,le=86400)
     switch_document_max_files: int = Field(default=4,ge=1,le=8)
-    switch_document_max_bytes: int = Field(default=262144,ge=1,le=262144)
+    switch_document_max_bytes: int = Field(default=8388608,ge=1,le=8388608)
     switch_document_max_text_chars: int = Field(default=262144,ge=1,le=262144)
     switch_document_download_seconds: int = Field(default=20,ge=1,le=60)
     switch_document_processing_seconds: int = Field(default=900,ge=30,le=7200)

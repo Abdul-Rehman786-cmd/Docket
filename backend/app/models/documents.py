@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-MAX_UPLOAD_BYTES = 262_144
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_CHUNKS = 1024
 
 
@@ -32,7 +32,7 @@ class DocumentView(BaseModel):
     tenant_id: UUID
     room_id: UUID
     source_key: str
-    source_type: Literal["markdown", "text"]
+    source_type: Literal["markdown", "text", "pdf", "docx", "pptx"]
     title: str
     created_by: str
     latest_version: int
@@ -102,3 +102,4 @@ class DocumentReference(BaseModel):
     text: str
     similarity: float
     citation: str
+    location_basis: Literal["stored_text_lines"] = "stored_text_lines"

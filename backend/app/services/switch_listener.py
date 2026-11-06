@@ -15,6 +15,7 @@ from app.core.config import BACKEND_DIR, Settings
 from app.models.messages import IncomingMessage, MessageReceipt, MessageStatus
 from app.core.feature_logging import feature_event
 from app.models.document_attachments import AttachmentMessage, AttachmentReceipt
+from app.services.document_commands import document_command
 from app.repositories.listener_state import ListenerState, listener_identity, document_reply_session
 from app.services.message_service import message_reference
 
@@ -229,8 +230,7 @@ class SwitchListener:
                 try:
                     body=payload.get("body", "")
                     document_candidate=bool(
-                        payload.get("attachments") or (isinstance(body,str) and
-                        re.fullmatch(r"\s*(?:save|skip) [0-9a-fA-F]{12}\s*",body,re.IGNORECASE)))
+                        payload.get("attachments") or document_command(body))
                     document_event=self.settings.switch_document_attachments_enabled and document_candidate
                     if document_candidate:
                         logger.log(logging.INFO if document_event else logging.WARNING,

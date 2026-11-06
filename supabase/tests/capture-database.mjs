@@ -7,7 +7,7 @@ import { createInterface } from 'node:readline';
 const db=new PGlite({extensions:{vector,pgcrypto}});
 try {
  await db.exec('CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role BYPASSRLS;');
- for(const file of ['../migrations/20261104000100_initial_schema.sql','../migrations/20261106000100_simple_commitment_capture.sql','../migrations/20261106000200_person_profiles.sql'])
+ for(const file of ['../migrations/20261104000100_initial_schema.sql'])
    await db.exec(await readFile(new URL(file,import.meta.url),'utf8'));
  console.log(JSON.stringify({ready:true}));
  for await(const line of createInterface({input:process.stdin,crlfDelay:Infinity})) {

@@ -18,7 +18,7 @@ aligned with hosted changes. The exact reviewed additive SQL was applied through
 Supabase's migration tool, which recorded:
 
 - Version: `20261105163303`; name: `versioned_documents`.
-- Local source: [20261105163303_versioned_documents.sql](migrations/20261105163303_versioned_documents.sql).
+- Local source: [20261105163303_versioned_documents.sql](migrations/history/20261105163303_versioned_documents.sql).
 - Approved proposal originally had filename `20261105153432_versioned_documents.sql`.
   It was renamed locally to match the genuine remote execution version. No SQL
   content or applied history was rewritten.

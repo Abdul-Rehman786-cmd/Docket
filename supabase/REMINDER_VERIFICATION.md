@@ -42,7 +42,7 @@ These SQL assertions are real local database execution. They are not hosted Post
 
 ## Changes and review package
 
-- Additive migration: `migrations/20261105000300_reminder_outbox.sql`; extends the existing room-policy and reminder-delivery tables with versioned preferences, occurrence identities, send-start state, invalidation hooks and backend-only worker RPCs.
+- Additive migration: `migrations/history/20261105000300_reminder_outbox.sql`; extends the existing room-policy and reminder-delivery tables with versioned preferences, occurrence identities, send-start state, invalidation hooks and backend-only worker RPCs.
 - Models/ports: `models/reminders.py`, `repositories/reminder_contract.py`.
 - Services: pure planner, bounded scheduler, reusable dispatcher hooks, strict Switch notification sink and application worker.
 - Persistence: `repositories/reminder_repository.py`, using existing backend auth/pools and safe errors.

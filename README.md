@@ -4,6 +4,23 @@ A project scaffold for **FastAPI + Supabase + React Native (Expo)** with a Switc
 
 The implemented flow receives Discord messages through Switch, journals human input durably, displays bounded redacted previews, and evaluates useful information through the existing private Codex runtime. Atomic storage and versioned embedding jobs are defined in the single consolidated development baseline. The hosted non-destructive upgrade is prepared for review and approval; never replay the baseline reset on the hosted database. FastAPI and the Switch listener run as separate processes. See [architecture.md](architecture.md) for runtime boundaries, recovery, storage, retrieval and reply behavior.
 
+## Database setup — one script
+
+For a **fresh database**, run only
+[`supabase/migrations/20261104000100_initial_schema.sql`](supabase/migrations/20261104000100_initial_schema.sql).
+It is standalone: core storage/embeddings, commitments and chat, reminders,
+documents (all five formats), simple capture and person profiles are included in
+one atomic transaction. No additional module SQL scripts are needed afterward.
+
+Older module files are retained in `supabase/migrations/history/` for historical
+review only. Do not run them after the original script. SQLite has a separate
+migration dialect and is unchanged.
+
+**The original script resets Team Memory tables. Never run it on an existing
+hosted database or real team data.** Existing installations keep their migration
+history and use separately reviewed additive upgrades. This consolidation did
+not change the hosted database. See [single-script setup](supabase/README.md).
+
 ## Listener startup policy
 
 Each new listener process starts at Switch's current stream head using a fresh
@@ -47,7 +64,7 @@ The commitment creation flow is **tag the bot → extract → save atomically in
 Commitment lifecycle management is implemented separately with scoped reads/actions, audit history, versions and atomic idempotency. New routes fail closed until trusted individual-user authentication is supplied. The additive migration is prepared for review, not deployed. See [COMMITMENT_MANAGEMENT.md](COMMITMENT_MANAGEMENT.md) for contracts and deployment dependencies.
 
 
-Versioned Markdown/text document ingestion is deployed and enabled in the configured
+The original versioned Markdown/text document ingestion is deployed and enabled in the configured
 backend. It adds restricted admin imports, durable version/chunk jobs, automatic
 publication and document search/citations. Hosted API/vector/failure checks passed
 and isolated fixtures were cleaned. New installations default to disabled until
@@ -55,17 +72,19 @@ their own approved migration and verification. See
 [document contracts, API and deployment](supabase/DOCUMENT_INGESTION.md).
 Current results are in [hosted document verification](supabase/DOCUMENT_DEPLOYMENT_VERIFICATION.md).
 
-Optional Discord attachment ingestion is implemented behind
-`SWITCH_DOCUMENT_ATTACHMENTS_ENABLED=false`: any sender except known bots in an enabled room receives a
-filename/ref prompt and confirms with `save REF` or declines with `skip REF`.
-Only confirmed files reach the existing automatic document pipeline. Durable
-consent/outbox state survives retries and restarts. No personal registration or
-uploader allowlist is required. Local adapter credentials and Discord bridge IDs
-are configured. Activation is blocked by the missing exact bot participant ID. Human-versus-agent
-classification is not required; uploader consent uses the authenticated sender ID. Live verification
-is still required.
-No attachment migration or live Discord test was performed. See
-[setup, conversation and limitations](supabase/DISCORD_DOCUMENT_INGESTION.md).
+The Discord document revision supports channel-only replies, uploader-only
+`yes`/`save` or `no`/`skip` consent, and filename clarification when several uploads
+are pending. Markdown/text, text-based PDF, DOCX and PPTX reuse the versioning,
+embedding and publication pipeline. Defaults are 8 MiB uploads and 256 KiB extracted
+text; existing lower local overrides remain unchanged. Binary parsing is isolated
+and bounded. Internal references remain in operator APIs/logs, never new chat replies.
+No registration or personal uploader allowlist is required.
+
+The revision is verified locally. The approved format migration is now applied to
+Supabase and backend dependencies are installed in the project venv. Shared service
+reload and live binary verification remain outstanding; deployment settings were
+not changed and no live test was performed. See
+[document setup, limits and rollout](supabase/DISCORD_DOCUMENT_INGESTION.md).
 The former browser environment editor now returns `410`; edit ignored backend
 configuration locally so privileged credentials never reach that viewer.
 
@@ -379,3 +398,10 @@ and failure reasons. Both native Switch media handles and legacy MXC handles are
 supported through the authenticated media endpoint. Keep one listener; see
 [terminal tracing and native media fix](supabase/DISCORD_DOCUMENT_INGESTION.md#terminal-tracing-and-native-media-fix-2026-11-06)
 for log stages, room ownership warnings and retry instructions.
+
+
+Document schema deployment update (2026-11-06): the approved binary-format constraint
+migration is applied in the configured Supabase project. Backend dependencies are
+installed in the project venv. The original consolidated SQL is synchronized for
+fresh installs only; never replay it on hosted data. Reload and live binary-flow
+verification remain outstanding. See the document rollout report.
