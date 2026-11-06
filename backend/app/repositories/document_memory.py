@@ -30,6 +30,14 @@ class MemoryDocumentRepository:
 
     def _call(self, scope, operation, data):
         now = self.clock()
+        if operation == 'catalog':
+            rows = [dict(id=d['id'], title=d['title'], published_version_id=d['published_version_id'],
+                         filename=self.versions[d['published_version_id']]['filename'])
+                    for d in self.documents.values() if self._visible(scope, d) and d['active']
+                    and d['published_version_id'] and self.versions[d['published_version_id']]['status'] == 'completed'
+                    and (not data.get('filename') or self.versions[d['published_version_id']]['filename'] == data['filename'])
+                    and (not data.get('title') or d['title'] == data['title'])]
+            return sorted(rows, key=lambda d: d['id'])[data['offset']:data['offset']+data['limit']]
         if operation == "import_status":
             prior = self.imports.get((scope.tenant_id,data["import_id"]))
             if not prior:

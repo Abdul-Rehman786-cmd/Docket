@@ -80,6 +80,30 @@ text; existing lower local overrides remain unchanged. Binary parsing is isolate
 and bounded. Internal references remain in operator APIs/logs, never new chat replies.
 No registration or personal uploader allowlist is required.
 
+Document discovery and questions are now implemented locally through the same
+Discord/Switch message pipeline. Mention the bot with `List our documents`,
+`Find the presentation about our launch`, or `What does planning.pdf say about
+the deadline?`. Choose a numbered result; follow with `Summarize it` or `Who is
+responsible?`. Selection is sender/room/tenant-scoped and expires after 15 minutes
+or API restart. Replies cite stored text lines; summaries explicitly disclose
+partial coverage. No new migration or dependency is required. Operator rollout
+and live verification remain pending. See [document chat setup and limits](supabase/DOCUMENT_CHAT.md).
+
+After an addressed document exchange starts, the same sender can continue without
+another mention while that room-scoped conversation is active, including a choice
+plus question such as `1 can you explain whats in it`. The AI interprets genuine
+follow-ups; unrelated chatter receives no unmentioned document reply. Expiry or
+API restart requires a new mentioned request to establish context again.
+
+The existing private AI gateway now interprets document intent by meaning,
+including inventory requests and selected-document follow-ups. Routing no longer
+depends on a catalog of matching phrases. The backend validates the structured
+intent and performs authorized metadata reads or cited retrieval; the AI does not
+invent an inventory or choose access scope. Ordinary document chat requires the general listener
+adapter credential, separately from the upload-consent credential. Startup logs
+report `general_adapter_ready` to distinguish the two; missing chat verification
+returns a setup explanation rather than querying unrelated room memories.
+
 The revision is verified locally. The approved format migration is now applied to
 Supabase and backend dependencies are installed in the project venv. Shared service
 reload and live binary verification remain outstanding; deployment settings were

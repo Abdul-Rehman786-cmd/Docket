@@ -30,6 +30,22 @@ def event(room="test-room", sequence=1):
     }
 
 
+@pytest.mark.parametrize('token,ready', [('', False), ('fixture-dedicated-adapter-'+'x'*32, True)])
+def test_startup_distinguishes_general_and_upload_adapter_credentials(token, ready, tmp_path, monkeypatch, caplog):
+    import logging
+    async def run():
+        listener = make_listener(tmp_path, switch_adapter_token=token,
+                                 switch_document_adapter_token='fixture-document-adapter-'+'y'*32)
+        async def stop(client): raise ListenerStopped('fixture stop before any network access')
+        monkeypatch.setattr(listener, 'delivery_status', stop)
+        with caplog.at_level(logging.INFO, logger='app.services.switch_listener'):
+            with pytest.raises(ListenerStopped):
+                await listener.run()
+        assert f'general_adapter_ready={ready} document_adapter_configured=True' in caplog.text
+        assert not token or token not in caplog.text
+    asyncio.run(run())
+
+
 def test_restart_starts_at_head_but_running_listener_resumes_with_generation_fencing(tmp_path):
     listener = make_listener(tmp_path)
     listener.state.cursor, listener.state.generation = 12, 3

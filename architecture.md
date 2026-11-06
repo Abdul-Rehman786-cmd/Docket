@@ -16,6 +16,46 @@ this local consolidation. SQL test harnesses now load only the standalone origin
 
 ## Versioned document module
 
+### Document discovery and answer routing
+
+The existing authenticated Discord ingestion worker invokes `DocumentChat` before
+general reasoning for addressed messages while document ingestion is enabled,
+or for unmentioned input from the same verified sender within an active document
+conversation. The active-conversation check uses tenant, room, stable sender and
+expiry; a new sender/scope, restart or expired state cannot opt into this path.
+The existing private AI gateway classifies a bounded message and sender-scoped
+selection context into a strict `DocumentIntent` (none/list/more/find/select/ask/
+summarize/clear/clarify). This replaces phrase and keyword intent matching. Known
+commitment/profile workflows and the deterministic save/skip consent protocol
+retain their existing paths. A `none` proposal continues ordinary reasoning;
+malformed, unsupported or ungrounded routing proposals ask for clarification.
+Unmentioned classification is marked continuation-only: combined choice/questions
+can select and answer in one turn, while a none proposal resumes ordinary
+processing without a channel reply. Save/skip consent remains separately routed.
+It reuses read-only scope resolution, the document repository, existing semantic
+search/model and the private Switch synthesis gateway. Listing is metadata-based;
+discovery groups chunk hits into document choices. The backend validates model
+source references and renders readable stored-text-line citations. Retrieval
+and post-synthesis checks restrict answers to current, active published versions.
+An explicit document path never falls back to room-memory retrieval.
+AI-routed inventory requests use metadata listing. Model-supplied names must be
+grounded in the current message; displayed choice indexes are revalidated against
+the sender's current list. The model cannot supply tenant/room/document IDs,
+authorize writes or bypass current publication/scope checks. Missing trusted adapter identity returns a configuration
+explanation before general reasoning; upload and ordinary-chat adapter credentials
+are separate, and listener startup reports their readiness separately.
+
+A bounded process-local cache holds selected IDs, choices and two short context
+turns by tenant/room/stable sender, with 15-minute expiry and 200-scope capacity.
+Source-message replay guards prevent stale selection commands acting on new
+choices; durable ingestion deduplication remains unchanged. No schema changes
+or new dependencies/models are introduced. API restart loses selection, not
+documents. Deploy one API process for consistent selections. Summaries sample
+at most eight source-order chunks and always disclose partial coverage. See
+[document chat contracts, verification and rollout](supabase/DOCUMENT_CHAT.md).
+
+### Imports, storage and publication
+
 Document-specific controllers/models/services/repositories implement restricted
 development-admin UTF-8 Markdown/text imports. Scope comes from backend tenant
 configuration and enabled room mappings. Imports commit source, versions, chunks

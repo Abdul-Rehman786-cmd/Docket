@@ -140,8 +140,9 @@ Citations refer to stored text lines, including extracted-text lines for binary
 formats. Search responses explicitly carry `location_basis=stored_text_lines`.
 They do **not** claim original PDF pages, DOCX pagination or PowerPoint slide
 positions. Original source metadata is retained separately. Document retrieval
-through the existing scoped search API remains separate from Discord answer
-integration; this revision does not connect document search to ordinary AI replies.
+through the existing scoped search API remains available independently. Explicit
+document commands and supported sender-specific follow-ups now use the local
+[document chat pipeline](DOCUMENT_CHAT.md); ordinary room-memory replies remain separate.
 
 ## Applied migration and remaining service rollout
 

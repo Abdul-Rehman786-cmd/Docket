@@ -14,6 +14,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketExce
 from app.core.config import BACKEND_DIR, Settings
 from app.models.messages import IncomingMessage, MessageReceipt, MessageStatus
 from app.core.feature_logging import feature_event
+from app.core.security import trusted_adapter
 from app.models.document_attachments import AttachmentMessage, AttachmentReceipt
 from app.services.document_commands import document_command
 from app.repositories.listener_state import ListenerState, listener_identity, document_reply_session
@@ -316,6 +317,9 @@ class SwitchListener:
     async def run(self) -> None:
         delay = 1
         logger.info("Switch startup policy=live_only; offline events will be skipped")
+        logger.info("listener stage=adapter_configuration general_adapter_ready=%s document_adapter_configured=%s",
+            trusted_adapter(self.settings.switch_adapter_token.get_secret_value(), self.settings),
+            bool(self.settings.switch_document_adapter_token.get_secret_value()))
         logger.info("document stage=listener_start enabled=%s rooms=%d bridge_configured=%s bot_configured=%s adapter_configured=%s",
             self.settings.switch_document_attachments_enabled,len(self.settings.allowed_switch_rooms),
             bool(self.settings.document_discord_bridges),bool(self.settings.switch_document_bot_sender_id),
