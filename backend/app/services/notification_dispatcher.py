@@ -22,6 +22,8 @@ def dispatch_when(context,now):
     if (record.tenant_id,record.room_id,record.id)!=(intent.tenant_id,intent.room_id,intent.commitment_id):return None
     if (not eligible(work) or record.version!=intent.commitment_version or policy.version!=intent.policy_version
         or record.owner_switch_user_id!=intent.recipient_id):return None
+    is_meeting=bool(re.search(r'\bmeeting\b',record.description,re.I))
+    if is_meeting and (intent.kind=='overdue' or now>=record.due_at):return None
     if intent.kind=='upcoming' and (now>=record.due_at or history.upcoming_sent):return None
     if intent.kind=='overdue' and (history.overdue_sent!=intent.ordinal or history.overdue_sent>=policy.max_followups):return None
     earliest=max(now,intent.occurrence_base)
@@ -33,18 +35,38 @@ def dispatch_when(context,now):
     return when
 
 
+def _format_time_with_timezone(dt, policy, settings):
+    """Format datetime with user room timezone if configured, plus UTC reference."""
+    u_dt = utc(dt)
+    tz_str = (policy.timezone if policy and policy.timezone else None) or settings.commitment_timezone
+    if tz_str and tz_str != 'UTC':
+        try:
+            from zoneinfo import ZoneInfo
+            loc_dt = u_dt.astimezone(ZoneInfo(tz_str))
+            tz_code = loc_dt.strftime('%Z')
+            formatted_local = loc_dt.strftime('%Y-%m-%d %I:%M %p')
+            return f"Time: {formatted_local} {tz_code} ({u_dt.strftime('%H:%M')} UTC)\nDeadline (UTC): {u_dt.isoformat()}"
+        except Exception:
+            pass
+    return f"Deadline (UTC): {u_dt.isoformat()}"
+
+
 def reminder_template(context,settings):
     task=context.work.commitment
+    policy=context.work.policy
     description=json.loads(message_text_for_log(task.description,settings,max_length=500))
     # Never forward mass/user mentions embedded in source text; no fabricated pings.
     description=' '.join(description.replace('@','＠').replace('<','‹').replace('>','›').split())
     is_meeting = bool(re.search(r'\bmeeting\b', task.description, re.I))
+    time_str = _format_time_with_timezone(task.due_at, policy, settings)
     if is_meeting:
         label='Upcoming' if context.delivery.intention.kind=='upcoming' else 'Due / overdue'
-        return (f'🔔 Reminder: {label} meeting: {description}\nDeadline (UTC): {utc(task.due_at).isoformat()}\n'
-                f'[source:{task.message_id}] [reminder:{context.delivery.intention.occurrence_key}]')
+        owner = (task.owner_name or task.owner_switch_user_id or '').strip()
+        owner = ' '.join(owner.replace('@','＠').replace('<','‹').replace('>','›').split())
+        source_line = f'\n[source: {owner}]' if owner and owner not in ('unassigned', 'room-member', 'Unknown sender') else ''
+        return f'🔔 Reminder: {label} meeting: {description}\n{time_str}{source_line}'
     label='Upcoming' if context.delivery.intention.kind=='upcoming' else 'Due / overdue'
-    return (f'{label} task: {description}\nDeadline (UTC): {utc(task.due_at).isoformat()}\n'
+    return (f'{label} task: {description}\n{time_str}\n'
             f'[source:{task.message_id}] [reminder:{context.delivery.intention.occurrence_key}]')
 
 

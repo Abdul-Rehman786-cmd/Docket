@@ -372,6 +372,7 @@ async def _approve_supabase_commitments(
                 "approval_by_switch_user_id": owner_id,
                 "approval_at": now_iso,
                 "owner_switch_user_id": owner_id,
+                "owner_name": c_item.get("owner_name") or source.get("author_name"),
             }
             if c_item.get("due_at"):
                 patch_data["due_at"] = c_item["due_at"]

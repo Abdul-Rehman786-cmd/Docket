@@ -158,6 +158,11 @@ def test_meeting_reminder_planning_with_custom_user_duration():
     assert intention_60.kind == "upcoming"
 
 
+    # 4. Once meeting time passes, past meetings do NOT trigger overdue reminders
+    clock_after = meeting_time + timedelta(minutes=10)
+    assert plan_reminder(work_60, clock_after) is None
+
+
 def test_meeting_reminder_template_and_room_dispatch():
     comm = CommitmentState(
         id=uuid4(),
@@ -166,6 +171,7 @@ def test_meeting_reminder_template_and_room_dispatch():
         message_id=uuid4(),
         extraction_key="comm-1",
         description="Meeting: Weekly Standup",
+        owner_name="msah",
         due_at=NOW + timedelta(minutes=15),
         approval_status="approved",
         approval_by_switch_user_id="admin",
@@ -200,8 +206,9 @@ def test_meeting_reminder_template_and_room_dispatch():
     text = reminder_template(ctx, settings)
     assert "🔔 Reminder: Upcoming meeting: Meeting: Weekly Standup" in text
     assert "Deadline (UTC):" in text
-    assert f"[source:{comm.message_id}]" in text
-    assert f"[reminder:{intention.occurrence_key}]" in text
+    assert "[source: msah]" in text
+    assert str(comm.message_id) not in text
+    assert "[reminder:" not in text
 
     # For meetings, notification routes directly to the room
     envelope = reminder_notification(ctx, settings)

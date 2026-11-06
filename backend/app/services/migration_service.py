@@ -18,6 +18,7 @@ MIGRATION_TABLES = [
     ("room_members", ["tenant_id", "room_id", "switch_user_id", "role", "created_at"]),
     ("messages", ["id", "tenant_id", "room_id", "switch_message_id", "switch_author_id", "author_name", "body", "occurred_at", "created_at"]),
     ("commitments", ["id", "tenant_id", "room_id", "message_id", "owner_name", "description", "due_at", "approval_status", "task_status", "created_at"]),
+    ("reminder_deliveries", ["id", "tenant_id", "room_id", "commitment_id", "scheduled_for", "status", "attempts", "occurrence_key", "recipient_id", "commitment_version", "policy_version", "reminder_type", "ordinal", "occurrence_base", "claim_token", "lease_until", "dispatch_started_at", "sent_at", "next_attempt_at", "switch_reply_message_id", "error_code", "notification_body", "created_at"]),
     ("decisions", ["id", "tenant_id", "room_id", "message_id", "topic", "summary", "approval_status", "decision_status", "created_at"]),
     ("memories", ["id", "tenant_id", "room_id", "message_id", "content", "memory_type", "content_hash", "embedding", "active", "created_at"]),
     ("person_profiles", ["id", "tenant_id", "room_id", "switch_author_id", "display_name", "created_at"]),

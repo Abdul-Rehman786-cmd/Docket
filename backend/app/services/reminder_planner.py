@@ -1,5 +1,6 @@
 """Pure reminder planning. No database, Switch, LLM or wall clock calls."""
 from datetime import datetime,timedelta,timezone
+import re
 from uuid import NAMESPACE_URL,uuid5
 from zoneinfo import ZoneInfo,ZoneInfoNotFoundError
 from app.models.reminders import ReminderWork,ReminderIntention,ReminderPolicy
@@ -43,11 +44,12 @@ def plan_reminder(work:ReminderWork,now:datetime)->ReminderIntention|None:
     if not eligible(work) or work.history.blocking_delivery:return None
     task,prefs,history=work.commitment,work.policy,work.history
     due=utc(task.due_at)
+    is_meeting=bool(re.search(r'\bmeeting\b',task.description,re.I))
     if now<due:
         if history.upcoming_sent:return None
         kind,ordinal,base='upcoming',0,due-timedelta(minutes=prefs.lead_minutes)
     else:
-        if history.overdue_sent>=prefs.max_followups:return None
+        if is_meeting or history.overdue_sent>=prefs.max_followups:return None
         kind,ordinal='overdue',history.overdue_sent
         base=max(due,utc(history.last_overdue_at)+timedelta(minutes=prefs.cadence_minutes)) if history.last_overdue_at else due
     if history.last_sent_at:

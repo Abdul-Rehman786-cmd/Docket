@@ -80,7 +80,8 @@ class SqliteReminderRepository:
             cursor = conn.cursor()
             placeholders = ",".join("?" for _ in allowed_rooms)
             query = f"""
-                SELECT c.id, c.tenant_id, c.room_id, c.message_id, c.description, c.owner_name,
+                SELECT c.id, c.tenant_id, c.room_id, c.message_id, c.description,
+                       COALESCE(c.owner_name, m.author_name) AS owner_name,
                        c.due_at, c.approval_status, c.task_status, c.created_at,
                        r.switch_room_id, 1 AS room_enabled,
                        m.switch_author_id, NULL AS thread_id
@@ -358,7 +359,9 @@ class SqliteReminderRepository:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT d.*, c.message_id, c.description, c.owner_name, c.due_at, c.approval_status, c.task_status, c.created_at,
+                SELECT d.*, c.message_id, c.description,
+                       COALESCE(c.owner_name, m.author_name) AS owner_name,
+                       c.due_at, c.approval_status, c.task_status, c.created_at,
                        r.switch_room_id, 1 AS room_enabled,
                        m.switch_author_id, NULL AS thread_id
                 FROM reminder_deliveries d

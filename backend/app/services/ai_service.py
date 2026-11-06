@@ -1033,7 +1033,19 @@ class AIService:
                     is_meeting = any(re.search(r'\bmeeting\b', c.description, re.I) for c in decision.commitments)
                     if is_meeting:
                         c = decision.commitments[0]
-                        time_info = f" for {c.due_at}" if c.due_at else ""
+                        time_info = ""
+                        if c.due_at:
+                            try:
+                                dt = datetime.fromisoformat(str(c.due_at).replace('Z', '+00:00'))
+                                if settings.commitment_timezone and settings.commitment_timezone != 'UTC':
+                                    from zoneinfo import ZoneInfo
+                                    loc_dt = dt.astimezone(ZoneInfo(settings.commitment_timezone))
+                                    tz_code = loc_dt.strftime('%Z')
+                                    time_info = f" for {loc_dt.strftime('%Y-%m-%d %I:%M %p')} {tz_code} ({dt.strftime('%H:%M')} UTC)"
+                                else:
+                                    time_info = f" for {c.due_at}"
+                            except Exception:
+                                time_info = f" for {c.due_at}"
                         final_answer = f"📅 Meeting scheduled: {c.description}{time_info}. Automatic reminder will be sent to the room before the meeting starts."
                     else:
                         final_answer='Task saved in Supabase. Search indexing is pending.'
@@ -1084,10 +1096,23 @@ class AIService:
 
             if should_reply:
                 is_meeting = bool(decision.commitments and any(re.search(r'\bmeeting\b', c.description, re.I) for c in decision.commitments))
+                meeting_time_str = ""
+                if is_meeting and decision.commitments[0].due_at:
+                    c_due = decision.commitments[0].due_at
+                    try:
+                        dt = datetime.fromisoformat(str(c_due).replace('Z', '+00:00'))
+                        if settings.commitment_timezone and settings.commitment_timezone != 'UTC':
+                            from zoneinfo import ZoneInfo
+                            loc_dt = dt.astimezone(ZoneInfo(settings.commitment_timezone))
+                            tz_code = loc_dt.strftime('%Z')
+                            meeting_time_str = f" (Time: {loc_dt.strftime('%Y-%m-%d %I:%M %p')} {tz_code} / {dt.strftime('%H:%M')} UTC)"
+                        else:
+                            meeting_time_str = f" (Time: {c_due})"
+                    except Exception:
+                        meeting_time_str = f" (Time: {c_due})"
+
                 meeting_reply = (
-                    f"📅 Meeting scheduled: {decision.commitments[0].description}"
-                    + (f" (Time: {decision.commitments[0].due_at})" if decision.commitments[0].due_at else "")
-                    + ". Automatic reminder will be sent to the room before the meeting starts."
+                    f"📅 Meeting scheduled: {decision.commitments[0].description}{meeting_time_str}. Automatic reminder will be sent to the room before the meeting starts."
                 ) if is_meeting else None
 
                 reply_body = (
