@@ -113,6 +113,25 @@ This document describes the system architecture, component boundaries, Switch ag
 
 ## Current implementation: FastAPI and Switch message delivery
 
+Before private AI requests, FastAPI resolves the non-AI client's registered name
+from its configured Switch agent ID. Input-room membership checks use that name,
+so clients such as `docket` work without the old `team-memory-client` name.
+Missing or mismatched identity still blocks delivery, and Codex must remain out
+of input rooms.
+One-time Switch setup also resolves the configured client's registered name for
+room creation, invitations and membership checks. `team-memory-client` is only
+the default name when registering a new client; existing clients are reused by ID.
+
+Switch operations log allow-listed operation names, status, duration and attempts,
+without remote payloads or credentials. Read-only metadata/history operations retry
+one transport or HTTP 502/503/504 failure after 250 ms, within the existing request
+timeout. Authorization, validation, rate-limit and connection-ownership errors do
+not retry. Sends never retry in this transport; the legacy direct-message fallback
+is used only for an explicit unknown-operation (404) response. Stream failures
+have separate diagnostic events. Existing durable recovery remains bounded and
+retains its 30-second delay for failures that cannot recover in place. Starting
+a new processing attempt clears stale errors in the viewer result.
+
 ### Optional person profiles
 
 `PERSON_PROFILES_ENABLED=false` keeps profile extraction disabled by default. When

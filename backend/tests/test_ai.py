@@ -40,9 +40,9 @@ def detail(**updates):
             "agent_names": ["team-memory-client", "codex-discord"], **updates}
 
 
-def input_detail(room_id):
+def input_detail(room_id, requester_name="team-memory-client"):
     return {"id": room_id, "bridge_id": "fixture-bridge", "external_channel_id": "fixture-channel",
-            "agent_names": ["team-memory-client"]}
+            "agent_names": [requester_name]}
 
 
 def test_clean_reply_text_removes_source_tags():
@@ -296,7 +296,7 @@ def test_added_room_participant_prevents_question_delivery(ai_config, monkeypatc
         if name == "get_room_detail":
             return detail() if args["room_id"] == "private-room" else input_detail(args["room_id"])
         if name == "get_agent_detail":
-            return {"sessions": []}
+            return {"id": args["agent_id"], "name": "team-memory-client", "sessions": []}
         if name == "list_participants":
             return [{"id": "test-agent"}, {"id": "fixture-requester"}, {"id": "unexpected-agent"}]
         raise AssertionError("Question must not be posted")
@@ -309,7 +309,7 @@ def test_added_room_participant_prevents_question_delivery(ai_config, monkeypatc
     monkeypatch.setattr(SwitchAPI, "room_connection", room_connection)
     with pytest.raises(SwitchError, match="only Codex"):
         asyncio.run(ai_service.ask_switch(Settings(_env_file=None), "Private fixture question"))
-    assert calls == ["get_room_detail", "get_agent_detail", "get_room_detail", "get_room_detail", "list_participants"]
+    assert calls == ["get_room_detail", "get_agent_detail", "get_agent_detail", "get_room_detail", "get_room_detail", "list_participants"]
 
 
 def test_codex_reinvited_to_input_room_blocks_api_question_before_posting(ai_config, monkeypatch):
@@ -318,7 +318,7 @@ def test_codex_reinvited_to_input_room_blocks_api_question_before_posting(ai_con
     async def operation(self, client, name, args, connection_id=None):
         calls.append(name)
         if name == "get_agent_detail":
-            return {"sessions": []}
+            return {"id": args["agent_id"], "name": "team-memory-client", "sessions": []}
         assert name == "get_room_detail"
         if args["room_id"] == "private-room":
             return detail()
@@ -329,7 +329,25 @@ def test_codex_reinvited_to_input_room_blocks_api_question_before_posting(ai_con
     monkeypatch.setattr(SwitchAPI, "operation", operation)
     with pytest.raises(SwitchError, match="without Codex"):
         asyncio.run(ai_service.ask_switch(Settings(_env_file=None), "Private question"))
-    assert calls == ["get_room_detail", "get_agent_detail", "get_room_detail"]
+    assert calls == ["get_room_detail", "get_agent_detail", "get_agent_detail", "get_room_detail"]
+
+
+@pytest.mark.parametrize("requester", [None, {}, {"id": "another-agent", "name": "docket"},
+    {"id": "fixture-requester", "name": ""}, {"id": "fixture-requester", "name": 42}])
+def test_invalid_listener_identity_blocks_question_before_posting(ai_config, monkeypatch, requester):
+    calls = []
+
+    async def operation(self, client, name, args, connection_id=None):
+        calls.append(name)
+        if name == "get_room_detail":
+            return detail()
+        assert name == "get_agent_detail"
+        return requester if args["agent_id"] == "fixture-requester" else {"sessions": []}
+
+    monkeypatch.setattr(SwitchAPI, "operation", operation)
+    with pytest.raises(SwitchError, match="registered listener identity"):
+        asyncio.run(ai_service.ask_switch(Settings(_env_file=None), "Private question"))
+    assert calls == ["get_room_detail", "get_agent_detail", "get_agent_detail"]
 
 
 def test_live_discord_session_prevents_question_even_after_membership_removal(ai_config, monkeypatch):
@@ -381,7 +399,8 @@ def test_pending_queue_is_bounded_and_shutdown_cancels_without_resubmission(ai_c
     asyncio.run(run())
 
 
-def test_real_socket_correlates_exact_sender_and_thread_and_keeps_heartbeat(ai_config, monkeypatch):
+@pytest.mark.parametrize("requester_name", ["team-memory-client", "docket"])
+def test_real_socket_correlates_exact_sender_and_thread_and_keeps_heartbeat(ai_config, monkeypatch, requester_name):
     async def run():
         targeted = asyncio.Event()
         heartbeat = asyncio.Event()
@@ -416,11 +435,11 @@ def test_real_socket_correlates_exact_sender_and_thread_and_keeps_heartbeat(ai_c
             assert "fixture-client-key" not in str(request.url)
             if op == "get_room_detail":
                 room_id = json.loads(request.content)["room_id"]
-                return httpx.Response(200, json={"result": detail() if room_id == "private-room" else input_detail(room_id)})
+                return httpx.Response(200, json={"result": detail() if room_id == "private-room" else input_detail(room_id, requester_name)})
             if op == "list_participants":
                 return httpx.Response(200, json={"result": [{"id": "fixture-requester"}, {"id": "test-agent"}]})
             if op == "get_agent_detail":
-                return httpx.Response(200, json={"result": {"sessions": []}})
+                return httpx.Response(200, json={"result": {"id": json.loads(request.content)["agent_id"], "name": requester_name, "sessions": []}})
             assert op == "send_targeted_message"
             body = json.loads(request.content)
             assert body["target_names"] == ["codex-discord"]
@@ -439,7 +458,7 @@ def test_real_socket_correlates_exact_sender_and_thread_and_keeps_heartbeat(ai_c
             settings = Settings(_env_file=None, switch_bridge_url=f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}")
             answer = await asyncio.wait_for(ai_service.ask_switch(settings, "A fixture question"), timeout=5)
         assert answer == "Correct answer"
-        assert operations == ["get_room_detail", "get_agent_detail", "get_room_detail", "get_room_detail", "list_participants", "get_room_detail", "send_targeted_message"]
+        assert operations == ["get_room_detail", "get_agent_detail", "get_agent_detail", "get_room_detail", "get_room_detail", "list_participants", "get_room_detail", "send_targeted_message"]
 
     asyncio.run(run())
 

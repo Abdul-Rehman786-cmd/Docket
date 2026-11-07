@@ -196,6 +196,10 @@ multi-instance delivery guarantee is claimed.
 ## Troubleshooting
 
 Use content-free logs: `FEATURE_LOGS_ENABLED=true`, `LOG_LEVEL=INFO`.
+Switch diagnostics report operation names, HTTP status, elapsed milliseconds and
+attempt number without prompts, document text or credentials. Temporary transport
+errors and HTTP 502/503/504 on read-only operations receive one short retry.
+Message sends are not automatically retried after uncertain delivery.
 Keep message/wire logging off; see [feature logging](FEATURE_LOGGING.md).
 
 | Symptom | Meaning / action |

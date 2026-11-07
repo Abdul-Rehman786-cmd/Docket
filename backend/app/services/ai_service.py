@@ -288,9 +288,13 @@ async def ask_switch(settings: Settings, question: str, *, synthesis: bool = Fal
         require_internal_room(detail, settings.switch_ai_room_id, settings.switch_ai_agent_name)
         agent = await api.operation(client, "get_agent_detail", {"agent_id": settings.switch_agent_id})
         require_no_input_sessions(agent, settings.allowed_switch_rooms)
+        requester = await api.operation(client, "get_agent_detail", {"agent_id": settings.switch_requester_agent_id})
+        if (not isinstance(requester, dict) or requester.get("id") != settings.switch_requester_agent_id
+                or not isinstance(requester.get("name"), str) or not requester["name"].strip()):
+            raise SwitchError("Could not verify the registered listener identity. No question was posted.")
         for room_id in sorted(settings.allowed_switch_rooms):
             input_room = await api.operation(client, "get_room_detail", {"room_id": room_id})
-            require_observer_only_input(input_room, room_id, settings.switch_ai_agent_name, "team-memory-client")
+            require_observer_only_input(input_room, room_id, settings.switch_ai_agent_name, requester["name"])
         async with api.room_connection(settings.switch_ai_room_id) as (connection_id, events):
             participants = await api.operation(client, "list_participants", {}, connection_id)
             if {participant.get("id") for participant in participants} != {
@@ -761,6 +765,7 @@ class AIService:
                 del scope, row, settings, meta
 
     async def _run(self, scope, row, settings: Settings, *, source_meta: dict | None = None):
+        self.repository.update(scope, row.request_id, error=None)
         msg_ref = row.source_message_ref or "direct-question"
         chat_outcome=None
         capture_input=None
