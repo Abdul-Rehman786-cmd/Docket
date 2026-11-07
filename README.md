@@ -1,377 +1,395 @@
-# Docket
+# Docket — Team Memory
 
-Team Memory turns team conversations into source-backed, searchable project memory.
-It combines a FastAPI backend, Switch-connected chat, private AI reasoning, local
-embeddings, Supabase storage, optional SQLite storage, and a browser viewer. The
-Expo mobile app is currently a starter, not a complete team-management interface.
+Docket turns team chat and uploaded documents into searchable project memory.
+Teammates can record commitments, retain decisions and facts, save documents with
+uploader consent, and ask source-backed questions from their chat channel.
 
-The project covers Discord **and Slack**. They do not yet have equivalent support:
-Discord ingestion and document upload have live evidence; Slack connectivity has
-been checked, but Slack document upload and cited document conversations are still
-incomplete in the current checkout. A feature being in the project scope does not
-mean it is deployed or working end to end.
+Built for the Flip the Switch Hackathon using **Switch, Codex, FastAPI, cloud
+Supabase/PostgreSQL, and local 384-dimensional text embeddings**. The repository
+also includes a browser viewer and optional SQLite adapters.
 
-## Functionality and current status
+## How we used Switch
 
-This overview reflects code inspection and the latest user-reported runtime
-results. Linked verification reports describe their own snapshots; they do not
-prove the current hosted schema, configuration, or every later code revision.
+Switch is the communication hub. FastAPI coordinates the work; Codex supplies AI
+reasoning through Switch rather than through a separate model API integration.
 
-| Module | Functionality present | Remaining work / verification |
-| --- | --- | --- |
-| Chat ingestion | Switch listener, authenticated FastAPI ingress, configured tenant/room boundaries, source IDs, durable receipt/retry journal, duplicate and self/echo guards. | Keep one listener running. Slack document events need explicit platform support; receiving an ordinary Slack message does not verify file processing. |
-| Private AI and replies | Existing Switch-connected Codex runtime interprets messages and answers questions; a separate non-AI client posts application replies. Viewer questions and configured chat replies reuse that runtime. | Verify private-room isolation, reply policy, and current credentials for each deployment. No additional model-provider migration is part of this milestone. |
-| Useful memory and decisions | Structured extraction of facts, decisions, commitments and linked summaries; source-backed storage and retrieval. General fact/decision drafts can request save/skip confirmation. | Hosted functions, room mappings and selected storage engine must match the running code. Do not infer durable storage from an ingress acknowledgement. |
-| Tagged commitment creation | Explicitly mention the registered bot with a clear personal promise; derive ownership from the delivered sender ID; save source/task/summary and queue embedding. No member registration or manual sender mapping is required for this creation path. | Preserve unresolved deadline wording instead of inventing an instant. Saving a task does not automatically enable every lifecycle or reminder policy. |
-| Commitment lifecycle | Separate approve/reject/start/complete/cancel/reassign/reschedule service, scoped reads/history, version checks, idempotency, audit and linked-memory updates. | Public/manual actions fail closed without individual-user authentication. Advanced conversational actions have separate adapter/policy/schema gates; local implementation is not proof of hosted deployment. |
-| Embeddings and semantic retrieval | Local CPU `Supabase/gte-small`, 384-dimensional vectors, durable jobs, leases, retry recovery, content-hash/stale-vector protection and scoped search. | Install/verify model assets. A saved record or an idle worker is not evidence that a particular vector is stored and searchable. |
-| Reminders | Pure planner, bounded scheduling loops, durable delivery outbox, claims/recovery, current-state checks, quiet hours, cadence and Switch dispatcher. SQLite and Supabase adapters exist. | Global planning, delivery, room policy, acceptance and deadline eligibility must all allow the reminder. Hosted atomic functions and real external delivery need separate verification. |
-| Discord documents | Upload consent, parsing, immutable versions/chunks, embedding/publication, metadata listing, document selection, questions, summaries and citations are implemented. | User reported a PDF upload reaching the final saved confirmation. Document questions subsequently returned an adapter-verification error. The complete upload-to-cited-answer flow is **not yet verified working** in the current deployment. |
-| Slack documents | Required project feature: use the existing Slack/Switch connection for the same consent, import, indexing and reference workflow. | **Not working end to end.** Current attachment allow-list, event model and document-chat origin checks remain Discord-specific. Restore/integrate platform-aware support, then verify real Slack files, publication, citations and replies. A Slack connection alone is insufficient. |
-| Person profiles | Optional sender/tenant/room-scoped, source-backed claims, corrections, evidence and profile retrieval; Supabase and SQLite persistence code. | Individual-user HTTP reads remain gated. Verify current enabled policy and sender isolation with fresh fixtures; do not infer cross-platform identity from names. |
-| SQLite and storage management | Local relational storage, atomic extraction, memory vectors/search, profiles/reminders, cloud-to-local migration tooling, retention and space controls. | Not every repository switches engines: current document import/chat/worker and lifecycle adapters still use Supabase. Verify each module; do not describe engine switching as complete parity or automatic two-way sync. |
-| Browser viewer/settings | Live feed, AI requests/results, database engine/location, migration, retention/quota and reminder controls exist. | Some current settings/environment/storage handlers lack route-level authentication. These are local development controls pending security work, not production-authorized settings. |
-| Mobile app | Expo/React Native starter with backend health-check connectivity. | Full authenticated tasks, documents, search and settings screens remain to be implemented. |
-| Document conflicts and write-back | Architecture scope includes detecting decisions that conflict with documents and proposing reviewed edits. | Conflict detection, proposed-update approval and safe document write-back are **not implemented**. Uploading a new version is not this workflow. |
-| Broader preferences and onboarding | Configuration and some room/reminder policies exist. | Full user authentication, authorized preference editing, recording controls, multi-workspace onboarding and complete mobile settings remain future work. |
-
-## System flow
+| Connected component | What it does |
+| --- | --- |
+| **`docket`** | Our registered non-AI Switch client. A Python listener receives channel events and forwards them to authenticated FastAPI endpoints. The same client posts application replies through Switch. |
+| **`codex-discord`** | The existing Codex AI agent. FastAPI sends classification, extraction and answer-generation requests to it in a private Switch room. Its runtime owns model authentication. |
+| **Discord-bot bridge** | Connects the Discord demonstration channel to Switch room **Idk** and carries replies back to Discord. |
+| **Slack bridge** | Connects the additional **Slack: bot** room. Platform-aware code exists, but equivalent end-to-end document behavior needs separate verification. |
 
 ```text
-Discord / Slack -> Switch -> one listener -> authenticated FastAPI
-                                               |
-                         +---------------------+-------------------+
-                         |                     |                   |
-                    Private AI          Commitment service    Document service
-                  proposals/answers      validated actions     consent/import
-                         |                     |                   |
-                         +------ repositories / atomic writes -----+
-                                               |
-                             Supabase / supported SQLite adapters
-                                               |
-                              embedding jobs -> scoped retrieval
-                                               |
-                            non-AI Switch client -> originating chat
-
-Browser / Expo -> FastAPI only
-Reminder planner -> durable outbox -> dispatcher -> Switch
+Discord / Slack -> Switch input room -> Python listener -> FastAPI
+                                                            |
+                                       private Switch room <-> Codex
+                                                            |
+                                         Supabase + local embeddings
+                                                            |
+Originating chat <- Switch bridge <- non-AI client <- FastAPI reply
 ```
 
-AI proposes interpretations; backend services enforce scope, validation, versions
-and persistence. The AI does not receive unrestricted database access. Ordinary
-chat uses the shared orchestration, while lifecycle rules, documents, reminders,
-profiles and repositories remain separate modules.
+### Channel and room setup
 
-The intended document path on both platforms is:
+Our demo uses the public Discord-linked Switch room **Idk**, containing `docket`.
+The additional input room is **Slack: bot**. `SWITCH_ROOM_IDS` contains their Switch
+room UUIDs, not Discord channel IDs. `SWITCH_TENANT_ID` identifies the application
+scope; the database needs matching enabled room mappings.
 
-```text
-Upload -> uploader confirms -> bounded extraction -> document/version/chunks
-       -> embeddings completed -> publication -> cited questions and summaries
-```
+The internal room **team-memory-server-responses** contains only `docket` and
+`codex-discord`. It has **no messaging bridge or external channel** and must not be
+included in `SWITCH_ROOM_IDS`. Codex stays out of input rooms so it cannot bypass
+FastAPI and answer independently. The listener receives all events (`filter=all`);
+receiving an event does not mean the bot should reply to it.
 
-This is the target for Slack and the implemented Discord contract, not a claim
-that both platforms currently pass live end-to-end verification.
+Switch supplies room, sender, message, timestamp and addressing metadata. FastAPI
+validates scope, manages durable jobs and storage, retrieves evidence and returns
+answers through the non-AI client. Privileged database credentials stay on the
+backend.
 
-## Repository layout
+**Name compatibility:** this checkout accepts `docket` and the older
+`team-memory-client` name in its input-room guard. However, the one-time
+`app.switch_setup` command still creates and expects `team-memory-client`.
+For our already-provisioned `docket` installation, reuse its existing credentials
+and rooms; do not rerun provisioning just to start the application. New setups
+using that command should retain its default name. In chat, address the actual
+registered agent or its configured alias; an old Discord mention role may be stale.
 
-- `backend/app/controllers/`: HTTP validation, dependencies and responses.
-- `backend/app/models/`: validated payloads and domain values.
-- `backend/app/services/`: extraction, lifecycle, retrieval, documents, reminders,
-  profiles, Switch adapters and storage orchestration.
-- `backend/app/repositories/`: persistence, atomic-operation adapters and journals.
-- `backend/app/core/`: configuration, security, HTTP pools, embedding model and logs.
-- `backend/app/views/`: browser viewer and settings.
-- `backend/tests/`: domain, endpoint, transport, parser and regression tests.
-- `supabase/migrations/`: database schema; `history/` preserves historical scripts.
-- `supabase/tests/`: disposable PostgreSQL/PGlite contracts and fixtures.
-- `mobile/`: Expo TypeScript app.
-- [architecture.md](architecture.md): design, module contracts and historical plans.
-- [AGENTS.md](AGENTS.md): repository development/security rules.
+## Run locally
 
-## Run locally on Windows
+Use Python 3.11–3.13; local embeddings have been tested with Python 3.13.
+Keep the existing Switch server, Discord connection and Codex runtime available.
+FastAPI and the listener are two separate processes. Run **one of each**, with
+one API worker, and preserve `backend/.local/` across restarts.
 
-From the repository root:
+### Repository layout
+
+| Location | Responsibility |
+| --- | --- |
+| `backend/app/controllers/` | HTTP endpoints and authentication dependencies. |
+| `backend/app/models/` | Validation, structured AI output and domain types. |
+| `backend/app/services/` | Switch communication, extraction, document processing, retrieval and workers. |
+| `backend/app/repositories/` | Supabase/SQLite operations and durable local journals. |
+| `backend/app/core/` | Configuration, security, logging and the embedding model. |
+| `backend/app/views/` | Browser feed, AI results and development settings. |
+| `backend/tests/` | Backend regression, security and workflow tests. |
+| `supabase/migrations/` | Timestamped database schema and historical scripts. |
+| `supabase/tests/` | Disposable database checks, separate from hosted data. |
+| `architecture.md` | Detailed design, boundaries and deployment history. |
+
+### 1. Install dependencies
+
+From the repository root in PowerShell:
 
 ```powershell
 cd backend
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+python -m pip install -r requirements-dev.txt -r requirements-embeddings.txt
 if (-not (Test-Path -LiteralPath .env)) {
     Copy-Item -LiteralPath .env.example -Destination .env
 }
+python -m app.embedding_setup
 ```
 
-Skip virtual-environment creation if it already exists. Preserve existing ignored
-configuration; never replace a working `.env` with the example. Do not commit
-secrets or place privileged credentials in mobile `EXPO_PUBLIC_*` settings.
+If using the existing virtual environment, replace `python` in these commands and
+the startup commands below with `.\.venv\Scripts\python.exe`. Creating a new
+virtual environment is optional. Model setup downloads pinned public assets;
+embedding inference then runs locally on CPU and requires no model API key.
 
-Start FastAPI in terminal 1:
+### 2. Configure ignored `backend/.env`
 
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
-```
+Use [backend/.env.example](backend/.env.example) as the non-secret template.
+Root `.env` is also supported; `backend/.env` takes precedence over it, and shell
+variables take precedence over both. Never copy real credentials into this README,
+client configuration, screenshots or commits.
 
-`SWITCH_BACKEND_URL` must use the same port. If it ends in `:8001`, either use
-`--port 8001` or deliberately change the local setting to match. Use the configured
-port for all browser and health-check URLs.
-
-Open `http://127.0.0.1:8000/` for the viewer and `/docs` for API documentation.
-`GET /health` confirms API liveness only, not Switch, Supabase or model readiness.
-The authenticated viewer feed uses the local ingest token; that token is not a
-human session or an admin credential. Do not paste it into URLs.
-
-With the API running, use terminal 2 from `backend/`:
-
-```powershell
-.\.venv\Scripts\python.exe -m app.switch_listener --check
-.\.venv\Scripts\python.exe -m app.switch_listener
-```
-
-`--check` verifies API authentication, Switch connectivity and configured room
-membership, then exits without forwarding messages. Run **one API worker and one
-listener**. API reload does not restart the listener. A second listener can take
-over room claims from the first.
-
-Every new listener process starts at the current stream head: uploads/messages
-sent while it was offline are skipped. Transient reconnects within that process
-resume from its acknowledged cursor. Already accepted backend jobs and confirmed
-imports recover from their journals. Preserve `backend/.local/`; do not delete
-journals as a routine retry step.
-
-### Configuration responsibilities
-
-Keep actual values in ignored `backend/.env` or approved deployment secrets. The
-backend also supports root `.env`; prefer one clearly managed source and note that
-shell environment variables can override files. Restart both processes after
-adapter changes so they load matching values.
-
-| Setting | Purpose / source |
+| Setting | Purpose |
 | --- | --- |
-| `SWITCH_BRIDGE_URL` | Existing Switch API base URL; not an individual messaging bridge ID. |
-| `SWITCH_REQUESTER_AGENT_ID`, `SWITCH_REQUESTER_API_KEY` | Existing non-AI client credentials; listener uses these when configured, otherwise the agent credential pair. |
-| `SWITCH_AGENT_ID`, `SWITCH_AGENT_API_KEY` | Existing AI/agent configuration; preserve the established private-runtime separation. |
-| `SWITCH_AI_ROOM_ID`, `SWITCH_AI_SENDER_ID` | Private reasoning room and exact AI participant identity. Keep the reasoning room separate from input chat rooms. |
-| `SWITCH_TENANT_ID`, `SWITCH_ROOM_IDS` | Configured tenant and allowed Switch rooms, with matching enabled database room mappings. |
-| `SWITCH_INGEST_TOKEN` | Private listener-to-FastAPI credential, also used for the local viewer feed. |
-| `SWITCH_ADAPTER_TOKEN` | Separate locally generated secret, at least 32 characters and distinct from ingest/admin/Supabase credentials. Required for trusted document-question metadata and advanced actions. |
-| `SWITCH_DOCUMENT_ADAPTER_TOKEN` | Separate locally generated listener-only attachment/consent credential. Upload success does not validate the general adapter token. |
-| `SWITCH_DOCUMENT_DISCORD_BRIDGE_IDS` | Exact Switch Discord bridge IDs from a read-only bridge lookup, not Discord guild/channel IDs. |
-| `SWITCH_DOCUMENT_BOT_SENDER_ID` | Exact participant ID of the non-AI client from Switch participant data, not its agent UUID or display name. |
-| `DOCUMENT_INGESTION_ENABLED`, `SWITCH_DOCUMENT_ATTACHMENTS_ENABLED` | Document worker/API and chat attachment gates; enabling alone does not configure storage, transport or models. |
-| `LOCAL_EMBEDDINGS_ENABLED` | Enables the local embedding worker when assets/dependencies are available. |
-| `DATABASE_ENGINE`, `SQLITE_DB_PATH` | General storage selection and explicit local SQLite location. This does not move every module away from Supabase. |
-| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Backend-only cloud configuration; `SUPABASE_SECRET_KEY` is also accepted. |
-| `ADMIN_API_TOKEN` | Separate local/server operator credential for protected diagnostic/document routes. Never embed in mobile. |
-| `COMMITMENT_TIMEZONE` | Confirmed IANA timezone for supported deadline resolution; leave blank when unknown. |
-| `AUTOMATIC_COMMITMENTS_ENABLED` | Separately enables advanced conversational lifecycle processing after policy/schema setup. |
-| `REMINDERS_ENABLED`, `REMINDER_DELIVERY_ENABLED` | Separate reminder planning and external-delivery gates; applicable room policies are also required. |
-| `PERSON_PROFILES_ENABLED` | Optional source-backed profile extraction/retrieval. |
-| `SWITCH_REPLY_TO_DISCORD` | Existing chat reply flag; changing it does not configure attachment consent or a missing platform adapter. |
+| `SWITCH_BRIDGE_URL` | Switch agent API base URL, including HTTPS for a remote/ngrok installation. This is not the local FastAPI URL. |
+| `SWITCH_AGENT_ID`, `SWITCH_AGENT_API_KEY`, `SWITCH_AI_AGENT_NAME` | Existing Codex identity and registered name (`codex-discord` in our demo). |
+| `SWITCH_REQUESTER_AGENT_ID`, `SWITCH_REQUESTER_API_KEY` | Existing non-AI client (`docket` in our demo); distinct from Codex. |
+| `SWITCH_AI_ROOM_ID`, `SWITCH_AI_SENDER_ID` | Private response-room UUID and exact Codex sender/participant ID. |
+| `SWITCH_TENANT_ID`, `SWITCH_ROOM_IDS` | Tenant UUID and comma-separated input Switch room UUIDs. |
+| `SWITCH_BACKEND_URL` | Local listener-to-FastAPI address. The commands below use `http://127.0.0.1:8001`. |
+| `SWITCH_INGEST_TOKEN` | Private listener/API credential. Both processes must use the same value. |
+| `SWITCH_ADAPTER_TOKEN` | Separate credential required for document questions and advanced chat actions. At least 32 characters; different from ingest, admin and database credentials. Both processes must match. |
+| `SWITCH_DOCUMENT_ADAPTER_TOKEN` | Dedicated upload-consent adapter credential. Configure separately from the general adapter token. |
+| `SWITCH_DOCUMENT_DISCORD_BRIDGE_IDS` | Exact Switch Discord bridge IDs for attachment routing; not Discord server/channel IDs. |
+| `SWITCH_DOCUMENT_BOT_SENDER_ID` | Exact non-AI sender/participant ID used to suppress its own messages; not its display name. |
+| `SUPABASE_URL`, `SUPABASE_SECRET_KEY` | Cloud Supabase project URL and backend secret key. `SUPABASE_SERVICE_ROLE_KEY` is also accepted; prefer configuring one key source. No JWKS URL is needed for this server-key storage path. |
+| `DATABASE_ENGINE` | `supabase` for the cloud workflow. A blank value auto-selects Supabase when its configuration is present. SQLite is optional and does not provide full document/lifecycle parity. |
+| `ADMIN_API_TOKEN` | Separate operator credential for protected database-status and record endpoints. It is not a Supabase-issued key or a human login. |
+| `COMMITMENT_TIMEZONE` | Confirmed shared IANA timezone for relative deadlines and reminder policies. Some reminder paths default to UTC if it is blank. |
 
-`SWITCH_DOCUMENT_SLACK_BRIDGE_IDS` is the intended Slack document allow-list name
-from the earlier local integration. **The current `Settings` model does not define
-it.** Adding that variable alone currently has no effect; platform-aware listener,
-attachment and document-chat integration must be restored/completed first. Do not
-put a Slack bridge into the Discord allow-list as a workaround.
+For document upload and questions, enable `DOCUMENT_INGESTION_ENABLED`,
+`SWITCH_DOCUMENT_ATTACHMENTS_ENABLED`, `LOCAL_EMBEDDINGS_ENABLED` and
+`SWITCH_REPLY_TO_DISCORD` after database/room setup. Template feature defaults are
+conservative; they are not a copy of our private deployment's enabled flags.
+`AUTOMATIC_COMMITMENTS_ENABLED`, `REMINDERS_ENABLED`, `REMINDER_DELIVERY_ENABLED`
+and `PERSON_PROFILES_ENABLED` control separate features; room policies and deployed
+schema also matter. Reminder lead time is configured with `REMINDER_LEAD_TIME`,
+`REMINDER_LEAD_UNIT` and the equivalent `REMINDER_LEAD_MINUTES` value.
 
-The `.env.example` is a configuration reference, not evidence of working runtime
-behavior. Some document comments still describe an older origin-attestation gate;
-inspect current code and the module contracts rather than requiring people to
-register or guessing participant types from their names.
+This pipeline does not use `GROK_API_KEY` or `SUPABASE_PUBLISHABLE_KEY` from the
+backend environment. Model authentication belongs to Codex. Do not replace or
+rotate working credentials merely to follow the example file.
 
-### Private AI runtime
+### 3. Prepare the database
 
-Reuse the existing Switch-connected AI in its private response room. FastAPI does
-not need a second model key just to use that established runtime. The non-AI client
-receives input and sends policy-approved application responses. Keep any managed
-AI session that directly responds in an input room stopped to avoid duplicate
-responses. `python -m app.switch_setup` is a provisioning command, not an ordinary
-startup command; review its effects before running it on an existing setup.
+The consolidated [initial schema](supabase/migrations/20261104000100_initial_schema.sql)
+includes relational memory, vector/embedding jobs, commitments, reminders and
+versioned documents. **It resets project tables: use it only for a fresh/disposable
+database. Never replay it or blindly run `db push` against existing hosted data.**
+An existing project needs its schema checked and any upgrade reviewed separately.
+Historical SQL under `supabase/migrations/history/` is not a fresh-install chain.
+See [database setup](supabase/README.md) and [deployment guidance](supabase/DEPLOYMENT_PROPOSAL.md).
 
-### Embedding assets
+### 4. Start FastAPI and the listener
 
-From `backend/`, when setting up local inference:
+Set `SWITCH_BACKEND_URL=http://127.0.0.1:8001` in your ignored `.env` first.
+From `backend/`, terminal 1:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-embeddings.txt
-.\.venv\Scripts\python.exe -m app.embedding_setup
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
 ```
 
-Setup downloads pinned public model assets and verifies their hashes. The normal
-worker embeds locally using `Supabase/gte-small` with 384-dimensional vectors.
-General memory vectors and document chunk vectors have separate job paths. A
-storage confirmation must not be presented as semantic-search readiness before
-its required vectors are stored.
+From `backend/`, terminal 2:
 
-## Documents on Discord and Slack
+```powershell
+python -m app.switch_listener --check
+python -m app.switch_listener
+```
 
-Documents mean **uploaded project files and references to their stored content**,
-not just this repository's Markdown documentation.
+The check should report API authentication, Switch connectivity and room membership
+success. Leave both processes running. Restart both after changing adapter settings.
+Do not start another listener with the same identity on a teammate's PC.
 
-The implemented Discord workflow supports UTF-8 text, Markdown, text-based PDF,
-DOCX and PPTX. Scanned PDFs need OCR outside this implementation. Current default
-limits are four files, 8 MiB per file and 256 KiB extracted text; configured lower
-limits still apply. Binary parsing is bounded and isolated. Source message/file
-references, immutable versions, chunks and citations are retained.
+Open [the viewer](http://127.0.0.1:8001/) or [API docs](http://127.0.0.1:8001/docs).
+`GET /health` checks API liveness, not database or AI readiness. The viewer feed and
+`/messages`/`/ai/requests` use `X-Ingest-Token`; protected record/status routes use
+`X-Admin-Token`. These are development/server credentials, not individual-user auth.
 
-Example of the intended shared conversation:
+**Keep this backend on loopback.** This checkout includes browser credential/settings
+and storage controls whose routes lack independent authentication. The feed's token
+does not protect those controls. Do not expose this FastAPI server via ngrok or a
+public deployment until those routes are secured. The remote Switch server is a
+separate service and does not require exposing local FastAPI.
+
+## Try the workflow
+
+In the configured Discord channel, mention the registered client (currently `docket`):
 
 ```text
-User uploads proposal.pdf in the configured channel
-Bot: Save proposal.pdf to team memory? Reply yes or save, or no to skip.
-Uploader: yes
-Bot: Processing proposal.pdf...
-Bot: Saved proposal.pdf to team memory.
-User: @<registered-agent> What documents are saved in this room?
-User: @<registered-agent> Summarize proposal.pdf and cite it.
+@docket I will finish the API documentation by Friday.
+@docket What documents are saved in this room?
+@docket Explain what is written in the FYP proposal document.
 ```
 
-Only the uploader's exact sender identity can authorize save/skip. Ambiguous
-multiple uploads require filename clarification. Display names are not proof of
-ownership. No personal registration or manual member mapping is required for the
-upload path. Current document notifications use channel-only delivery; original
-thread metadata remains provenance.
+For a document, upload a supported file, wait for the save prompt, then have the
+**original uploader** reply `yes` or `save` (`no` or `skip` declines). Multiple pending
+uploads may require a filename. Accepted documents are parsed, versioned, chunked,
+embedded and published before the saved confirmation. Questions use published
+source evidence and validated stored-text-line citations.
 
-The final saved reply is intended to wait for import, chunk indexing and
-publication. In this session the user reported a PDF reaching that reply, including
-a duplicated processing notification. That does not independently verify database
-records, every format, absence of duplicate imports or successful citations.
+Supported: Markdown, UTF-8 text, text-based PDF, DOCX and PPTX. Defaults: 8 MiB per
+file, 256 KiB extracted text, four files per upload. Scanned PDF OCR, legacy Office
+and macro-enabled files are unsupported. Summary replies sample at most eight
+passages and disclose partial coverage. Document selections expire after 15 minutes
+or API restart; same-sender follow-ups can continue within an active exchange.
 
-Document chat can list/find/select a document, answer from published passages,
-summarize with coverage limits, and cite stored text lines. Selection is scoped to
-the sender, room and tenant and expires after 15 minutes or API restart. An active
-conversation permits relevant follow-ups without another mention. It must not
-invent document inventory or use unrelated room memories when document access fails.
+New listener processes skip messages sent before connection. Transient reconnects
+resume the current process's acknowledged cursor. Already accepted ingestion and
+confirmed document jobs recover from durable state; do not delete `.local/` to
+skip messages. The local reply watermark can also suppress older messages.
 
-**Current blocker:** questions returned a listener-identity configuration error
-with `general_adapter_ready=False` / `adapter_verified=False`. Configure the valid
-separate `SWITCH_ADAPTER_TOKEN` for both processes before retrying. Uploaded files
-can remain stored while document reads are blocked.
+## How messages become searchable knowledge
 
-**Slack completion work:** preserve platform and bridge identity through the
-existing adapter, authenticate scoped uploads and consent, reuse the existing
-import/embedding/publication service, and route questions and citations through
-that same Slack scope. Verify file relay permissions in Switch and actual source
-metadata before claiming native Slack links or thread behavior. No direct Slack
-bot, separate AI or parallel storage pipeline is needed.
+The listener authenticates to FastAPI and supplies the configured tenant, source
+room, sender, message ID and available platform metadata. Eligible messages enter a
+durable journal before acknowledgement. **Accepted delivery does not mean that
+cloud storage or search indexing has finished.**
 
-Completion requires an authorized disposable test on **each** platform: upload,
-consent, inspect source/version/chunks, verify completed vectors/publication, ask
-a paraphrased cited question, test replay/recovery, then clean up only the fixture.
-Slack connectivity and local mocked tests are not substitutes for those checks.
+Codex proposes structured output; FastAPI validates it before executing database work:
 
-## Storage, security and deployment boundaries
-
-Supabase provides relational records, source relationships, atomic functions and
-vector search. SQLite adapters support general storage and selected modules;
-currently document services explicitly instantiate `SupabaseDocumentRepository`,
-and lifecycle persistence uses Supabase RPCs. Cloud-to-local migration tooling is
-not continuous synchronization or proof of equivalent behavior across engines.
-
-For a **fresh disposable database only**, see
-[supabase/README.md](supabase/README.md). The active consolidated schema is
-`supabase/migrations/20261104000100_initial_schema.sql`. It deliberately resets
-Team Memory tables. **Never replay it against an existing hosted database or real
-team data.** Existing installations require a reviewed additive reconciliation
-and approval before remote schema changes. Historical migration files are not a
-second fresh-install chain. Local SQL availability does not prove deployment.
-
-Private record/document routes require their configured credentials. Manual
-commitment/profile routes require a trusted individual-user identity integration
-and fail closed without it. A shared ingest/admin/adapter token does not identify
-a human or grant room-management rights to everyone.
-
-The current viewer implementation also contains environment-reading/editing,
-reminder-configuration, migration and destructive storage controls without
-route-level authorization. Earlier claims that all environment routes return
-`410` do not match this checkout. Treat those controls as an outstanding security
-and deployment blocker; do not expose this development API publicly. This README
-update documents the gap and does not change or exercise those handlers.
-
-The mobile app calls FastAPI only. Privileged Supabase keys and adapter credentials
-must never be shipped in the Expo app. No production-ready individual-user
-authorization or multi-instance delivery guarantee is claimed.
-
-## Diagnostics
-
-Prefer content-free feature logs (`FEATURE_LOGS_ENABLED=true`, `LOG_LEVEL=INFO`).
-Keep raw message/wire-level logging off for normal use. See
-[FEATURE_LOGGING.md](FEATURE_LOGGING.md).
-
-| Log/result | Meaning / next check |
+| AI action | Backend behavior |
 | --- | --- |
-| `/health` returns 200 | FastAPI is alive; does not prove database, chat or model access. |
-| `API acknowledged message` | Input accepted, not necessarily saved in Supabase. |
-| `confirmation_requested` then `queued` | Upload consent and durable scheduling succeeded; import/indexing may still be pending. |
-| `Saved ... to team memory` | Application reports document publication success; verify exact records and cited retrieval for end-to-end acceptance. |
-| `general_adapter_ready=False` | General adapter secret absent, too short or colliding with a shared credential. Document questions/advanced actions fail closed. |
-| `bridge_configured=False` / `bot_configured=False` / `adapter_configured=False` | Attachment setup incomplete; current listener stops on an enabled attachment event. Check the actual loaded settings. |
-| `Document worker reason=processing_unavailable` | A scope, database, model or processing operation failed; generic warning alone does not identify the cause. |
-| `embedding state=idle embedding_jobs=0` | No general-memory jobs were claimed; not evidence that a given document is indexed. |
-| `no_eligible_intention` | Planner found no reminder due under current state/policy; not an external-send failure. |
-| HTTP 400 followed by a posted reply | Some existing transports try a fallback; inspect the final outcome rather than assuming every initial error is fatal. |
-| Windows connection-reset callback | Inspect subsequent acknowledgements/recovery; the traceback alone does not establish that the listener exited. |
+| `store_only` | Save extracted facts, decisions or commitments with source evidence. |
+| `query_only` | Retrieve saved information and synthesize an answer from evidence. |
+| `store_and_query` | Save useful information, then retrieve context for the question. |
+| `none` | No knowledge write/lookup; an addressed message may still receive a conversational reply. |
+| `clarify` | Return a clarification instead of executing an unsupported interpretation. |
 
-## Verification commands and evidence
+Malformed or contradictory output fails explicitly rather than silently becoming
+`none`. The atomic storage path saves source evidence and extracted records
+together. Stable identities protect repeated deliveries from duplicating records.
+Commitments and decisions generate their own searchable summaries; additional fact
+memories should not duplicate them. AI extraction does not imply human approval;
+lifecycle actions and reminder eligibility have separate state/policy rules.
 
-Backend tests, from `backend/`:
+The listener receives all events, and eligible ordinary messages can be evaluated
+without a command. Background processing and permission to speak are separate.
+Tagged requests and active same-sender document follow-ups use the application
+reply path; the bot is not meant to answer every ordinary message.
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m pip check
+### Records and document versions
+
+`tenants` and `rooms` establish scope. `messages` retain source evidence and available
+author, platform, channel, thread and timestamp metadata. `commitments` hold tasks,
+ownership, deadlines and status; `decisions` hold decision and approval state.
+`memories` hold source-linked searchable text, embeddings and indexing state.
+
+Documents use `documents`, `document_versions`, `document_chunks` and
+`document_imports`. An import creates a version and chunks with duplicate protection.
+The worker embeds chunks before publication. During replacement, the previous
+published version remains available until the replacement is ready. Failed imports
+must not publish incomplete versions. Retrieval rechecks publication and scope
+before delivering an answer.
+
+Questions use extracted chunk text rather than downloading the original file again.
+Citations refer to stored-text line ranges, not invented PDF pages or slide numbers.
+Question answering does not automatically edit the original document.
+
+### Local embeddings and retrieval
+
+The CPU model is **`Supabase/gte-small`**, using pinned ONNX/tokenizer assets under
+ignored `.local/models/`. Attention-mask mean pooling and L2 normalization produce
+**384-dimensional** vectors. Queries and stored text use the same model pipeline.
+
+Useful text persists before indexing. Embedding jobs use content hashes, claim
+tokens, leases and bounded retries so edits invalidate old vectors and stale
+workers cannot attach results to changed text. The model accepts at most **512
+tokens**, including special tokens. Oversized standalone memories fail explicitly
+rather than silently truncating; document ingestion has a separate chunking step.
+
+Retrieval restricts candidates by tenant and authorized room. Document queries also
+restrict publication/version and, when selected, document identity. Room-memory
+retrieval includes source references and structured task/decision context. If local
+embeddings are unavailable, room-memory retrieval can return a labelled keyword
+fallback; document processing/search has its own feature requirements. Large-corpus
+production performance has not been established by the project's local tests.
+
+## HTTP interfaces
+
+Send credentials in headers, never in URLs. These are backend/development interfaces,
+not a replacement for individual-user authentication.
+
+| Route | Access and purpose |
+| --- | --- |
+| `GET /health` | Public API liveness only. |
+| `POST /messages` | `X-Ingest-Token`; receive a scoped message. The listener also supplies `X-Adapter-Token` for trusted chat workflows. |
+| `GET /messages/recent`, `GET /messages/status` | Ingest token; bounded previews and latest-message status. |
+| `POST /ai/requests`, `GET /ai/requests` | Ingest token; queue a question or inspect recent AI results. |
+| `POST /messages/document-attachments` | Ingest plus `X-Document-Adapter-Token`; upload events and consent. |
+| `GET /api/v1/supabase/status` | `X-Admin-Token`; database connection/status check. |
+| `GET /api/v1/messages`, `/api/v1/commitments`, `/api/v1/decisions`, `/api/v1/memories` | Admin token; inspect stored records. |
+| `/api/v1/documents` | Admin-protected imports, search, document/version/chunk reads and archiving; document feature and room scope required. |
+| `GET /api/v1/document-attachments/{request_ref}` | Admin token; inspect upload/import status. |
+| `/api/v1/tenants/{tenant_id}/rooms/{room_id}/commitments` | Scoped lifecycle reads/actions require trusted individual identity and authorization. |
+
+`POST /ai/requests` accepts exactly one question source. Example body (fixture ID,
+no credentials):
+
+```json
+{
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "question": "What did we decide about the API framework?"
+}
 ```
 
-Disposable SQL tests, from `supabase/tests/` after installing its declared dev
-dependencies:
+Alternatively provide `source_message_ref` instead of `question`. Submission returns
+HTTP `202` with a queued result. Repeated ID/content reuses a result; conflicting
+content returns `409`. Result states are `queued`, `waiting`, `answered` and `failed`.
+Viewer-only questions/results are process-local, unlike durable accepted chat jobs.
+
+Missing credentials return `401`, invalid scope `403`, invalid payload `422`, a full
+queue `429`, and missing required configuration often `503`. Check the route's
+contract instead of treating every error as a model failure.
+
+### Browser viewer
+
+Open `/`, enter the ingest credential in the masked feed-access field and unlock
+the feed. The authenticated `/viewer/ws` socket delivers preview/result updates.
+The viewer retains at most 100 in-memory previews; restarting FastAPI clears that
+preview history. Ask Codex submits through FastAPI and the private AI room.
+
+The Live indicator proves only that the viewer socket is connected, not that
+Discord delivery, cloud writes or the model are ready. The separate settings and
+storage controls have the local-only limitation described in the setup instructions.
+
+## Durable state and recovery
+
+| Local state | Purpose |
+| --- | --- |
+| `.local/ingestion.sqlite3` | Accepted jobs, replay identities and reply fingerprints; needed even with Supabase as the main database. |
+| `.local/document_attachments.sqlite3` | Uploader consent, import coordination and document-reply recovery. |
+| `.local/switch-listener.json` | Listener connection/cursor information; fresh processes still start at the live head. |
+| `.local/last_replied_message.txt` | Reply watermark; messages at or before it can be suppressed. |
+| `.local/models/` | Downloaded local embedding assets. |
+
+Chat recovery allows at most three automatic attempts with a 30-second failure
+backoff. Completed jobs clear payloads while retaining replay identities. A
+validated extraction can be reused after a storage failure. Document and embedding
+workers retain their own durable processing states. Keep `.local/` private and
+persistent; do not share one journal between independent running API processes.
+
+From `backend/`, inspect jobs with:
 
 ```powershell
-npm ci
-npm test
-npm run test:commitments
-npm run test:chat
-npm run test:reminders
-npm run test:documents
+python -m app.ingestion_jobs
 ```
 
-These runners use disposable PostgreSQL/PGlite, not hosted Supabase. Distinguish
-fake repositories, mocked AI/Switch transports, synthetic vector fixtures, actual
-local model inference, disposable SQL and hosted/live chat checks. Historical test
-counts apply only to their tested revisions. This README edit itself does not
-rerun or certify the runtime suites and does not deploy or send chat messages.
+For an exhausted job, stop FastAPI, investigate the cause, then run
+`python -m app.ingestion_jobs --retry MESSAGE_REF` with its 24-character reference.
+Restart FastAPI afterward. Clearing journals or advancing the watermark can
+suppress work rather than repair it. Already accepted document imports should
+finish through their existing worker state.
 
-Further contracts and historical verification:
+## Verification and troubleshooting
 
-- [Tagged commitment capture](SIMPLE_COMMITMENT_CAPTURE.md)
-- [Commitment lifecycle and auth](COMMITMENT_MANAGEMENT.md)
-- [Automatic conversational actions](AUTOMATIC_COMMITMENTS.md) and
-  [open commitment policy](OPEN_COMMITMENTS.md)
-- [Reminder planning and delivery](REMINDERS.md)
-- [Person profiles](PERSON_PROFILES.md)
-- [Document service/API](supabase/DOCUMENT_INGESTION.md),
-  [Discord uploads](supabase/DISCORD_DOCUMENT_INGESTION.md), and
-  [document conversations](supabase/DOCUMENT_CHAT.md)
-- [Historical document deployment checks](supabase/DOCUMENT_DEPLOYMENT_VERIFICATION.md)
-- [Historical commitment/chat checks](supabase/COMMITMENT_CHAT_VERIFICATION.md)
-  and [reminder checks](supabase/REMINDER_VERIFICATION.md)
+```powershell
+# From backend/
+python -m pytest -q
+python -m pip check
+python -m app.switch_listener --status
+```
 
-## Remaining milestones
+`--status` shows the latest redacted sender/message; avoid sharing private output.
+Look for matching `API acknowledged message` references in listener logs and
+processing results in FastAPI. `FEATURE_LOGS_ENABLED=true` enables content-free
+feature events; leave `LOG_DISCORD_MESSAGES=false` unless intentionally debugging
+redacted message previews. Do not enable HTTP/WebSocket wire logging.
 
-1. Complete document-question adapter configuration and verify the reported
-   Discord PDF through published records, actual vectors and cited answers.
-2. Restore/complete Slack platform-aware document upload/reference integration
-   and independently verify the same workflow on Slack.
-3. Reconcile required hosted schema/functions and permissions against the actual
-   deployment, using approved non-destructive changes and disposable fixtures.
-4. Finish individual-user authorization and protect development settings/storage
-   controls before any public deployment.
-5. Verify automatic lifecycle/reminder policy compatibility and reliable delivery
-   for the active engine; do not silently human-approve extracted tasks.
-6. Complete/test SQLite parity only where intended, including migration, retention
-   and quota behavior; preserve teammate-owned work and existing data.
-7. Implement document conflict detection, proposed edits, approval and safe
-   write-back as a distinct future workflow.
-8. Finish authenticated mobile/product settings, optional recording controls and
-   multi-workspace onboarding after the core chat/document paths are reliable.
+For real local-model checks after installing the assets:
 
-No commit, push, hosted migration, live chat test or real task/document mutation
-is implied by updating this documentation.
+```powershell
+$env:RUN_LOCAL_MODEL_TESTS = '1'
+python -m pytest -q tests/test_local_embeddings.py
+Remove-Item Env:RUN_LOCAL_MODEL_TESTS
+```
+
+The default backend suite isolates developer credentials and mocks external HTTP
+unless a test supplies its own transport. Passing it does not prove hosted schema
+readiness or real chat delivery. Disposable SQL tests are separate: from the repo
+root, enter `supabase/tests`, run `npm ci`, then `npm test`. Additional package
+scripts include `test:documents`, `test:commitments`, `test:chat` and `test:reminders`.
+They target a disposable test engine, not the team's hosted project. Live fixtures
+need deliberate scope, approval where applicable and cleanup.
+
+- **No messages:** confirm the Discord channel maps to an allowed Switch room, the
+  bridge receives messages, and exactly one listener owns the connection.
+- **Document identity error:** match `SWITCH_ADAPTER_TOKEN` on listener and backend;
+  the upload token is a different setting. Restart both processes.
+- **HTTP 429 / slow answers:** one worker serializes up to four running/queued jobs.
+  Background chat and multiple AI calls can delay tagged questions. Failed jobs
+  have bounded retries with a 30-second delay. A local queue 429 is not proof that
+  the model's account allowance is exhausted.
+- **Wrong port / `No module named app`:** run from `backend/` and match the server
+  port to `SWITCH_BACKEND_URL`. The code's unset default is 8000; this guide/template
+  explicitly use 8001.
+
+Implementation, database deployment and live end-to-end verification are separate.
+Do not infer that every module is active from `/health` or from a past test count.
+For detailed contracts and historical verification, see [architecture.md](architecture.md),
+[document ingestion](supabase/DISCORD_DOCUMENT_INGESTION.md),
+[document questions](supabase/DOCUMENT_CHAT.md), [commitment capture](SIMPLE_COMMITMENT_CAPTURE.md)
+and [reminders](REMINDERS.md).
