@@ -348,6 +348,13 @@ class SwitchListener:
             while True:
                 try:
                     await self._session(client)
+                except ListenerStopped as exc:
+                    if "retention gap" in str(exc):
+                        logger.warning("Switch reported a retention gap; resetting cursor to head and reconnecting")
+                        self.state.cursor = None
+                        self.state.generation = None
+                    else:
+                        raise
                 except ConnectionClosed as exc:
                     code = exc.rcvd.code if exc.rcvd else None
                     if code in (4400, 4401, 4403, 4409):
