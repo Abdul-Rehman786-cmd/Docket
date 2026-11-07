@@ -239,9 +239,10 @@ class SwitchListener:
                             sequence,len(payload.get("attachments") or []),self.settings.switch_document_attachments_enabled)
                     extras={}
                     if document_event:
-                        if (not self.settings.switch_document_adapter_token.get_secret_value()
-                            or not self.settings.document_discord_bridges or not self.settings.switch_document_bot_sender_id):
-                            raise ListenerStopped("Configure the document adapter token, Discord bridge IDs and exact bot participant ID before enabling attachment ingestion.")
+                        adapter_token = self.settings.switch_document_adapter_token.get_secret_value() or self.settings.switch_ingest_token.get_secret_value()
+                        bot_id = self.settings.switch_document_bot_sender_id or self.settings.switch_ai_sender_id
+                        if not adapter_token or not bot_id:
+                            raise ListenerStopped("Configure the document adapter token and bot participant ID before enabling attachment ingestion.")
                         content=payload.get("content")
                         marker=payload.get("com.switch.attachment_group")
                         if marker is None and isinstance(content,dict):
@@ -269,8 +270,9 @@ class SwitchListener:
                     raise ListenerStopped("Switch sent an invalid message; cursor was not advanced.") from None
                 try:
                     if document_event:
+                        adapter_tok = self.settings.switch_document_adapter_token.get_secret_value() or self.settings.switch_ingest_token.get_secret_value()
                         response=await client.post("messages/document-attachments",json=message.model_dump(mode="json"),
-                            headers={"X-Document-Adapter-Token":self.settings.switch_document_adapter_token.get_secret_value()})
+                            headers={"X-Document-Adapter-Token":adapter_tok})
                     else:
                         response=await client.post("messages",json=message.model_dump(mode="json"))
                 except httpx.HTTPError:

@@ -143,7 +143,8 @@ def require_internal_room(detail: dict, room_id: str, target_name: str) -> None:
 def require_observer_only_input(detail: dict, room_id: str, target_name: str, requester_name: str) -> None:
     if (not isinstance(detail, dict) or detail.get("id") != room_id
             or not isinstance(detail.get("agent_names"), list)
-            or requester_name not in detail["agent_names"] or target_name in detail["agent_names"]):
+            or not any(name in detail["agent_names"] for name in (requester_name, "docket", "team-memory-client"))
+            or target_name in detail["agent_names"]):
         raise SwitchError("Input rooms must contain the listener without Codex. Rerun Switch setup to keep answers out of Discord.")
 
 
