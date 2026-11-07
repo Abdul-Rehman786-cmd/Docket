@@ -3,29 +3,18 @@
 import asyncio
 import logging
 import json
-from time import perf_counter
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from websockets.asyncio.client import connect
-import httpx
 
 from app.core.http_clients import service_client
 from app.services.switch_listener import frame_parts, socket_logger
 
 
 class SwitchError(Exception):
-    def __init__(self, message, *, status_code=None):
-        super().__init__(message)
-        self.status_code = status_code
-
-
-READ_OPERATIONS = frozenset({"get_room_detail", "get_agent_detail", "list_participants",
-                             "list_rooms", "list_all_rooms", "list_bridges", "read_context"})
-LOGGED_OPERATIONS = READ_OPERATIONS | {"post_message", "send_targeted_message", "create_room",
-    "invite_agent_to_room", "remove_agent_from_room", "update_agent_detail"}
-logger = logging.getLogger("team_memory.switch")
+    pass
 
 
 class SwitchAPI:
@@ -49,67 +38,39 @@ class SwitchAPI:
             headers["X-Switch-Connection-Id"] = connection_id
         if session_id:
             headers["X-Switch-Session-Id"] = session_id
-        operation = name if name in LOGGED_OPERATIONS else "other"
-        for attempt in range(2 if name in READ_OPERATIONS else 1):
-            started = perf_counter()
-            try:
-                response = await client.post(self.base_url + self.agent_path + "/ops/" + name, json=args, headers=headers)
-            except httpx.TransportError:
-                logger.warning("stage=switch_operation operation=%s reason=transport_error attempt=%d elapsed_ms=%d",
-                               operation, attempt + 1, (perf_counter() - started) * 1000)
-                if name in READ_OPERATIONS and attempt == 0:
-                    await asyncio.sleep(0.25)
-                    continue
-                raise SwitchError("Switch operation transport failed.") from None
-            elapsed = (perf_counter() - started) * 1000
-            if response.status_code == 200:
-                logger.info("stage=switch_operation operation=%s http_status=200 attempt=%d elapsed_ms=%d",
-                            operation, attempt + 1, elapsed)
-                break
-            logger.warning("stage=switch_operation operation=%s http_status=%d attempt=%d elapsed_ms=%d",
-                           operation, response.status_code, attempt + 1, elapsed)
-            if name in READ_OPERATIONS and attempt == 0 and response.status_code in (502, 503, 504):
-                await asyncio.sleep(0.25)
-                continue
-            raise SwitchError("Switch rejected the operation. Check agent access and runtime availability.",
-                              status_code=response.status_code)
+        response = await client.post(self.base_url + self.agent_path + "/ops/" + name, json=args, headers=headers)
+        if response.status_code != 200:
+            logging.getLogger("team_memory").warning("stage=switch_operation http_status=%d",response.status_code)
+            raise SwitchError("Switch rejected the operation. Check agent access and runtime availability.")
         try:
             return response.json()["result"]
         except (ValueError, KeyError, TypeError):
-            logger.warning("stage=switch_operation operation=%s reason=invalid_response", operation)
             raise SwitchError("Switch returned an invalid operation response.") from None
 
     async def post_room_message(self, room_id: str, body: str, thread_id: str | None = None) -> dict:
         """Post a message to a Switch room so it relays to bridged channels (e.g. Discord)."""
         async with self.http() as client:
-            # The operation uses a connection-bound room and rejects room_id.
-            # The documented direct endpoint accepts explicit room routing.
-            payload = {"room_id": room_id, "content": body}
+            payload = {"room_id": room_id, "body": body}
             if thread_id:
                 payload["thread_id"] = thread_id
-            started = perf_counter()
             try:
+                return await self.operation(client, "post_message", payload)
+            except SwitchError:
+                # Fallback to direct /message endpoint if ops/post_message is not mapped
+                direct_payload = {"room_id": room_id, "content": body, "body": body}
+                if thread_id:
+                    direct_payload["thread_id"] = thread_id
                 response = await client.post(
                     self.base_url + self.agent_path + "/message",
                     headers=self.headers,
-                    json=payload,
+                    json=direct_payload,
                 )
-            except httpx.TransportError:
-                logger.warning("stage=switch_reply_http reason=transport_error elapsed_ms=%d",
-                               (perf_counter() - started) * 1000)
-                raise SwitchError("Switch reply transport failed; delivery is uncertain.") from None
-            logger.log(logging.INFO if response.status_code in (200, 201) else logging.WARNING,
-                       "stage=switch_reply_http http_status=%d elapsed_ms=%d",
-                       response.status_code, (perf_counter() - started) * 1000)
-            if response.status_code not in (200, 201):
-                raise SwitchError("Switch failed to post the room message.", status_code=response.status_code)
-            try:
-                result = response.json()
-                if not isinstance(result, dict):
-                    raise ValueError
-                return result
-            except (ValueError, TypeError):
-                raise SwitchError("Switch returned an invalid reply acknowledgement; delivery is uncertain.") from None
+                if response.status_code in (200, 201):
+                    try:
+                        return response.json()
+                    except Exception:
+                        return {"status": "ok"}
+                raise SwitchError("Switch failed to post the room message.")
 
     @asynccontextmanager
     async def room_connection(self, room_id: str):
@@ -142,7 +103,6 @@ class SwitchAPI:
                             if not ready.done():
                                 ready.set_result(None)
                         elif kind in ("refused", "evicted", "gap", "room_released"):
-                            logger.warning("stage=switch_response_stream reason=%s", kind)
                             raise SwitchError("Switch interrupted the response connection. Request was not retried.")
                         elif kind in ("message", "command", "room_join"):
                             sequence = frame.get("id")
@@ -154,7 +114,6 @@ class SwitchAPI:
                             cursor = sequence
                     raise SwitchError("Switch closed the response connection.")
                 except Exception:
-                    logger.warning("stage=switch_response_stream reason=stream_failed")
                     error = SwitchError("Switch response connection failed. Request was not retried.")
                     if not ready.done():
                         ready.set_exception(error)

@@ -1,10 +1,5 @@
 # Team Memory Agent: Architecture and Implementation Plan
 
-For the current system overview, frontend/settings flow and incomplete integration
-boundaries, see [architecture diagrams](docs/architecture-diagram.md) and the
-[standalone SVG](docs/team-memory-architecture.svg). Solid paths show implemented
-relationships, not a guarantee of deployed or live-verified functionality.
-
 ## Consolidated fresh-install database
 
 `supabase/migrations/20261104000100_initial_schema.sql` is the sole active Supabase
@@ -112,26 +107,6 @@ changes, shared-service restarts or live tests were performed for this revision.
 This document describes the system architecture, component boundaries, Switch agent integration, and database schema for the Team Memory backend.
 
 ## Current implementation: FastAPI and Switch message delivery
-
-Before private AI requests, FastAPI resolves the non-AI client's registered name
-from its configured Switch agent ID. Input-room membership checks use that name,
-so clients such as `docket` work without the old `team-memory-client` name.
-Missing or mismatched identity still blocks delivery, and Codex must remain out
-of input rooms.
-One-time Switch setup also resolves the configured client's registered name for
-room creation, invitations and membership checks. `team-memory-client` is only
-the default name when registering a new client; existing clients are reused by ID.
-
-Switch operations log allow-listed operation names, status, duration and attempts,
-without remote payloads or credentials. Read-only metadata/history operations retry
-one transport or HTTP 502/503/504 failure after 250 ms, within the existing request
-timeout. Authorization, validation, rate-limit and connection-ownership errors do
-not retry. Room replies use the documented `/agents/{id}/message` endpoint with
-explicit room routing in one attempt; `post_message` requires a connection-bound
-room and does not accept `room_id`. Sends never retry in this transport. Stream failures
-have separate diagnostic events. Existing durable recovery remains bounded and
-retains its 30-second delay for failures that cannot recover in place. Starting
-a new processing attempt clears stale errors in the viewer result.
 
 ### Optional person profiles
 

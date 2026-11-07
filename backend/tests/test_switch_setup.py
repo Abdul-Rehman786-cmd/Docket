@@ -10,11 +10,10 @@ from app.core.config import Settings
 from app.services.switch_api import SwitchAPI, SwitchError, require_no_input_sessions
 
 
-def configure(monkeypatch, settings, registration_status=201, owner="fixture-owner", private_has_requester=True,
-              requester_name="team-memory-client", requester_updates=None):
+def configure(monkeypatch, settings, registration_status=201, owner="fixture-owner", private_has_requester=True):
     calls = []
     input_agents = {room_id: ["codex-discord", "unrelated-agent"] for room_id in settings.allowed_switch_rooms}
-    private_agents = ["codex-discord"] + ([requester_name] if private_has_requester else [])
+    private_agents = ["codex-discord"] + (["team-memory-client"] if private_has_requester else [])
 
     async def handle(request):
         name = request.url.path.rsplit("/", 1)[-1]
@@ -22,18 +21,16 @@ def configure(monkeypatch, settings, registration_status=201, owner="fixture-own
         calls.append((name, body))
         if name == "get_agent_detail":
             requester = body["agent_id"] == "fixture-requester"
-            result = {"id": body["agent_id"], "name": requester_name if requester else "codex-discord",
+            result = {"name": "team-memory-client" if requester else "codex-discord",
                       "owner_id": owner if requester else "fixture-owner", "sessions": []}
-            if requester:
-                result.update(requester_updates or {})
         elif name == "get_room_detail":
             room_id = body["room_id"]
             result = {"id": room_id, "bridge_id": None if room_id == "private-room" else "fixture-bridge",
                       "external_channel_id": None if room_id == "private-room" else "fixture-channel",
                       "agent_names": list(private_agents) if room_id == "private-room" else list(input_agents[room_id])}
         elif name == "list_rooms":
-            result = [{"room_id": room_id} for room_id, agents in input_agents.items() if requester_name in agents]
-            if requester_name in private_agents:
+            result = [{"room_id": room_id} for room_id, agents in input_agents.items() if "team-memory-client" in agents]
+            if "team-memory-client" in private_agents:
                 result.append({"room_id": "private-room"})
         elif name == "invite_agent_to_room":
             agents = private_agents if body["room_id"] == "private-room" else input_agents[body["room_id"]]
@@ -46,11 +43,6 @@ def configure(monkeypatch, settings, registration_status=201, owner="fixture-own
             result = {}
         elif name == "agents":
             return httpx.Response(registration_status, json={})
-        elif name == "create_room":
-            assert body["agent_names"] == [requester_name, "codex-discord"]
-            assert body["internal_only"] is True
-            private_agents[:] = body["agent_names"]
-            result = {"room_id": "private-room"}
         else:
             raise AssertionError("Unexpected remote mutation")
         return httpx.Response(200, json={"result": result})
@@ -62,55 +54,48 @@ def configure(monkeypatch, settings, registration_status=201, owner="fixture-own
 
     monkeypatch.setattr(SwitchAPI, "http", fake_http)
     monkeypatch.setattr(switch_setup, "get_settings", lambda: settings)
-    def save_settings(values):
-        if "SWITCH_AI_ROOM_ID" in values:
-            settings.switch_ai_room_id = values["SWITCH_AI_ROOM_ID"]
-    monkeypatch.setattr(switch_setup, "save_settings", save_settings)
+    monkeypatch.setattr(switch_setup, "save_settings", lambda values: None)
     return calls
 
 
-@pytest.mark.parametrize("requester_name", ["team-memory-client", "docket"])
-def test_setup_reuses_saved_identity_and_room_without_registration_or_creation(monkeypatch, requester_name):
+def test_setup_reuses_saved_identity_and_room_without_registration_or_creation(monkeypatch):
     settings = Settings(_env_file=None, switch_requester_agent_id="fixture-requester",
                         switch_requester_api_key="fixture-key", switch_ai_room_id="private-room",
                         switch_ai_sender_id="fixture-sender")
-    calls = configure(monkeypatch, settings, requester_name=requester_name)
+    calls = configure(monkeypatch, settings)
     asyncio.run(switch_setup.setup())
     assert "agents" not in [name for name, _ in calls]
     assert "create_room" not in [name for name, _ in calls]
     assert sum(name == "invite_agent_to_room" for name, _ in calls) == 2
     assert sum(name == "remove_agent_from_room" for name, _ in calls) == 2
-    assert all(body["agent_name"] == requester_name for name, body in calls if name == "invite_agent_to_room")
 
 
-@pytest.mark.parametrize("requester_name", ["team-memory-client", "docket"])
-def test_restored_client_joins_existing_private_room_without_recreating_it(monkeypatch, requester_name):
+def test_restored_client_joins_existing_private_room_without_recreating_it(monkeypatch):
     settings = Settings(_env_file=None, switch_requester_agent_id="fixture-requester",
                         switch_requester_api_key="fixture-key", switch_ai_room_id="private-room",
                         switch_ai_sender_id="fixture-sender")
-    calls = configure(monkeypatch, settings, private_has_requester=False, requester_name=requester_name)
+    calls = configure(monkeypatch, settings, private_has_requester=False)
     asyncio.run(switch_setup.setup())
     invites = [body for name, body in calls if name == "invite_agent_to_room" and body["room_id"] == "private-room"]
-    assert invites == [{"room_id": "private-room", "agent_name": requester_name}]
+    assert invites == [{"room_id": "private-room", "agent_name": "team-memory-client"}]
     assert not any(name in ("agents", "create_room") for name, _ in calls)
 
 
-@pytest.mark.parametrize("requester_name", ["team-memory-client", "docket"])
-def test_input_room_change_is_idempotent_and_preserves_other_agents_and_transport(monkeypatch, requester_name):
+def test_input_room_change_is_idempotent_and_preserves_other_agents_and_transport(monkeypatch):
     settings = Settings(_env_file=None, switch_requester_agent_id="fixture-requester",
                         switch_requester_api_key="fixture-key", switch_ai_room_id="private-room")
-    calls = configure(monkeypatch, settings, requester_name=requester_name)
+    calls = configure(monkeypatch, settings)
     api = SwitchAPI(settings.switch_bridge_url, settings.switch_requester_agent_id, "fixture-key")
 
     async def run():
-        await switch_setup.configure_input_rooms(api, settings, requester_name)
+        await switch_setup.configure_input_rooms(api, settings)
         first_count = len(calls)
-        await switch_setup.configure_input_rooms(api, settings, requester_name)
+        await switch_setup.configure_input_rooms(api, settings)
         assert all(name == "get_room_detail" for name, _ in calls[first_count:])
         async with api.http() as client:
             for room_id in settings.allowed_switch_rooms:
                 room = await api.operation(client, "get_room_detail", {"room_id": room_id})
-                assert set(room["agent_names"]) == {"unrelated-agent", requester_name}
+                assert set(room["agent_names"]) == {"unrelated-agent", "team-memory-client"}
                 assert room["bridge_id"] == "fixture-bridge"
                 assert room["external_channel_id"] == "fixture-channel"
 
@@ -122,27 +107,8 @@ def test_setup_never_removes_codex_from_response_room(monkeypatch):
     calls = configure(monkeypatch, settings)
     api = SwitchAPI(settings.switch_bridge_url, settings.switch_agent_id, "fixture-key")
     with pytest.raises(SwitchError, match="separate"):
-        asyncio.run(switch_setup.configure_input_rooms(api, settings, "team-memory-client"))
+        asyncio.run(switch_setup.configure_input_rooms(api, settings))
     assert calls == []
-
-
-def test_new_private_room_uses_registered_client_name(monkeypatch):
-    settings = Settings(_env_file=None, switch_requester_agent_id="fixture-requester",
-                        switch_requester_api_key="fixture-key", switch_ai_sender_id="fixture-sender")
-    calls = configure(monkeypatch, settings, requester_name="docket")
-    asyncio.run(switch_setup.setup())
-    assert next(body["agent_names"] for name, body in calls if name == "create_room") == ["docket", "codex-discord"]
-    assert not any(name == "agents" for name, _ in calls)
-
-
-@pytest.mark.parametrize("updates", [{"id": "other-agent"}, {"name": ""}, {"name": None}, {"name": 42}])
-def test_invalid_registered_client_identity_prevents_mutations(monkeypatch, updates):
-    settings = Settings(_env_file=None, switch_requester_agent_id="fixture-requester",
-                        switch_requester_api_key="fixture-key", switch_ai_room_id="private-room")
-    calls = configure(monkeypatch, settings, requester_updates=updates)
-    with pytest.raises(SwitchError, match="registered server-client identity"):
-        asyncio.run(switch_setup.setup())
-    assert [name for name, _ in calls] == ["get_agent_detail", "get_agent_detail"]
 
 
 def test_registration_conflict_never_replaces_existing_agent(monkeypatch):
