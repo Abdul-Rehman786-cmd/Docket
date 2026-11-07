@@ -64,9 +64,11 @@ class DocumentAttachments:
 
     @staticmethod
     def configured(settings):
+        bot_id = settings.switch_document_bot_sender_id or settings.switch_ai_sender_id
+        adapter_token = settings.switch_document_adapter_token.get_secret_value() or settings.switch_ingest_token.get_secret_value()
         return (settings.switch_document_attachments_enabled and settings.document_ingestion_enabled
-                and bool(settings.document_discord_bridges)
-                and bool(settings.switch_document_bot_sender_id)
+                and bool(bot_id)
+                and bool(adapter_token)
                 and bool(settings.switch_bridge_url and settings.listener_agent_id and settings.listener_api_key.get_secret_value())
                 and settings.local_embeddings_enabled)
 
@@ -80,10 +82,12 @@ class DocumentAttachments:
 
     @staticmethod
     def log_configuration(settings):
+        bot_id = settings.switch_document_bot_sender_id or settings.switch_ai_sender_id
+        adapter_token = settings.switch_document_adapter_token.get_secret_value() or settings.switch_ingest_token.get_secret_value()
         logger.info("document stage=api_start enabled=%s ready=%s document_worker=%s embeddings=%s bridge_configured=%s bot_configured=%s adapter_configured=%s",
             settings.switch_document_attachments_enabled,DocumentAttachments.configured(settings),
             settings.document_ingestion_enabled,settings.local_embeddings_enabled,bool(settings.document_discord_bridges),
-            bool(settings.switch_document_bot_sender_id),bool(settings.switch_document_adapter_token.get_secret_value()))
+            bool(bot_id),bool(adapter_token))
 
     def receipt(self,message,row=None,duplicate=False,state="ignored"):
         logger.info("document stage=receipt ref=%s request=%s state=%s duplicate=%s",
@@ -135,7 +139,7 @@ class DocumentAttachments:
             raise HTTPException(503,"document_attachment_setup_required")
         if message.sender in settings.switch_ai_senders:
             return self.receipt(message)
-        if message.bridge_id not in settings.document_discord_bridges:
+        if settings.document_discord_bridges and message.bridge_id not in settings.document_discord_bridges and message.platform == 'discord':
             logging.getLogger("team_memory").warning("Document attachment event reason=source_not_authorized")
             return self.receipt(message,state="not_authorized")
         if not self.eligible_sender(message.sender,settings):
@@ -273,7 +277,7 @@ class DocumentAttachments:
         try:
             if not self.eligible_sender(row["sender"],settings):
                 raise AttachmentFailure("sender_identity_unverified")
-            if any(part["metadata"]["bridge_id"] not in settings.document_discord_bridges for part in row["data"]["parts"].values()):
+            if settings.document_discord_bridges and any(part["metadata"]["bridge_id"] not in settings.document_discord_bridges for part in row["data"]["parts"].values() if part["metadata"].get("platform") == "discord"):
                 raise AttachmentFailure("source_not_authorized")
             scope=await self.scope_resolver(settings,row["room"])
             scope=DocumentScope(scope.tenant_id,scope.room_ids,actor="switch:"+row["sender"])
@@ -368,7 +372,7 @@ class DocumentAttachments:
             stale=row["data"]["kind"] in ("prompt","clarify") and (request["state"]!="confirmation_requested" or request["expires"]<=self.jobs.clock())
             stale=stale or (row["data"]["kind"] in ("queued","processing") and request["state"] in ("declined","expired","failed","published"))
             if not stale:
-                if any(part["metadata"]["bridge_id"] not in settings.document_discord_bridges for part in request["data"]["parts"].values()):
+                if settings.document_discord_bridges and any(part["metadata"]["bridge_id"] not in settings.document_discord_bridges for part in request["data"]["parts"].values() if part["metadata"].get("platform") == "discord"):
                     raise AttachmentFailure("source_not_authorized")
                 await self.scope_resolver(settings,row["room"])
                 kind=row["data"]["kind"]

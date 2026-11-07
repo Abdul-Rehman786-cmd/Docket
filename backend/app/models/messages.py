@@ -24,6 +24,8 @@ class IncomingMessage(BaseModel):
     channel_id: OpaqueId | None = None
     external_message_id: OpaqueId | None = None
     external_author_id: OpaqueId | None = None
+    platform: str | None = None
+    origin: str | None = None
     registered_agent_id: OpaqueId | None = None
     registered_agent_name: str | None = Field(default=None, max_length=128)
     mentioned_agent_ids: list[OpaqueId] | None = Field(default=None, max_length=20)

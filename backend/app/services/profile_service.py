@@ -70,7 +70,7 @@ async def answer_personal_profile(settings, metadata, kind):
         return 'Person profiles are disabled.', set()
     meta = metadata or {}
     sender = meta.get('switch_author_id')
-    if (meta.get('origin') != 'discord' or not meta.get('durable') or not isinstance(sender, str)
+    if (meta.get('origin') not in ('discord', 'slack', 'teams') or not meta.get('durable') or not isinstance(sender, str)
             or redact_source_identifier(sender, settings) != sender or sender in settings.switch_ai_senders):
         return 'I cannot identify your profile from this request. Ask from your own message in an enabled room.', set()
     from app.repositories.profile_repository import sender_profile_reports
@@ -127,7 +127,7 @@ def profile_items(facts, settings, metadata, body):
         raise HTTPException(503, "Person profiles are disabled")
     meta = metadata or {}
     sender = meta.get("switch_author_id")
-    if (meta.get("origin") != "discord" or not meta.get("durable") or not isinstance(sender, str)
+    if (meta.get("origin") not in ("discord", "slack", "teams") or not meta.get("durable") or not isinstance(sender, str)
             or not 1 <= len(sender) <= 512 or re.search(r"\s", sender)
             or redact_source_identifier(sender, settings) != sender):
         raise HTTPException(422, "Profile source identity is unavailable")

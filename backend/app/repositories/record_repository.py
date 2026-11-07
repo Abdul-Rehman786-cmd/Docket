@@ -300,7 +300,7 @@ async def persist_extraction(
         "author_name": _redact(author_name, settings) or "Unknown sender",
         "body": json.loads(message_text_for_log(body, settings, max_length=64000)) or "[empty]",
         "occurred_at": occurred_at.isoformat() if isinstance(occurred_at, datetime) else occurred_at,
-        "platform": "discord" if meta.get("origin") == "discord" else None,
+        "platform": meta.get("origin") if meta.get("origin") in ("discord", "slack", "teams") else ("discord" if meta.get("origin") == "discord" else None),
     }
     for field in ("switch_author_id", "thread_id", "workspace_id", "channel_id",
                   "external_message_id", "external_author_id"):
@@ -342,12 +342,13 @@ async def _approve_supabase_commitments(
         owner_id = source.get("switch_author_id") or source.get("author_name") or "room-member"
         now_iso = datetime.now(timezone.utc).isoformat()
         headers = _supabase_headers(settings)
-        # Ensure room platform is set to discord
+        # Ensure room platform is set appropriately
+        room_platform = meta.get("origin") if meta.get("origin") in ("discord", "slack", "teams") else "discord"
         await client.patch(
             _rest_url(settings, "rooms"),
             headers=headers,
             params={"tenant_id": f"eq.{tenant_id}", "id": f"eq.{internal_room_id}"},
-            json={"platform": "discord", "enabled": True},
+            json={"platform": room_platform, "enabled": True},
             timeout=10,
         )
         # Ensure sender is in room_members

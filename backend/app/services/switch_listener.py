@@ -248,6 +248,7 @@ class SwitchListener:
                             marker=content.get("com.switch.attachment_group")
                         extras=dict(attachments=payload.get("attachments") or [],attachment_group=marker,
                             sender_kind=payload.get("sender_kind"),bridge_id=data.get("bridge_id"))
+                    msg_platform = payload.get("platform") or data.get("platform")
                     message = (AttachmentMessage if document_event else IncomingMessage)(
                         tenant_id=self.settings.switch_tenant_id, room_id=data["room_id"],
                         message_id=payload.get("message_id"), sender=payload.get("sender"),
@@ -257,6 +258,7 @@ class SwitchListener:
                         workspace_id=payload.get("workspace_id"), channel_id=payload.get("channel_id"),
                         external_message_id=payload.get("external_message_id"),
                         external_author_id=payload.get("external_author_id"),
+                        platform=msg_platform,
                         registered_agent_id=self.settings.listener_agent_id,
                         registered_agent_name=self.registered_agent_name,
                         mentioned_agent_ids=targets,

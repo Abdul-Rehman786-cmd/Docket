@@ -62,7 +62,7 @@ class DocumentChat:
     def conversation_key(settings, meta):
         meta = meta or {}
         sender = meta.get('switch_author_id')
-        if (meta.get('origin') != 'discord' or not meta.get('durable') or not meta.get('adapter_verified')
+        if (meta.get('origin') not in ('discord', 'slack', 'teams') or not meta.get('durable') or not meta.get('adapter_verified')
             or not isinstance(sender, str) or not sender or '[REDACTED' in sender or len(sender) > 512
             or re.search(r'\s', sender) or not meta.get('switch_message_id')
             or meta.get('room_id') not in settings.allowed_switch_rooms):

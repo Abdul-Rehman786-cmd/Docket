@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime,timedelta,timezone
 from app.models.reminders import NotificationFailure,NotificationEnvelope
-from app.services.reminder_planner import eligible,after_quiet_hours,utc
+from app.services.reminder_planner import eligible,after_quiet_hours,utc,is_meeting_on_slack
 from app.core.message_logging import message_text_for_log
 from app.core.feature_logging import feature_event
 
@@ -23,6 +23,7 @@ def dispatch_when(context,now):
     if (not eligible(work) or record.version!=intent.commitment_version or policy.version!=intent.policy_version
         or record.owner_switch_user_id!=intent.recipient_id):return None
     is_meeting=bool(re.search(r'\bmeeting\b',record.description,re.I))
+    if is_meeting_on_slack(work) and work.platform=='discord':return None
     if is_meeting and (intent.kind=='overdue' or now>=record.due_at):return None
     if intent.kind=='upcoming' and (now>=record.due_at or history.upcoming_sent):return None
     if intent.kind=='overdue' and (history.overdue_sent!=intent.ordinal or history.overdue_sent>=policy.max_followups):return None

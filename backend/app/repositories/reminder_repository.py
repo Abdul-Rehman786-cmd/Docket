@@ -49,7 +49,7 @@ class SupabaseReminderRepository(SupabaseCommitmentRepository):
             delivery_mode='room',
         )
 
-    async def _build_work_from_rest(self, client, c_row: dict, switch_room_id: str) -> ReminderWork:
+    async def _build_work_from_rest(self, client, c_row: dict, switch_room_id: str, platform: str = 'discord') -> ReminderWork:
         now_dt = datetime.now(timezone.utc)
         now_iso = now_dt.isoformat()
         owner_id = c_row.get('owner_switch_user_id') or c_row.get('owner_name') or 'room-member'
@@ -144,14 +144,32 @@ class SupabaseReminderRepository(SupabaseCommitmentRepository):
             last_room_sent_at=max(sent_times) if sent_times else None,
             blocking_delivery=blocking,
         )
+        is_meeting = bool(re.search(r'\bmeeting\b', c_row.get('description', ''), re.I))
+        is_slack_meeting = is_meeting and (platform == 'slack' or bool(re.search(r'\bslack\b', c_row.get('description', ''), re.I)))
+        work_room = switch_room_id
+        work_platform = platform or 'discord'
+        if is_slack_meeting and work_platform == 'discord':
+            r_resp = await client.get(
+                _rest_url(self.settings, 'rooms'),
+                headers=_supabase_headers(self.settings),
+                params={'tenant_id': f"eq.{c_row.get('tenant_id')}", 'platform': 'eq.slack', 'enabled': 'eq.true'},
+                timeout=10,
+            )
+            slack_rooms = r_resp.json() if r_resp.status_code == 200 else []
+            for sr in slack_rooms:
+                if sr.get('switch_room_id') in self.settings.allowed_switch_rooms:
+                    work_room = sr['switch_room_id']
+                    work_platform = 'slack'
+                    break
+
         return ReminderWork(
             commitment=comm,
             policy=policy,
             history=history,
             room_enabled=True,
             assignee_is_member=True,
-            switch_room_id=switch_room_id,
-            platform='discord',
+            switch_room_id=work_room,
+            platform=work_platform,
             thread_id=None,
         )
 
@@ -180,6 +198,10 @@ class SupabaseReminderRepository(SupabaseCommitmentRepository):
                 for r in rooms
                 if r.get('switch_room_id') in self.settings.allowed_switch_rooms
             }
+            room_platform_map = {
+                str(r['id']): r.get('platform', 'discord')
+                for r in rooms
+            }
             if not room_map:
                 return [], None
 
@@ -205,7 +227,8 @@ class SupabaseReminderRepository(SupabaseCommitmentRepository):
                 sw_room = room_map.get(str(c_row.get('room_id')))
                 if not sw_room:
                     continue
-                work_items.append(await self._build_work_from_rest(client, c_row, sw_room))
+                r_plat = room_platform_map.get(str(c_row.get('room_id')), 'discord')
+                work_items.append(await self._build_work_from_rest(client, c_row, sw_room, platform=r_plat))
             next_cursor = work_items[-1].commitment.id if len(c_rows) == limit and work_items else None
             return work_items, next_cursor
 
@@ -395,7 +418,8 @@ class SupabaseReminderRepository(SupabaseCommitmentRepository):
             r_rows = r_resp.json() if r_resp.status_code == 200 else []
             if not r_rows:
                 return None
-            work_obj = await self._build_work_from_rest(client, c_rows[0], r_rows[0]['switch_room_id'])
+            r_plat = r_rows[0].get('platform', 'discord')
+            work_obj = await self._build_work_from_rest(client, c_rows[0], r_rows[0]['switch_room_id'], platform=r_plat)
             return DispatchContext(delivery=d_obj, work=work_obj)
 
     async def begin(self, delivery, body):

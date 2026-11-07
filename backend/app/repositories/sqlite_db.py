@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS rooms (
     tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     switch_room_id TEXT NOT NULL UNIQUE,
     name TEXT,
+    platform TEXT DEFAULT 'discord',
     created_at TEXT DEFAULT (DATETIME('now')),
     UNIQUE (tenant_id, id)
 );
@@ -283,6 +284,11 @@ def init_sqlite_db(settings: Settings | None = None) -> None:
     """Initialize schema in the user-selected SQLite database and ensure schema migrations."""
     with get_sqlite_connection(settings) as conn:
         conn.executescript(SCHEMA_SQL)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(rooms);")
+        room_cols = {col[1] for col in cursor.fetchall()}
+        if "platform" not in room_cols:
+            conn.execute("ALTER TABLE rooms ADD COLUMN platform TEXT DEFAULT 'discord';")
         from app.repositories.sqlite_profiles import initialize
         initialize(conn)
         cursor = conn.cursor()

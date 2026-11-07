@@ -31,7 +31,7 @@ class AttachmentMessage(IncomingMessage):
     attachments: list[SwitchAttachment] = Field(default_factory=list,max_length=100,repr=False)
     attachment_group: AttachmentGroup | None = None
     sender_kind: str | None = Field(default=None,max_length=50)
-    platform: Literal["discord"] = "discord"
+    platform: Literal["discord", "slack", "teams"] = "discord"
     bridge_id: str | None = Field(default=None,max_length=512)
 
     @field_validator("attachment_group",mode="before")

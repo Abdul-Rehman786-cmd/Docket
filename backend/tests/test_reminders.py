@@ -174,9 +174,46 @@ def test_ineligible_task_states(changes):
     assert plan_reminder(w,NOW) is None
 
 
-@pytest.mark.parametrize('field,value',[('room_enabled',False),('assignee_is_member',False),('platform','slack')])
+@pytest.mark.parametrize('field,value',[('room_enabled',False),('assignee_is_member',False),('platform','unknown_platform')])
 def test_scope_and_membership_eligibility(field,value):
     assert plan_reminder(sample().model_copy(update={field:value}),NOW) is None
+
+
+def test_slack_reminder_eligibility():
+    w = sample().model_copy(update={'platform': 'slack'})
+    assert plan_reminder(w, NOW) is not None
+
+
+def test_meeting_on_slack_routes_to_slack_not_discord():
+    # Meeting on Slack must not be sent on Discord
+    w_discord = sample().model_copy(update={
+        'platform': 'discord',
+        'commitment': sample().commitment.model_copy(update={'description': 'Team sync meeting on Slack'})
+    })
+    assert plan_reminder(w_discord, NOW) is None
+
+    # Meeting on Slack must be sent on Slack
+    w_slack = sample().model_copy(update={
+        'platform': 'slack',
+        'commitment': sample().commitment.model_copy(update={'description': 'Team sync meeting on Slack'})
+    })
+    assert plan_reminder(w_slack, NOW) is not None
+
+
+def test_meeting_on_discord_routes_to_discord_not_slack():
+    # Meeting on Discord must not be sent on Slack
+    w_slack = sample().model_copy(update={
+        'platform': 'slack',
+        'commitment': sample().commitment.model_copy(update={'description': 'Team sync meeting on Discord'})
+    })
+    assert plan_reminder(w_slack, NOW) is None
+
+    # Meeting on Discord must be sent on Discord
+    w_discord = sample().model_copy(update={
+        'platform': 'discord',
+        'commitment': sample().commitment.model_copy(update={'description': 'Team sync meeting on Discord'})
+    })
+    assert plan_reminder(w_discord, NOW) is not None
 
 
 def test_disabled_missing_timezone_and_cadence_limits():

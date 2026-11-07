@@ -511,8 +511,8 @@ class AIService:
             "addressed": message.addressed,
             "body": message.body,
             "switch_author_id": redact_source_identifier(message.sender, settings),
-            # Only Discord-originated messages may produce a Discord reply.
-            "origin": "discord",
+            # Preserve origin platform (default to discord)
+            "origin": (message.platform or message.origin or "discord").lower(),
         }
         await self.submit(
             AskRequest(
@@ -784,7 +784,7 @@ class AIService:
             msg_timestamp = source_meta.get("timestamp_ms") if source_meta else None
             document_followup = self.document_chat.has_active_conversation(settings, source_meta)
             job = await self.journal.get(msg_ref) if source_meta and source_meta.get("durable") else None
-            if (source_meta and source_meta.get('origin')=='discord' and source_meta.get('durable')
+            if (source_meta and source_meta.get('origin') in ('discord', 'slack', 'teams') and source_meta.get('durable')
                 and source_meta.get('switch_author_id') and source_meta.get('room_id') in settings.allowed_switch_rooms):
                 capture_input=personal_commitment(row.question,source_meta)
                 if capture_input:
@@ -794,7 +794,7 @@ class AIService:
                 settings.switch_reply_to_discord
                 and is_addressed
                 and source_meta
-                and source_meta.get("origin") == "discord"
+                and source_meta.get("origin") in ("discord", "slack", "teams")
                 and source_meta.get("room_id")
                 and not self.is_message_older_than_last_reply(msg_timestamp)
                 and not (job and job.get("decision"))
@@ -809,7 +809,7 @@ class AIService:
                 )
 
             async with asyncio.timeout(settings.switch_ai_timeout_seconds):
-                if ((is_addressed or document_followup) and source_meta and source_meta.get('origin') == 'discord'
+                if ((is_addressed or document_followup) and source_meta and source_meta.get('origin') in ('discord', 'slack', 'teams')
                     and not capture_input and not profile_question and not own_request_kind(row.question)
                     and not self.is_message_older_than_last_reply(msg_timestamp)):
                     async def document_synthesis(prompt):
@@ -932,7 +932,7 @@ class AIService:
                         )
                     )
 
-                    if is_addressed and source_meta and source_meta.get("origin") == "discord" and not (capture_input and decision.commitments):
+                    if is_addressed and source_meta and source_meta.get("origin") in ("discord", "slack", "teams") and not (capture_input and decision.commitments):
                         draft_key = confirmation_key(settings, meta['room_id'], meta.get('thread_id'), meta.get('switch_author_id'))
                         if draft_key is None:
                             raise HTTPException(422, 'Confirmation source identity is unavailable')
@@ -980,7 +980,7 @@ class AIService:
                     msg_timestamp = source_meta.get("timestamp_ms") if source_meta else None
                     if (
                         source_meta
-                        and source_meta.get("origin") == "discord"
+                        and source_meta.get("origin") in ("discord", "slack", "teams")
                         and self.is_message_older_than_last_reply(msg_timestamp)
                     ):
                         logger.info(
@@ -1079,7 +1079,7 @@ class AIService:
                 settings.switch_reply_to_discord
                 and is_addressed
                 and source_meta
-                and source_meta.get("origin") == "discord"
+                and source_meta.get("origin") in ("discord", "slack", "teams")
                 and source_meta.get("room_id")
                 and bool(final_answer and final_answer.strip())
             )

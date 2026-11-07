@@ -34,9 +34,39 @@ def after_quiet_hours(at,policy):
     return None
 
 
-def eligible(work):
-    return (work.room_enabled and work.assignee_is_member and work.platform=='discord' and
-            work.policy.enabled and policy_zone(work.policy) is not None and reminder_state(work.commitment).eligible)
+def meeting_target_platform(description: str, default_platform: str | None = None) -> str | None:
+    has_slack = bool(re.search(r'\bslack\b', description, re.I))
+    has_discord = bool(re.search(r'\bdiscord\b', description, re.I))
+    if has_slack and not has_discord:
+        return 'slack'
+    if has_discord and not has_slack:
+        return 'discord'
+    return default_platform
+
+
+def is_meeting_on_slack(work: ReminderWork) -> bool:
+    is_meeting = bool(re.search(r'\bmeeting\b', work.commitment.description, re.I))
+    if not is_meeting:
+        return False
+    return meeting_target_platform(work.commitment.description, work.platform) == 'slack'
+
+
+def is_meeting_on_discord(work: ReminderWork) -> bool:
+    is_meeting = bool(re.search(r'\bmeeting\b', work.commitment.description, re.I))
+    if not is_meeting:
+        return False
+    return meeting_target_platform(work.commitment.description, work.platform) == 'discord'
+
+
+def eligible(work: ReminderWork) -> bool:
+    if not (work.room_enabled and work.assignee_is_member and work.platform in ('discord', 'slack', 'teams') and
+            work.policy.enabled and policy_zone(work.policy) is not None and reminder_state(work.commitment).eligible):
+        return False
+    if is_meeting_on_slack(work) and work.platform == 'discord':
+        return False
+    if is_meeting_on_discord(work) and work.platform == 'slack':
+        return False
+    return True
 
 
 def plan_reminder(work:ReminderWork,now:datetime)->ReminderIntention|None:

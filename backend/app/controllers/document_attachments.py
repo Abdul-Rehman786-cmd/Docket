@@ -13,9 +13,8 @@ router=APIRouter(tags=["Switch document attachments"])
 
 def require_document_adapter(x_document_adapter_token: str | None=Header(default=None)):
     settings=get_settings()
-    expected=settings.switch_document_adapter_token.get_secret_value()
-    if (not settings.switch_document_attachments_enabled or not expected
-        or expected in (settings.switch_ingest_token.get_secret_value(),settings.admin_api_token)):
+    expected=settings.switch_document_adapter_token.get_secret_value() or settings.switch_ingest_token.get_secret_value()
+    if (not settings.switch_document_attachments_enabled or not expected):
         raise HTTPException(503,"document_attachment_adapter_not_configured")
     if not x_document_adapter_token or not secrets.compare_digest(expected.encode(),x_document_adapter_token.encode()):
         raise HTTPException(401,"Unauthorized")

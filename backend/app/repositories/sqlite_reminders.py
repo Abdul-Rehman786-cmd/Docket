@@ -1,6 +1,7 @@
 """SQLite reminder repository. Implements ReminderRepository protocol for embedded storage."""
 from datetime import datetime, timedelta, timezone
 import logging
+import re
 from uuid import UUID, uuid4
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -84,7 +85,8 @@ class SqliteReminderRepository:
                        COALESCE(c.owner_name, m.author_name) AS owner_name,
                        c.due_at, c.approval_status, c.task_status, c.created_at,
                        r.switch_room_id, 1 AS room_enabled,
-                       m.switch_author_id, NULL AS thread_id
+                       m.switch_author_id, NULL AS thread_id,
+                       COALESCE(r.platform, 'discord') AS platform
                 FROM commitments c
                 JOIN rooms r ON r.tenant_id = c.tenant_id AND r.id = c.room_id
                 JOIN messages m ON m.id = c.message_id
@@ -207,6 +209,17 @@ class SqliteReminderRepository:
                     updated_at=created_dt,
                 )
 
+                is_meeting = bool(re.search(r'\bmeeting\b', c_dict["description"], re.I))
+                is_slack_meeting = is_meeting and (c_dict.get("platform") == "slack" or bool(re.search(r'\bslack\b', c_dict["description"], re.I)))
+                switch_room = c_dict["switch_room_id"]
+                work_platform = c_dict.get("platform") or "discord"
+                if is_slack_meeting and work_platform == "discord":
+                    cursor.execute("SELECT switch_room_id FROM rooms WHERE tenant_id = ? AND platform = 'slack' LIMIT 1", (c_dict["tenant_id"],))
+                    slack_r = cursor.fetchone()
+                    if slack_r and slack_r[0] in self.settings.allowed_switch_rooms:
+                        switch_room = slack_r[0]
+                        work_platform = "slack"
+
                 items.append(
                     ReminderWork(
                         commitment=comm,
@@ -214,8 +227,8 @@ class SqliteReminderRepository:
                         history=history,
                         room_enabled=bool(c_dict.get("room_enabled", 1)),
                         assignee_is_member=True,
-                        switch_room_id=c_dict["switch_room_id"],
-                        platform="discord",
+                        switch_room_id=switch_room,
+                        platform=work_platform,
                         thread_id=c_dict.get("thread_id"),
                     )
                 )
@@ -363,7 +376,8 @@ class SqliteReminderRepository:
                        COALESCE(c.owner_name, m.author_name) AS owner_name,
                        c.due_at, c.approval_status, c.task_status, c.created_at,
                        r.switch_room_id, 1 AS room_enabled,
-                       m.switch_author_id, NULL AS thread_id
+                       m.switch_author_id, NULL AS thread_id,
+                       COALESCE(r.platform, 'discord') AS platform
                 FROM reminder_deliveries d
                 JOIN commitments c ON c.id = d.commitment_id
                 JOIN rooms r ON r.tenant_id = d.tenant_id AND r.id = d.room_id
@@ -435,14 +449,25 @@ class SqliteReminderRepository:
                 updated_at=created_dt,
             )
 
+            is_meeting = bool(re.search(r'\bmeeting\b', data["description"], re.I))
+            is_slack_meeting = is_meeting and (data.get("platform") == "slack" or bool(re.search(r'\bslack\b', data["description"], re.I)))
+            switch_room = data["switch_room_id"]
+            work_platform = data.get("platform") or "discord"
+            if is_slack_meeting and work_platform == "discord":
+                cursor.execute("SELECT switch_room_id FROM rooms WHERE tenant_id = ? AND platform = 'slack' LIMIT 1", (data["tenant_id"],))
+                slack_r = cursor.fetchone()
+                if slack_r and slack_r[0] in self.settings.allowed_switch_rooms:
+                    switch_room = slack_r[0]
+                    work_platform = "slack"
+
             work = ReminderWork(
                 commitment=comm,
                 policy=policy,
                 history=history,
                 room_enabled=bool(data.get("room_enabled", 1)),
                 assignee_is_member=True,
-                switch_room_id=data["switch_room_id"],
-                platform="discord",
+                switch_room_id=switch_room,
+                platform=work_platform,
                 thread_id=data.get("thread_id"),
             )
 

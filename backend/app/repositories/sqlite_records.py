@@ -54,7 +54,7 @@ def list_records(table: str, settings: Settings | None = None) -> list[dict]:
     return result
 
 
-def _ensure_tenant_and_room(conn, tenant_id: str, switch_room_id: str) -> str:
+def _ensure_tenant_and_room(conn, tenant_id: str, switch_room_id: str, platform: str = "discord") -> str:
     """Ensure tenant and room exist and return the internal room UUID."""
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM tenants WHERE id = ?", (tenant_id,))
@@ -65,17 +65,19 @@ def _ensure_tenant_and_room(conn, tenant_id: str, switch_room_id: str) -> str:
         )
 
     cursor.execute(
-        "SELECT id FROM rooms WHERE tenant_id = ? AND switch_room_id = ?",
+        "SELECT id, platform FROM rooms WHERE tenant_id = ? AND switch_room_id = ?",
         (tenant_id, switch_room_id),
     )
     row = cursor.fetchone()
     if row:
+        if platform and row[1] != platform:
+            cursor.execute("UPDATE rooms SET platform = ? WHERE id = ?", (platform, row[0]))
         return row[0]
 
     room_uuid = str(uuid4())
     cursor.execute(
-        "INSERT INTO rooms (id, tenant_id, switch_room_id, name, created_at) VALUES (?, ?, ?, ?, DATETIME('now'))",
-        (room_uuid, tenant_id, switch_room_id, f"Room {switch_room_id}"),
+        "INSERT INTO rooms (id, tenant_id, switch_room_id, name, platform, created_at) VALUES (?, ?, ?, ?, ?, DATETIME('now'))",
+        (room_uuid, tenant_id, switch_room_id, f"Room {switch_room_id}", platform),
     )
     return room_uuid
 
@@ -127,7 +129,8 @@ async def persist_extraction(
         with conn:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.cursor()
-            room_uuid = _ensure_tenant_and_room(conn, str_tenant_id, switch_room_id)
+            msg_platform = meta.get("origin") or meta.get("platform") or "discord"
+            room_uuid = _ensure_tenant_and_room(conn, str_tenant_id, switch_room_id, platform=msg_platform)
 
             cursor.execute(
                 "SELECT id FROM messages WHERE switch_message_id = ?",
