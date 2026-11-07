@@ -1,5 +1,10 @@
 # Team Memory Agent: Architecture and Implementation Plan
 
+For the current system overview, frontend/settings flow and incomplete integration
+boundaries, see [architecture diagrams](docs/architecture-diagram.md) and the
+[standalone SVG](docs/team-memory-architecture.svg). Solid paths show implemented
+relationships, not a guarantee of deployed or live-verified functionality.
+
 ## Consolidated fresh-install database
 
 `supabase/migrations/20261104000100_initial_schema.sql` is the sole active Supabase

@@ -1,0 +1,173 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1640" height="1740" viewBox="0 0 1640 1740" role="img" aria-labelledby="title desc">
+<title id="title">Team Memory architecture: frontend, settings and processing pipeline</title>
+<desc id="desc">Current code relationships with amber incomplete or gated features, red settings authorization gap, backend-only storage and a future-work panel. See architecture-diagram.md for detailed editable Mermaid diagrams.</desc>
+<defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto-start-reverse"><path d="M0 0L9 4.5L0 9Z" fill="#64748b"/></marker></defs>
+<style>text{font-family:Segoe UI,Arial,sans-serif} .title{font-size:34px;font-weight:700;fill:#122238}.sub{font-size:18px;fill:#52657b}.section{font-size:17px;font-weight:700;letter-spacing:1.2px;fill:#52657b}.name{font-size:21px;font-weight:650;fill:#17324e}.body{font-size:17px;fill:#45576e}.edge{fill:none;stroke:#64748b;stroke-width:2;marker-end:url(#arrow)}.label{font-size:15px;fill:#52657b}.small{font-size:16px;fill:#52657b}</style>
+<rect width="1640" height="1740" fill="#f8fafc"/>
+
+<text x="40" y="56" class="title">TEAM MEMORY</text>
+<text x="40" y="89" class="sub">Application architecture | frontend + settings + durable chat processing</text>
+<text x="40" y="131" class="section">01  CHAT INTEGRATION</text>
+<text x="1100" y="131" class="section">02  FRONTEND</text>
+<rect x="40" y="155" width="190" height="115" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="58" y="186" class="name">Discord</text>
+<text x="58" y="214" class="body">Messages / uploads</text>
+<text x="58" y="237" class="body">PDF save reported</text>
+<rect x="250" y="155" width="220" height="115" rx="14" fill="#fff7e6" stroke="#d3a246" stroke-width="1.6"/>
+<text x="268" y="186" class="name">Slack</text>
+<text x="268" y="214" class="body">Chat connected</text>
+<text x="268" y="237" class="body">Documents incomplete</text>
+<rect x="500" y="155" width="230" height="115" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="518" y="186" class="name">Switch</text>
+<text x="518" y="214" class="body">Existing bridges</text>
+<text x="518" y="237" class="body">Scoped chat rooms</text>
+<rect x="760" y="155" width="300" height="115" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="778" y="186" class="name">Non-AI listener</text>
+<text x="778" y="214" class="body">Source + addressing metadata</text>
+<text x="778" y="237" class="body">One live connection</text>
+<path d="M135 270V305H615V270" class="edge"/>
+<path d="M470 212H500" class="edge"/>
+<path d="M730 212H760" class="edge"/>
+<rect x="1100" y="155" width="500" height="95" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="1118" y="186" class="name">Browser viewer</text>
+<text x="1118" y="214" class="body">Feed, Ask Codex and Settings</text>
+<rect x="1100" y="270" width="500" height="80" rx="14" fill="#fff7e6" stroke="#d3a246" stroke-width="1.6"/>
+<text x="1118" y="301" class="name">Expo mobile</text>
+<text x="1118" y="329" class="body">Health check only; full product UI pending</text>
+<rect x="40" y="340" width="1020" height="885" rx="14" fill="#eef3fa" stroke="#b9cbe1" stroke-width="1.6"/>
+<text x="63" y="373" class="section">03  FASTAPI  /  CONTROLLERS ? SERVICES ? REPOSITORIES</text>
+<rect x="70" y="395" width="960" height="95" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="88" y="426" class="name">Ingress and frontend API</text>
+<text x="88" y="454" class="body">Validated models, ingest / adapter credentials, tenant and room scope; authenticated feed</text>
+<path d="M910 270V395" class="edge"/>
+<path d="M1100 203H1080V425H1030" class="edge"/>
+<path d="M1100 310H1080V455H1030" class="edge"/>
+<rect x="70" y="535" width="285" height="100" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="88" y="566" class="name">Durable ingestion</text>
+<text x="88" y="594" class="body">Receipt, retry and replay</text>
+<text x="88" y="617" class="body">Source identity preserved</text>
+<rect x="390" y="535" width="300" height="100" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="408" y="566" class="name">AI orchestration</text>
+<text x="408" y="594" class="body">Structured proposals</text>
+<text x="408" y="617" class="body">Reply / confirmation policy</text>
+<rect x="725" y="535" width="305" height="100" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="743" y="566" class="name">Private AI gateway</text>
+<text x="743" y="594" class="body">Calls Codex via Switch</text>
+<text x="743" y="617" class="body">Model in private Switch room</text>
+<path d="M212 490V535" class="edge"/>
+<path d="M355 585H390" class="edge"/>
+<path d="M690 585H725" class="edge"/>
+<path d="M725 610H690" class="edge"/>
+<rect x="70" y="690" width="285" height="140" rx="14" fill="#fff7e6" stroke="#d3a246" stroke-width="1.6"/>
+<text x="88" y="721" class="name">Tasks and memory</text>
+<text x="88" y="749" class="body">Tagged owner commitment</text>
+<text x="88" y="772" class="body">Facts / decisions / summaries</text>
+<text x="88" y="795" class="body">Lifecycle, versions and audit</text>
+<text x="88" y="818" class="body">Actions separately gated</text>
+<rect x="390" y="690" width="300" height="140" rx="14" fill="#fff7e6" stroke="#d3a246" stroke-width="1.6"/>
+<text x="408" y="721" class="name">Document service</text>
+<text x="408" y="749" class="body">Uploader consent + parsing</text>
+<text x="408" y="772" class="body">Versions, chunks, publication</text>
+<text x="408" y="795" class="body">Discord Q&amp;A adapter blocked</text>
+<text x="408" y="818" class="body">Slack integration incomplete</text>
+<rect x="725" y="690" width="305" height="140" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="743" y="721" class="name">Person profiles</text>
+<text x="743" y="749" class="body">Optional source-backed claims</text>
+<text x="743" y="772" class="body">Corrections and evidence</text>
+<text x="743" y="795" class="body">Sender / tenant / room scope</text>
+<path d="M540 635V665H212V690" class="edge"/>
+<path d="M540 635V690" class="edge"/>
+<path d="M540 665H877V690" class="edge"/>
+<rect x="70" y="880" width="285" height="125" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="88" y="911" class="name">Embedding workers</text>
+<text x="88" y="939" class="body">Local gte-small / 384D</text>
+<text x="88" y="962" class="body">Separate memory + chunk jobs</text>
+<text x="88" y="985" class="body">Leases, retries, stale guards</text>
+<rect x="390" y="880" width="300" height="125" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="408" y="911" class="name">Scoped retrieval</text>
+<text x="408" y="939" class="body">Current vectors and versions</text>
+<text x="408" y="962" class="body">Source / document citations</text>
+<text x="408" y="985" class="body">Context back to private AI</text>
+<rect x="725" y="880" width="305" height="125" rx="14" fill="#fff7e6" stroke="#d3a246" stroke-width="1.6"/>
+<text x="743" y="911" class="name">Reminder planning</text>
+<text x="743" y="939" class="body">Eligibility, timezone, cadence</text>
+<text x="743" y="962" class="body">Quiet hours and versioning</text>
+<text x="743" y="985" class="body">Scheduler ? durable intentions</text>
+<path d="M212 830V880" class="edge"/>
+<path d="M540 830V880" class="edge"/>
+<path d="M877 830V880" class="edge"/>
+<rect x="70" y="1070" width="620" height="115" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="88" y="1101" class="name">Repositories and atomic operations</text>
+<text x="88" y="1129" class="body">Scoped reads; source + task / memory or document imports</text>
+<text x="88" y="1152" class="body">Expected versions, idempotency, audit and memory synchronization</text>
+<rect x="725" y="1070" width="305" height="115" rx="14" fill="#fff7e6" stroke="#d3a246" stroke-width="1.6"/>
+<text x="743" y="1101" class="name">Outbox and dispatcher</text>
+<text x="743" y="1129" class="body">Claim / recheck / send / ack</text>
+<text x="743" y="1152" class="body">Non-AI Switch ? original chat</text>
+<text x="743" y="1175" class="body">Policy-gated external delivery</text>
+<path d="M212 1005V1070" class="edge"/>
+<path d="M540 1070V1005" class="edge"/>
+<path d="M877 1005V1070" class="edge"/>
+<path d="M725 1128H690" class="edge"/>
+<path d="M1030 1100H1070V292H700V270" class="edge"/>
+<rect x="1100" y="395" width="500" height="645" rx="14" fill="#fff1f2" stroke="#dc8294" stroke-width="1.6"/>
+<text x="1118" y="426" class="name">Settings ? backend actions</text>
+<text x="1120" y="469" class="name">Database engine + directory</text>
+<text x="1120" y="495" class="small">Repository selection via /viewer/env</text>
+<line x1="1120" y1="511" x2="1580" y2="511" stroke="#edc5cd"/>
+<text x="1120" y="546" class="name">Migrate to SQLite</text>
+<text x="1120" y="572" class="small">Migration service via /viewer/migrate-db</text>
+<line x1="1120" y1="588" x2="1580" y2="588" stroke="#edc5cd"/>
+<text x="1120" y="623" class="name">Meeting and task reminders</text>
+<text x="1120" y="649" class="small">Flags + room policy; enable / lead time</text>
+<line x1="1120" y1="665" x2="1580" y2="665" stroke="#edc5cd"/>
+<text x="1120" y="700" class="name">Retention timeline</text>
+<text x="1120" y="726" class="small">Storage service + periodic cleanup</text>
+<line x1="1120" y1="742" x2="1580" y2="742" stroke="#edc5cd"/>
+<text x="1120" y="777" class="name">SQLite maximum space</text>
+<text x="1120" y="803" class="small">Quota enforcement + usage metrics</text>
+<line x1="1120" y1="819" x2="1580" y2="819" stroke="#edc5cd"/>
+<text x="1120" y="854" class="name">Environment configuration</text>
+<text x="1120" y="880" class="small">Local controls; credentials remain backend-only</text>
+<line x1="1120" y1="896" x2="1580" y2="896" stroke="#edc5cd"/>
+<text x="1120" y="982" class="section">AUTHORIZATION GAP</text>
+<text x="1120" y="1009" class="body">Protect settings routes before public deployment.</text>
+<path d="M1100 445H1030" class="edge"/>
+<rect x="1100" y="1070" width="500" height="115" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="1118" y="1101" class="name">Configuration and policies</text>
+<text x="1118" y="1129" class="body">Ignored backend .env / approved deployment secrets</text>
+<text x="1118" y="1152" class="body">Database room policies ? workers and supported adapters</text>
+<path d="M1350 1040V1070" class="edge"/>
+<path d="M1100 1145H1030" class="edge"/>
+<text x="40" y="1273" class="section">04  BACKEND-ONLY PERSISTENCE</text>
+<rect x="40" y="1300" width="470" height="170" rx="14" fill="#eef8f6" stroke="#8bbcb4" stroke-width="1.6"/>
+<text x="58" y="1331" class="name">Supabase / PostgreSQL</text>
+<text x="58" y="1359" class="body">Sources, commitments, decisions and memories</text>
+<text x="58" y="1382" class="body">Documents / versions / chunks / vectors</text>
+<text x="58" y="1405" class="body">Audit, policies and durable delivery records</text>
+<text x="58" y="1428" class="body">Documents and lifecycle still depend on cloud</text>
+<rect x="535" y="1300" width="525" height="170" rx="14" fill="#fff7e6" stroke="#d3a246" stroke-width="1.6"/>
+<text x="553" y="1331" class="name">SQLite engine adapters</text>
+<text x="553" y="1359" class="body">Records, memory vectors, profiles and reminders</text>
+<text x="553" y="1382" class="body">Retention, quota and cloud-to-local copy tooling</text>
+<text x="553" y="1405" class="body">Selected modules only; not full engine parity</text>
+<text x="553" y="1428" class="body">No continuous two-way synchronization</text>
+<rect x="1100" y="1230" width="500" height="110" rx="14" fill="#eef8f6" stroke="#8bbcb4" stroke-width="1.6"/>
+<text x="1118" y="1261" class="name">Local durable journals</text>
+<text x="1118" y="1289" class="body">Ingestion, consent, recovery and document reply outbox</text>
+<text x="1118" y="1312" class="body">Separate from the selected application database</text>
+<path d="M220 1185V1300" class="edge"/>
+<path d="M590 1185V1250H797V1300" class="edge"/>
+<path d="M1060 1210H1080V1285H1100" class="edge"/>
+<rect x="1100" y="1360" width="500" height="170" rx="14" fill="#f1f5f9" stroke="#9cacc0" stroke-width="1.6" stroke-dasharray="7 5"/>
+<text x="1118" y="1391" class="name">Future work</text>
+<text x="1118" y="1419" class="body">Full authenticated mobile / web product screens</text>
+<text x="1118" y="1442" class="body">Document conflicts, approval and safe write-back</text>
+<text x="1118" y="1465" class="body">Protected preferences and recording controls</text>
+<text x="1118" y="1488" class="body">Multi-workspace onboarding</text>
+<rect x="40" y="1555" width="1560" height="145" rx="14" fill="#fff" stroke="#ccd8e6" stroke-width="1.6"/>
+<text x="62" y="1587" class="section">HOW TO READ THIS DIAGRAM</text>
+<text x="62" y="1618" class="body">Solid paths = code relationships, not hosted verification. Amber = incomplete or policy-gated. Red = security gap.</text>
+<text x="62" y="1648" class="body">Current evidence: Discord PDF save reported; cited retrieval blocked by adapter setup; Slack documents unfinished.</text>
+<text x="62" y="1677" class="body">Fresh-install SQL resets tables. Existing hosted data requires reviewed non-destructive upgrades and approval.</text>
+</svg>
