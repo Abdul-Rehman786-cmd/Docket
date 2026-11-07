@@ -126,8 +126,9 @@ Switch operations log allow-listed operation names, status, duration and attempt
 without remote payloads or credentials. Read-only metadata/history operations retry
 one transport or HTTP 502/503/504 failure after 250 ms, within the existing request
 timeout. Authorization, validation, rate-limit and connection-ownership errors do
-not retry. Sends never retry in this transport; the legacy direct-message fallback
-is used only for an explicit unknown-operation (404) response. Stream failures
+not retry. Room replies use the documented `/agents/{id}/message` endpoint with
+explicit room routing in one attempt; `post_message` requires a connection-bound
+room and does not accept `room_id`. Sends never retry in this transport. Stream failures
 have separate diagnostic events. Existing durable recovery remains bounded and
 retains its 30-second delay for failures that cannot recover in place. Starting
 a new processing attempt clears stale errors in the viewer result.

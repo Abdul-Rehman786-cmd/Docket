@@ -77,3 +77,28 @@ def test_uncertain_sends_are_never_retried_or_sent_through_fallback(monkeypatch,
             await SwitchAPI("https://fixture.invalid", "agent", "fixture-key").post_room_message("room", "fixture-private-secret")
         assert len(calls) == 1
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("thread_id", [None, "fixture-thread"])
+def test_room_reply_uses_documented_direct_endpoint_once(monkeypatch, thread_id):
+    async def run():
+        calls = []
+        async def handle(request):
+            import json
+            calls.append(request)
+            assert request.url.path == "/agents/agent/message"
+            expected = {"room_id": "fixture-room", "content": "fixture answer"}
+            if thread_id:
+                expected["thread_id"] = thread_id
+            assert json.loads(request.content) == expected
+            return httpx.Response(201, json={"event_id": "fixture-event"})
+        @asynccontextmanager
+        async def http(self):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+                yield client
+        monkeypatch.setattr(SwitchAPI, "http", http)
+        result = await SwitchAPI("https://fixture.invalid", "agent", "fixture-key").post_room_message(
+            "fixture-room", "fixture answer", thread_id)
+        assert result == {"event_id": "fixture-event"}
+        assert len(calls) == 1
+    asyncio.run(run())

@@ -82,29 +82,34 @@ class SwitchAPI:
     async def post_room_message(self, room_id: str, body: str, thread_id: str | None = None) -> dict:
         """Post a message to a Switch room so it relays to bridged channels (e.g. Discord)."""
         async with self.http() as client:
-            payload = {"room_id": room_id, "body": body}
+            # The operation uses a connection-bound room and rejects room_id.
+            # The documented direct endpoint accepts explicit room routing.
+            payload = {"room_id": room_id, "content": body}
             if thread_id:
                 payload["thread_id"] = thread_id
+            started = perf_counter()
             try:
-                return await self.operation(client, "post_message", payload)
-            except SwitchError as error:
-                if error.status_code != 404:
-                    raise
-                # Fallback to direct /message endpoint if ops/post_message is not mapped
-                direct_payload = {"room_id": room_id, "content": body, "body": body}
-                if thread_id:
-                    direct_payload["thread_id"] = thread_id
                 response = await client.post(
                     self.base_url + self.agent_path + "/message",
                     headers=self.headers,
-                    json=direct_payload,
+                    json=payload,
                 )
-                if response.status_code in (200, 201):
-                    try:
-                        return response.json()
-                    except Exception:
-                        return {"status": "ok"}
-                raise SwitchError("Switch failed to post the room message.")
+            except httpx.TransportError:
+                logger.warning("stage=switch_reply_http reason=transport_error elapsed_ms=%d",
+                               (perf_counter() - started) * 1000)
+                raise SwitchError("Switch reply transport failed; delivery is uncertain.") from None
+            logger.log(logging.INFO if response.status_code in (200, 201) else logging.WARNING,
+                       "stage=switch_reply_http http_status=%d elapsed_ms=%d",
+                       response.status_code, (perf_counter() - started) * 1000)
+            if response.status_code not in (200, 201):
+                raise SwitchError("Switch failed to post the room message.", status_code=response.status_code)
+            try:
+                result = response.json()
+                if not isinstance(result, dict):
+                    raise ValueError
+                return result
+            except (ValueError, TypeError):
+                raise SwitchError("Switch returned an invalid reply acknowledgement; delivery is uncertain.") from None
 
     @asynccontextmanager
     async def room_connection(self, room_id: str):
